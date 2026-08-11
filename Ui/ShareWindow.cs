@@ -428,7 +428,13 @@ public sealed class ShareWindow : Window, IDisposable
             if (mediaSession.HostQueueDrops > 0)
             {
                 ImGui.TextColored(WarnColor,
-                    $"{mediaSession.HostQueueDrops} chunks dropped before sending - upload can't keep up with the configured bitrate.");
+                    $"{mediaSession.HostQueueDrops} video chunks dropped before sending - upload can't keep up with the configured bitrate.");
+            }
+
+            if (mediaSession.HostQueueAudioDrops > 0)
+            {
+                ImGui.TextColored(WarnColor,
+                    $"{mediaSession.HostQueueAudioDrops} audio packets dropped before sending - upload can't keep up even with audio's own queue.");
             }
 
             if (mediaSession.HostVideoError is { } hostVideoError)

@@ -71,9 +71,16 @@ public sealed class MediaSessionService : IDisposable
     public long HostEncodedBytes => videoEncoder?.EncodedBytes ?? 0;
 
     /// <summary>See MediaSocketClient.DroppedMessages - non-zero here means this connection's
-    /// upload can't keep up with the configured bitrate, distinct from HostFramesSkipped (which
-    /// only measures whether GPU capture/readback is keeping up, not whether the network is).</summary>
+    /// upload can't keep up with the configured VIDEO bitrate, distinct from HostFramesSkipped
+    /// (which only measures whether GPU capture/readback is keeping up, not whether the network
+    /// is) and from <see cref="HostQueueAudioDrops"/> (audio has its own queue now).</summary>
     public long HostQueueDrops => socket?.DroppedMessages ?? 0;
+
+    /// <summary>See MediaSocketClient.DroppedAudioMessages - audio has its own send queue,
+    /// separate from video, specifically so video backpressure can't crowd it out; non-zero here
+    /// means audio itself is being throttled (e.g. genuinely insufficient upload bandwidth for
+    /// even the small audio stream), not just competing with video for the same queue.</summary>
+    public long HostQueueAudioDrops => socket?.DroppedAudioMessages ?? 0;
 
     public GpuVendor? HostVendor => videoEncoder?.Vendor;
 
