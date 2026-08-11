@@ -26,6 +26,7 @@ public sealed class Plugin : IDalamudPlugin
         shareWindow = new ShareWindow();
         windowSystem.AddWindow(shareWindow);
         windowSystem.AddWindow(shareWindow.StreamView);
+        windowSystem.AddWindow(shareWindow.Settings);
 
         ServiceCollector.Commands.AddHandler("/screenshare",
             new Dalamud.Game.Command.CommandInfo((_, _) => shareWindow.IsOpen = true)
@@ -33,6 +34,14 @@ public sealed class Plugin : IDalamudPlugin
 
         ServiceCollector.PI.UiBuilder.Draw += windowSystem.Draw;
         ServiceCollector.PI.UiBuilder.OpenMainUi += () => shareWindow.IsOpen = true;
+
+        // Without this, Dalamud's plugin installer flags the plugin ("does not register a config
+        // UI callback") since it has no way to know the streaming-settings window even exists.
+        ServiceCollector.PI.UiBuilder.OpenConfigUi += () =>
+        {
+            shareWindow.Settings.IsOpen = true;
+            shareWindow.Settings.BringToFront();
+        };
 
         ServiceCollector.PluginLog.Information("ScreenShare plugin loaded.");
     }

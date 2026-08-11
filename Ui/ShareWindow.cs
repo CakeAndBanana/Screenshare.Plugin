@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
@@ -6,7 +5,6 @@ using Dalamud.Interface.Windowing;
 using Microsoft.AspNetCore.SignalR.Client;
 using ScreenShare.Plugin.Capture.AudioCapture;
 using ScreenShare.Plugin.Capture.ScreenCapture;
-using ScreenShare.Plugin.Encoding;
 using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
@@ -26,39 +24,8 @@ public sealed class ShareWindow : Window, IDisposable
     private RawTextureWrap? previewTexture;
     private string? streamSetupError;
 
-    // Which monitor to capture, indexed the same way DesktopDuplicationCapture's own outputIndex
-    // is. Enumerating candidates needs a live D3D11 device (outputs are scoped to a specific
-    // adapter), so the list only gets (re)built while the picker is actually open.
-    private int monitorIndex = ServiceCollector.Config.MonitorIndex;
-    private List<(int Index, string Label)> monitorCandidates = [];
-
-    // Capture mode: whole monitor (DesktopDuplicationCapture) vs. one specific window
-    // (WindowCapture). The target window handle itself is never persisted - only meaningful
-    // within a session, unlike the monitor index above - so it always starts unset.
-    private bool captureWindowMode = ServiceCollector.Config.CaptureWindowMode;
-    private nint selectedWindowHandle;
-    private List<(nint Handle, string Label)> windowCandidates = [];
-    private DateTime lastWindowListRefresh = DateTime.MinValue;
-
     private IAudioSource? audioCapture;
     private string? audioError;
-    private int audioBitrateKbps = ServiceCollector.Config.AudioBitrateKbps;
-
-    // Audio source picker: null = system audio (all), otherwise capture just this one process
-    // (and its child-process tree - matters for browsers, whose audio usually renders in a
-    // child/renderer process). The candidate list is refreshed on a throttle, not every frame -
-    // enumerating every running process is cheap but not THAT cheap.
-    private int? audioSourceProcessId;
-    private List<(int Pid, string Label)> audioSourceCandidates = [];
-    private DateTime lastAudioSourceRefresh = DateTime.MinValue;
-
-    private static readonly string[] VideoResolutionLabels = ["480p", "720p", "1080p", "Native"];
-    private static readonly int[] VideoResolutionHeights = [480, 720, 1080, int.MaxValue];
-    private int videoResolutionIndex = ServiceCollector.Config.VideoResolutionIndex;
-    private int videoBitrateKbps = ServiceCollector.Config.VideoBitrateKbps;
-    private int videoFpsTarget = ServiceCollector.Config.VideoFpsTarget;
-    private static readonly string[] VideoCodecLabels = ["H.264", "HEVC (H.265)"];
-    private int videoCodecIndex = ServiceCollector.Config.VideoCodecIndex;
 
     private readonly RoomSessionService roomSession = new();
     private readonly MediaSessionService mediaSession = new();
@@ -79,16 +46,39 @@ public sealed class ShareWindow : Window, IDisposable
     /// StreamView just renders what it's given and reports back when the user closes it.</summary>
     public StreamViewWindow StreamView { get; }
 
+    /// <summary>Streaming settings, as their own window rather than embedded in the room screen -
+    /// reachable regardless of connection/room state, and registered as the plugin's config UI in
+    /// Plugin.cs (Dalamud flags a plugin that never wires UiBuilder.OpenConfigUi). ShareWindow
+    /// still owns the actual capture/audio session objects; this window only owns the settings UI
+    /// and picker enumeration, consumed here via its public properties whenever a stream starts.</summary>
+    public SettingsWindow Settings { get; }
+
     public ShareWindow() : base("Screen Share###ScreenShareMainWindow")
     {
         Size = new Vector2(560, 560);
         SizeCondition = ImGuiCond.FirstUseEver;
         StreamView = new StreamViewWindow(roomSession, mediaSession, () => previewTexture, StopWatching);
+        Settings = new SettingsWindow(
+            isStreaming: () => screenCapture is not null,
+            isAudioCapturing: () => audioCapture is not null,
+            applyLiveAudioBitrate: bps =>
+            {
+                if (audioCapture is not null)
+                    mediaSession.UpdateAudioSource(audioCapture, bps);
+            });
     }
 
     public override void Draw()
     {
         HandleViewerMediaLifecycle();
+
+        if (ImGui.Button("Settings"))
+        {
+            Settings.IsOpen = true;
+            Settings.BringToFront();
+        }
+
+        ImGui.Separator();
 
         if (roomSession.State != HubConnectionState.Connected)
         {
@@ -309,9 +299,10 @@ public sealed class ShareWindow : Window, IDisposable
             StopWatching();
     }
 
-    /// <summary>Start/stop streaming plus the streaming settings, collapsed by default - these
-    /// only matter right before starting a stream, so they shouldn't compete for space with the
-    /// room/member UI the rest of the time.</summary>
+    /// <summary>Start/stop streaming and audio capture - the actual streaming SETTINGS
+    /// (capture source, resolution/bitrate/fps/codec, audio source/bitrate) live in
+    /// <see cref="Settings"/> now, reachable via the button at the top of this window regardless
+    /// of room state, rather than a collapsed section buried in the room screen.</summary>
     private void DrawStreamingSection()
     {
         if (ImGui.Button(mediaSession.IsHosting ? "Stop streaming to room" : "Start streaming to room"))
@@ -327,290 +318,6 @@ public sealed class ShareWindow : Window, IDisposable
             ImGui.TextColored(ErrorColor, streamSetupError);
 
         DrawAudioStatus();
-
-        if (ImGui.CollapsingHeader("Streaming settings"))
-            DrawStreamingSettings();
-    }
-
-    /// <summary>Number fields use InputInt (type a value, or use the +/- buttons) rather than
-    /// sliders - a drag bar was hard to land on an exact value with. Each one saves to disk via
-    /// <see cref="IsItemDeactivatedAfterEdit"/> so typing doesn't write on every keystroke, only
-    /// once you tab/click away with a finished value.</summary>
-    private void DrawStreamingSettings()
-    {
-        DrawCaptureModePicker();
-
-        ImGui.SetNextItemWidth(100);
-        ImGui.Combo("Resolution", ref videoResolutionIndex, VideoResolutionLabels, VideoResolutionLabels.Length);
-        if (ImGui.IsItemDeactivatedAfterEdit())
-            SaveStreamingSettings();
-
-        ImGui.SetNextItemWidth(150);
-        if (ImGui.InputInt("Video bitrate (kbps)", ref videoBitrateKbps, 100, 500))
-            videoBitrateKbps = Math.Clamp(videoBitrateKbps, 500, 6000);
-        if (ImGui.IsItemDeactivatedAfterEdit())
-            SaveStreamingSettings();
-
-        ImGui.SetNextItemWidth(150);
-        if (ImGui.InputInt("Target FPS", ref videoFpsTarget, 1, 5))
-            videoFpsTarget = Math.Clamp(videoFpsTarget, 5, 60);
-        if (ImGui.IsItemDeactivatedAfterEdit())
-            SaveStreamingSettings();
-
-        ImGui.SetNextItemWidth(150);
-        ImGui.Combo("Codec", ref videoCodecIndex, VideoCodecLabels, VideoCodecLabels.Length);
-        if (ImGui.IsItemDeactivatedAfterEdit())
-            SaveStreamingSettings();
-
-        ImGui.SetNextItemWidth(150);
-        if (ImGui.InputInt("Audio bitrate (kbps)", ref audioBitrateKbps, 1, 8))
-        {
-            audioBitrateKbps = Math.Clamp(audioBitrateKbps, 8, 64);
-            if (audioCapture is not null)
-                mediaSession.UpdateAudioSource(audioCapture, audioBitrateKbps * 1000);
-        }
-        if (ImGui.IsItemDeactivatedAfterEdit())
-            SaveStreamingSettings();
-
-        DrawAudioSourcePicker();
-
-        if (mediaSession.IsHosting)
-            ImGui.TextUnformatted("(resolution/bitrate/fps/codec changes apply next time you start streaming)");
-    }
-
-    /// <summary>Lets audio capture target one specific process (and its child-process tree - the
-    /// actual audio in a browser usually renders in a child process, not the main one) instead of
-    /// the whole system mix. Disabled while capture is already running - switching source means
-    /// stopping and starting again, same as changing video settings mid-stream.</summary>
-    private void DrawAudioSourcePicker()
-    {
-        string currentLabel = "System audio (all)";
-        if (audioSourceProcessId is { } selectedPid)
-        {
-            currentLabel = audioSourceCandidates.Find(c => c.Pid == selectedPid).Label
-                ?? $"PID {selectedPid} (no longer running)";
-        }
-
-        ImGui.BeginDisabled(audioCapture is not null);
-        ImGui.SetNextItemWidth(300);
-        if (ImGui.BeginCombo("Audio source", currentLabel))
-        {
-            RefreshAudioSourceCandidates();
-
-            if (ImGui.Selectable("System audio (all)", audioSourceProcessId is null))
-                audioSourceProcessId = null;
-
-            foreach ((int pid, string label) in audioSourceCandidates)
-            {
-                if (ImGui.Selectable(label, audioSourceProcessId == pid))
-                    audioSourceProcessId = pid;
-            }
-
-            ImGui.EndCombo();
-        }
-        ImGui.EndDisabled();
-
-        if (audioCapture is not null)
-            ImGui.TextUnformatted("(stop audio capture to change source)");
-    }
-
-    /// <summary>Throttled - process enumeration is cheap but not free, and this only needs to be
-    /// fresh while the picker is actually open.</summary>
-    private void RefreshAudioSourceCandidates()
-    {
-        if (DateTime.UtcNow - lastAudioSourceRefresh < TimeSpan.FromSeconds(2))
-            return;
-        lastAudioSourceRefresh = DateTime.UtcNow;
-
-        var candidates = new List<(int Pid, string Label)>();
-        foreach (Process process in Process.GetProcesses())
-        {
-            try
-            {
-                string title = process.MainWindowTitle;
-                if (!string.IsNullOrWhiteSpace(title))
-                    candidates.Add((process.Id, $"{process.ProcessName} - {title}"));
-            }
-            catch
-            {
-                // Some processes (protected/elevated/etc.) throw on property access - just skip.
-            }
-            finally
-            {
-                process.Dispose();
-            }
-        }
-
-        candidates.Sort((a, b) => string.Compare(a.Label, b.Label, StringComparison.OrdinalIgnoreCase));
-        audioSourceCandidates = candidates;
-    }
-
-    /// <summary>Switches between capturing a whole monitor and capturing one specific window.
-    /// Disabled while already streaming, same as every picker here - switching means stop and
-    /// start again.</summary>
-    private void DrawCaptureModePicker()
-    {
-        ImGui.BeginDisabled(screenCapture is not null);
-        bool changed = false;
-        if (ImGui.RadioButton("Monitor##captureModeMonitor", !captureWindowMode))
-        {
-            captureWindowMode = false;
-            changed = true;
-        }
-        ImGui.SameLine();
-        if (ImGui.RadioButton("Window##captureModeWindow", captureWindowMode))
-        {
-            captureWindowMode = true;
-            changed = true;
-        }
-        ImGui.EndDisabled();
-
-        if (changed)
-            SaveStreamingSettings();
-
-        if (screenCapture is not null)
-            ImGui.TextUnformatted("(stop streaming to change capture mode)");
-
-        if (captureWindowMode)
-            DrawWindowPicker();
-        else
-            DrawMonitorPicker();
-    }
-
-    /// <summary>Lets a host pick one specific open window to share instead of a whole monitor -
-    /// useful when you only want to show a browser or a single app, not your whole desktop.
-    /// Disabled while already streaming, same as the monitor picker.</summary>
-    private void DrawWindowPicker()
-    {
-        string currentLabel = selectedWindowHandle == 0
-            ? "(no window selected)"
-            : windowCandidates.Find(c => c.Handle == selectedWindowHandle).Label ?? "(window no longer open)";
-
-        ImGui.BeginDisabled(screenCapture is not null);
-        ImGui.SetNextItemWidth(300);
-        if (ImGui.BeginCombo("Window", currentLabel))
-        {
-            RefreshWindowCandidates();
-
-            foreach ((nint handle, string label) in windowCandidates)
-            {
-                if (ImGui.Selectable(label, selectedWindowHandle == handle))
-                    selectedWindowHandle = handle;
-            }
-
-            ImGui.EndCombo();
-        }
-        ImGui.EndDisabled();
-
-        if (screenCapture is not null)
-            ImGui.TextUnformatted("(stop streaming to change window)");
-    }
-
-    /// <summary>Throttled the same way the audio source picker's process list is - cheap, but not
-    /// so cheap it should re-enumerate every frame while the dropdown happens to be open.</summary>
-    private void RefreshWindowCandidates()
-    {
-        if (DateTime.UtcNow - lastWindowListRefresh < TimeSpan.FromSeconds(2))
-            return;
-        lastWindowListRefresh = DateTime.UtcNow;
-
-        var candidates = new List<(nint Handle, string Label)>();
-        foreach (Process process in Process.GetProcesses())
-        {
-            try
-            {
-                string title = process.MainWindowTitle;
-                nint handle = process.MainWindowHandle;
-                if (!string.IsNullOrWhiteSpace(title) && handle != 0)
-                    candidates.Add((handle, $"{process.ProcessName} - {title}"));
-            }
-            catch
-            {
-                // Some processes (protected/elevated/etc.) throw on property access - just skip.
-            }
-            finally
-            {
-                process.Dispose();
-            }
-        }
-
-        candidates.Sort((a, b) => string.Compare(a.Label, b.Label, StringComparison.OrdinalIgnoreCase));
-        windowCandidates = candidates;
-    }
-
-    /// <summary>Lets a host with multiple monitors pick which one to share instead of always
-    /// capturing whichever Windows currently treats as the desktop primary. Disabled while
-    /// already streaming - matches every other streaming setting here (changes apply next time
-    /// you start).</summary>
-    private void DrawMonitorPicker()
-    {
-        string currentLabel = monitorCandidates.Find(c => c.Index == monitorIndex).Label
-            ?? $"Monitor {monitorIndex + 1}";
-
-        ImGui.BeginDisabled(screenCapture is not null);
-        ImGui.SetNextItemWidth(300);
-        if (ImGui.BeginCombo("Monitor", currentLabel))
-        {
-            RefreshMonitorCandidates();
-
-            foreach ((int index, string label) in monitorCandidates)
-            {
-                if (ImGui.Selectable(label, monitorIndex == index))
-                {
-                    monitorIndex = index;
-                    SaveStreamingSettings();
-                }
-            }
-
-            ImGui.EndCombo();
-        }
-        ImGui.EndDisabled();
-
-        if (screenCapture is not null)
-            ImGui.TextUnformatted("(stop streaming to change monitor)");
-    }
-
-    /// <summary>Outputs are enumerated from the same D3D11 adapter DesktopDuplicationCapture will
-    /// actually use (via the lazily-created <see cref="device"/>), so the indices shown here line
-    /// up exactly with the outputIndex it's given.</summary>
-    private void RefreshMonitorCandidates()
-    {
-        try
-        {
-            device ??= new GameAdapterDevice(ServiceCollector.PI.UiBuilder);
-            using SharpDX.DXGI.Device dxgiDevice = device.Device.QueryInterface<SharpDX.DXGI.Device>();
-            using SharpDX.DXGI.Adapter adapter = dxgiDevice.Adapter;
-
-            var candidates = new List<(int Index, string Label)>();
-            SharpDX.DXGI.Output[] outputs = adapter.Outputs;
-            for (int i = 0; i < outputs.Length; i++)
-            {
-                using SharpDX.DXGI.Output output = outputs[i];
-                SharpDX.DXGI.OutputDescription description = output.Description;
-                int width = description.DesktopBounds.Right - description.DesktopBounds.Left;
-                int height = description.DesktopBounds.Bottom - description.DesktopBounds.Top;
-                candidates.Add((i, $"Monitor {i + 1} - {description.DeviceName} ({width}x{height})"));
-            }
-
-            monitorCandidates = candidates;
-        }
-        catch (Exception ex)
-        {
-            ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to enumerate monitors");
-            TryRecoverFromDeviceRemoved(ex);
-        }
-    }
-
-    private void SaveStreamingSettings()
-    {
-        ServiceCollector.Config.VideoResolutionIndex = videoResolutionIndex;
-        ServiceCollector.Config.VideoBitrateKbps = videoBitrateKbps;
-        ServiceCollector.Config.VideoFpsTarget = videoFpsTarget;
-        ServiceCollector.Config.VideoCodecIndex = videoCodecIndex;
-        ServiceCollector.Config.AudioBitrateKbps = audioBitrateKbps;
-        ServiceCollector.Config.MonitorIndex = monitorIndex;
-        ServiceCollector.Config.CaptureWindowMode = captureWindowMode;
-        ServiceCollector.PI.SavePluginConfig(ServiceCollector.Config);
     }
 
     private void DrawAudioStatus()
@@ -744,7 +451,7 @@ public sealed class ShareWindow : Window, IDisposable
         }
 
         audioError = null;
-        if (audioSourceProcessId is { } targetProcessId)
+        if (Settings.AudioSourceProcessId is { } targetProcessId)
             _ = StartProcessAudioCaptureAsync(targetProcessId);
         else
             StartSystemAudioCapture();
@@ -755,7 +462,7 @@ public sealed class ShareWindow : Window, IDisposable
         try
         {
             audioCapture = new SystemAudioCapture();
-            mediaSession.UpdateAudioSource(audioCapture, audioBitrateKbps * 1000);
+            mediaSession.UpdateAudioSource(audioCapture, Settings.AudioBitrateKbps * 1000);
         }
         catch (Exception ex)
         {
@@ -774,7 +481,7 @@ public sealed class ShareWindow : Window, IDisposable
         {
             ProcessAudioCapture capture = await ProcessAudioCapture.CreateAsync((uint)processId).ConfigureAwait(false);
             audioCapture = capture;
-            mediaSession.UpdateAudioSource(capture, audioBitrateKbps * 1000);
+            mediaSession.UpdateAudioSource(capture, Settings.AudioBitrateKbps * 1000);
         }
         catch (Exception ex)
         {
@@ -795,7 +502,7 @@ public sealed class ShareWindow : Window, IDisposable
         if (roomSession.RoomId is not { } roomId || roomSession.ConnectionId is not { } connectionId)
             return;
 
-        if (captureWindowMode && selectedWindowHandle == 0)
+        if (Settings.CaptureWindowMode && Settings.SelectedWindowHandle == 0)
         {
             streamSetupError = "Pick a window to capture first.";
             return;
@@ -805,9 +512,9 @@ public sealed class ShareWindow : Window, IDisposable
         {
             streamSetupError = null;
             device ??= new GameAdapterDevice(ServiceCollector.PI.UiBuilder);
-            screenCapture ??= captureWindowMode
-                ? new WindowCapture(device, selectedWindowHandle)
-                : new DesktopDuplicationCapture(device, monitorIndex);
+            screenCapture ??= Settings.CaptureWindowMode
+                ? new WindowCapture(device, Settings.SelectedWindowHandle)
+                : new DesktopDuplicationCapture(device, Settings.MonitorIndex);
         }
         catch (Exception ex)
         {
@@ -818,12 +525,11 @@ public sealed class ShareWindow : Window, IDisposable
         }
 
         string ffmpegPath = Path.Combine(ServiceCollector.PI.AssemblyLocation.DirectoryName!, "ffmpeg", "ffmpeg.exe");
-        int targetHeight = VideoResolutionHeights[videoResolutionIndex];
         // See the matching comment in StartWatching - roomSession.RelayUrl reflects wherever the
         // control-plane connection actually ended up, which is what the media WebSocket must match.
         mediaSession.StartHosting(
             roomSession.RelayUrl ?? relayUrlInput, roomId, connectionId, device, screenCapture, audioCapture, ffmpegPath,
-            targetHeight, videoBitrateKbps, videoFpsTarget, (VideoCodec)videoCodecIndex, audioBitrateKbps * 1000);
+            Settings.TargetHeight, Settings.VideoBitrateKbps, Settings.VideoFpsTarget, Settings.Codec, Settings.AudioBitrateKbps * 1000);
     }
 
     /// <summary>DXGI_ERROR_DEVICE_REMOVED (and Reset/Hung) mean the GPU device is permanently
@@ -874,6 +580,7 @@ public sealed class ShareWindow : Window, IDisposable
     {
         roomSession.Dispose();
         mediaSession.Dispose();
+        Settings.Dispose();
         previewTexture?.Dispose();
         previewTexture = null;
         DisposeStreamCapture();
