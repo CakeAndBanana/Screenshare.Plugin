@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+
+  <PropertyGroup>
+    <Version>0.0.1.0</Version>
+    <Description>Password-protected room screen/browser sharing plugin.</Description>
+    <TargetFramework>net10.0-windows7.0</TargetFramework>
+    <Platforms>x64</Platforms>
+    <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
+    <IsPackable>false</IsPackable>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyTitle>ScreenShare.Plugin</AssemblyTitle>
+    <RootNamespace>ScreenShare.Plugin</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- ScreenShare.Plugin.Tests lives as a subfolder of this project (repo self-containment for
+         the separate GitHub repos) - without this, the SDK's default recursive **/*.cs glob would
+         also compile the test files (and their xunit/NSubstitute-only references) straight into
+         this project. -->
+    <Compile Remove="ScreenShare.Plugin.Tests\**" />
+    <EmbeddedResource Remove="ScreenShare.Plugin.Tests\**" />
+    <None Remove="ScreenShare.Plugin.Tests\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Concentus" Version="2.2.2" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.7" />
+    <PackageReference Include="NAudio" Version="2.3.0" />
+    <PackageReference Include="SharpDX" Version="4.2.0" />
+    <PackageReference Include="SharpDX.D3DCompiler" Version="4.2.0" />
+    <PackageReference Include="SharpDX.Direct3D11" Version="4.2.0" />
+    <PackageReference Include="SharpDX.DXGI" Version="4.2.0" />
+    <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Update="DotNet.ReproducibleBuilds" Version="2.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Bundled directly rather than via NuGet: the only current NuGet-distributed static
+         builds we found were either too old (NVENC SDK version rejected by modern drivers,
+         confirmed by testing) or compiled without any hardware encoders at all. This is
+         BtbN's official ffmpeg-n7.1 Windows GPL static build (ffmpeg.org-recommended source),
+         confirmed working with NVENC/AMF/QSV via direct testing. -->
+    <None Include="ffmpeg\ffmpeg.exe">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

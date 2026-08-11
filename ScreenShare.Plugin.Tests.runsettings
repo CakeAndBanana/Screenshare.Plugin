@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <!-- ScreenShare.Plugin.Tests references ScreenShare.Plugin, which is x64-only (SharpDX/DXGI/
+       Direct3D11 native interop, plus the Dalamud SDK itself). Visual Studio's Test Explorer
+       otherwise picks its own discovery/execution host architecture (commonly x86), which can't
+       load that dependency graph - resulting in "Not all tests from the test run selection could
+       be discovered" even though the assembly builds fine and `dotnet test` (architecture-agnostic)
+       runs it without issue. Forcing TargetPlatform here makes Test Explorer use an x64 host too.
+
+       In Visual Studio: Test > Configure Run Settings > Select Solution Wide runsettings File,
+       and point it at this file. -->
+  <RunConfiguration>
+    <TargetPlatform>x64</TargetPlatform>
+  </RunConfiguration>
+</RunSettings>

@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="ScreenShare.Plugin.Tests/ScreenShare.Plugin.Tests.csproj" />
+  <Project Path="ScreenShare.Plugin.csproj" />
+</Solution>

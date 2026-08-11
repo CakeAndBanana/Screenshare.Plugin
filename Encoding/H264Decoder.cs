@@ -1,0 +1,158 @@
+using System.Runtime.InteropServices;
+using System.Threading.Channels;
+using ScreenShare.Plugin.Rendering;
+using ScreenShare.Plugin.Services;
+using SharpDX;
+using SharpDX.Direct3D11;
+
+namespace ScreenShare.Plugin.Encoding;
+
+/// <summary>
+/// Network media-plane counterpart to <see cref="H264Encoder"/>: takes arbitrary H264 byte
+/// chunks fed via <see cref="Feed"/> (as they arrive off a MediaSocketClient), decodes them with
+/// an ffmpeg subprocess, and uploads each decoded frame to a shared texture for display.
+/// <see cref="Feed"/> is safe to call from the network receive thread - it only ever enqueues
+/// onto a bounded channel, decoupling the network receive thread from the ffmpeg subprocess
+/// (a direct pipe between them caused a real multi-stage deadlock during this pipeline's
+/// original development).
+/// </summary>
+public sealed class H264Decoder : IDisposable
+{
+    private readonly GameAdapterDevice gameAdapterDevice;
+    private readonly Texture2D decodedTexture;
+    private readonly FfmpegProcessRunner decoderProcess;
+    private readonly Channel<byte[]> feedChannel;
+    private readonly Thread feedWriterThread;
+    private readonly Thread readerThread;
+    private volatile bool running;
+    private int errorRecorded;
+
+    private long framesDecoded;
+
+    public int Width { get; }
+
+    public int Height { get; }
+
+    public nint SharedHandle { get; }
+
+    public long FramesDecoded => Interlocked.Read(ref framesDecoded);
+
+    public Exception? LastError { get; private set; }
+
+    public H264Decoder(GameAdapterDevice gameAdapterDevice, string ffmpegExePath, int width, int height, VideoCodec codec = VideoCodec.H264)
+    {
+        this.gameAdapterDevice = gameAdapterDevice;
+        Width = width;
+        Height = height;
+
+        Device device = gameAdapterDevice.Device;
+        decodedTexture = SharedTextureFactory.CreateEmpty(device, Width, Height);
+        SharedHandle = SharedTextureFactory.GetSharedHandle(decodedTexture);
+
+        feedChannel = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(256)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = false,
+        });
+
+        string decodeArgs = $"-hide_banner -loglevel error -f {VideoEncoderSelector.RawFormatName(codec)} -i - -f rawvideo -pix_fmt bgra -";
+        decoderProcess = new FfmpegProcessRunner(ffmpegExePath, decodeArgs);
+
+        running = true;
+        feedWriterThread = new Thread(FeedWriterLoop) { IsBackground = true, Name = "ScreenShare-H264DecFeed" };
+        readerThread = new Thread(ReadLoop) { IsBackground = true, Name = "ScreenShare-H264DecRead" };
+        feedWriterThread.Start();
+        readerThread.Start();
+    }
+
+    /// <summary>Never blocks - safe to call from a network receive thread.</summary>
+    public void Feed(byte[] chunk) => feedChannel.Writer.TryWrite(chunk);
+
+    private void FeedWriterLoop()
+    {
+        try
+        {
+            while (running && feedChannel.Reader.WaitToReadAsync().AsTask().GetAwaiter().GetResult())
+            {
+                while (feedChannel.Reader.TryRead(out byte[]? chunk))
+                    decoderProcess.StandardInput.Write(chunk, 0, chunk.Length);
+            }
+        }
+        catch (Exception ex) when (running)
+        {
+            RecordError("FeedWriterLoop (network -> decoder stdin)", ex);
+        }
+        finally
+        {
+            TryClose(decoderProcess.StandardInput);
+        }
+    }
+
+    private void ReadLoop()
+    {
+        int frameSize = Width * Height * 4;
+        byte[] frame = new byte[frameSize];
+        GCHandle pinned = GCHandle.Alloc(frame, GCHandleType.Pinned);
+        try
+        {
+            while (running)
+            {
+                int offset = 0;
+                while (offset < frameSize)
+                {
+                    int read = decoderProcess.StandardOutput.Read(frame, offset, frameSize - offset);
+                    if (read <= 0)
+                        return;
+                    offset += read;
+                }
+
+                lock (gameAdapterDevice.ImmediateContextLock)
+                {
+                    var dataBox = new DataBox(pinned.AddrOfPinnedObject(), Width * 4, 0);
+                    gameAdapterDevice.Device.ImmediateContext.UpdateSubresource(dataBox, decodedTexture);
+                }
+
+                Interlocked.Increment(ref framesDecoded);
+            }
+        }
+        catch (Exception ex) when (running)
+        {
+            RecordError("ReadLoop (decoder stdout -> shared texture)", ex);
+        }
+        finally
+        {
+            pinned.Free();
+        }
+    }
+
+    private void RecordError(string stage, Exception ex)
+    {
+        ServiceCollector.PluginLog.Error(ex, $"ScreenShare H264Decoder error in {stage}");
+        if (Interlocked.CompareExchange(ref errorRecorded, 1, 0) == 0)
+            LastError = ex;
+        running = false;
+    }
+
+    private static void TryClose(Stream stream)
+    {
+        try
+        {
+            stream.Close();
+        }
+        catch
+        {
+            // other side of the pipe may already be gone
+        }
+    }
+
+    public void Dispose()
+    {
+        running = false;
+        feedChannel.Writer.TryComplete();
+        feedWriterThread.Join(1000);
+        readerThread.Join(1000);
+        decoderProcess.Dispose();
+        decodedTexture.Dispose();
+    }
+}
