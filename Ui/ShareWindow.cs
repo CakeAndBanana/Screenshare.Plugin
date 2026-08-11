@@ -173,6 +173,9 @@ public sealed class ShareWindow : Window, IDisposable
         if (ImGui.Button("Leave Room"))
             LeaveRoom();
 
+        if (roomSession.InstanceId is { } instanceId)
+            ImGui.TextDisabled($"Relay instance: {instanceId} ({roomSession.RelayUrl})");
+
         ImGui.Separator();
         DrawMemberList();
         DrawWatchingStatus();
@@ -677,7 +680,11 @@ public sealed class ShareWindow : Window, IDisposable
         {
             device ??= new GameAdapterDevice(ServiceCollector.PI.UiBuilder);
             string ffmpegPath = Path.Combine(ServiceCollector.PI.AssemblyLocation.DirectoryName!, "ffmpeg", "ffmpeg.exe");
-            mediaSession.StartViewing(relayUrlInput, roomSession.RoomId!, roomSession.ConnectionId!, streamerConnectionId, device, ffmpegPath);
+            // Use roomSession.RelayUrl (the instance the SignalR connection is ACTUALLY on right
+            // now), not relayUrlInput (what the user originally typed) - a cross-instance redirect
+            // during JoinRoom can leave those pointing at different relays, and the media WebSocket
+            // has to hit the same instance that owns the room's live connections.
+            mediaSession.StartViewing(roomSession.RelayUrl ?? relayUrlInput, roomSession.RoomId!, roomSession.ConnectionId!, streamerConnectionId, device, ffmpegPath);
             previewTexture?.Dispose();
             previewTexture = null;
             lastOpenedViewerVideoHandle = null;
@@ -812,8 +819,10 @@ public sealed class ShareWindow : Window, IDisposable
 
         string ffmpegPath = Path.Combine(ServiceCollector.PI.AssemblyLocation.DirectoryName!, "ffmpeg", "ffmpeg.exe");
         int targetHeight = VideoResolutionHeights[videoResolutionIndex];
+        // See the matching comment in StartWatching - roomSession.RelayUrl reflects wherever the
+        // control-plane connection actually ended up, which is what the media WebSocket must match.
         mediaSession.StartHosting(
-            relayUrlInput, roomId, connectionId, device, screenCapture, audioCapture, ffmpegPath,
+            roomSession.RelayUrl ?? relayUrlInput, roomId, connectionId, device, screenCapture, audioCapture, ffmpegPath,
             targetHeight, videoBitrateKbps, videoFpsTarget, (VideoCodec)videoCodecIndex, audioBitrateKbps * 1000);
     }
 

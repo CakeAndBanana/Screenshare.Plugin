@@ -25,6 +25,17 @@ public sealed class RoomSessionService : IDisposable
 
     public string? ConnectionId => client.ConnectionId;
 
+    /// <summary>Which relay instance this client is actually talking to right now - always
+    /// populated once CreateRoom/JoinRoom has succeeded at least once (a single-instance
+    /// deployment just always reports the same one). Surfaced in the UI so the user can see which
+    /// physical relay process they ended up on, e.g. after a multi-instance redirect.</summary>
+    public string? InstanceId => client.InstanceId;
+
+    /// <summary>The relay URL this client is currently connected to - may differ from what the
+    /// user originally typed into the Connect screen if JoinRoom had to follow a cross-instance
+    /// redirect.</summary>
+    public string? RelayUrl => client.RelayUrl;
+
     public string? RoomId { get; private set; }
 
     public bool IsHost { get; private set; }

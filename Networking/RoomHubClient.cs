@@ -12,6 +12,7 @@ namespace ScreenShare.Plugin.Networking;
 public sealed class RoomHubClient : IAsyncDisposable
 {
     private HubConnection? connection;
+    private string? relayUrl;
 
     public HubConnectionState State => connection?.State ?? HubConnectionState.Disconnected;
 
@@ -19,6 +20,17 @@ public sealed class RoomHubClient : IAsyncDisposable
     /// the room's host or a viewer during CreateRoom/JoinRoom, needed to authorize the separate
     /// media-plane WebSocket (see MediaEndpoints on the relay).</summary>
     public string? ConnectionId => connection?.ConnectionId;
+
+    /// <summary>The relay URL this connection is currently attached to - starts as whatever was
+    /// passed to <see cref="ConnectAsync"/>, but changes if <see cref="JoinRoomAsync"/> had to
+    /// follow a cross-instance redirect. Lets the UI show which physical relay instance it's
+    /// actually talking to right now, not just what the user originally typed in.</summary>
+    public string? RelayUrl => relayUrl;
+
+    /// <summary>Which relay instance most recently answered a CreateRoom/JoinRoom call - always
+    /// populated on success (even a single-instance deployment reports its one instance id), null
+    /// until the first successful call.</summary>
+    public string? InstanceId { get; private set; }
 
     /// <summary>Fired for a new arrival - everyone already in the room gets this, but not the
     /// arrival themselves (they get <see cref="RoomMembersSnapshot"/> instead, which tells them
@@ -63,13 +75,42 @@ public sealed class RoomHubClient : IAsyncDisposable
 
         await newConnection.StartAsync().ConfigureAwait(false);
         connection = newConnection;
+        this.relayUrl = relayUrl;
     }
 
-    public Task<CreateRoomResult> CreateRoomAsync(string password, int maxViewers, string clientId, string displayName)
-        => RequireConnection().InvokeAsync<CreateRoomResult>("CreateRoom", password, maxViewers, clientId, displayName);
+    public async Task<CreateRoomResult> CreateRoomAsync(string password, int maxViewers, string clientId, string displayName)
+    {
+        CreateRoomResult result = await RequireConnection()
+            .InvokeAsync<CreateRoomResult>("CreateRoom", password, maxViewers, clientId, displayName).ConfigureAwait(false);
+        if (result.Success)
+            InstanceId = result.InstanceId;
 
-    public Task<JoinRoomResult> JoinRoomAsync(string roomId, string password, string clientId, string displayName)
-        => RequireConnection().InvokeAsync<JoinRoomResult>("JoinRoom", roomId, password, clientId, displayName);
+        return result;
+    }
+
+    /// <summary>Follows at most one cross-instance redirect: if the relay this connection is
+    /// currently attached to doesn't own <paramref name="roomId"/> (multi-instance/Redis mode
+    /// only), reconnects to the owning instance's URL and retries once there. A second redirect
+    /// is treated as a failure rather than chased indefinitely - a healthy deployment should never
+    /// produce one, so chasing further would more likely mean a misconfiguration/routing loop than
+    /// genuine progress.</summary>
+    public async Task<JoinRoomResult> JoinRoomAsync(string roomId, string password, string clientId, string displayName)
+    {
+        JoinRoomResult result = await RequireConnection()
+            .InvokeAsync<JoinRoomResult>("JoinRoom", roomId, password, clientId, displayName).ConfigureAwait(false);
+
+        if (result.RedirectUrl is { } redirectUrl)
+        {
+            await ConnectAsync(redirectUrl).ConfigureAwait(false);
+            result = await RequireConnection()
+                .InvokeAsync<JoinRoomResult>("JoinRoom", roomId, password, clientId, displayName).ConfigureAwait(false);
+        }
+
+        if (result.Success)
+            InstanceId = result.InstanceId;
+
+        return result;
+    }
 
     public Task LeaveRoomAsync(string roomId)
         => RequireConnection().InvokeAsync("LeaveRoom", roomId);
