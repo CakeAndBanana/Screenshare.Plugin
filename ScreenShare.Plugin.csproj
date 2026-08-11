@@ -46,8 +46,12 @@
          builds we found were either too old (NVENC SDK version rejected by modern drivers,
          confirmed by testing) or compiled without any hardware encoders at all. This is
          BtbN's official ffmpeg-n7.1 Windows GPL static build (ffmpeg.org-recommended source),
-         confirmed working with NVENC/AMF/QSV via direct testing. -->
-    <None Include="ffmpeg\ffmpeg.exe">
+         confirmed working with NVENC/AMF/QSV via direct testing.
+
+         Gitignored (132MB, over GitHub's 100MB push limit - see README for where to get it), so
+         Condition="Exists(...)" keeps a fresh clone without it (e.g. CI) buildable - CI only
+         needs to compile and run the unit tests, never actually launch ffmpeg. -->
+    <None Include="ffmpeg\ffmpeg.exe" Condition="Exists('ffmpeg\ffmpeg.exe')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

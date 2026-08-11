@@ -12,14 +12,29 @@ on:
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    # ScreenShare.Plugin targets net10.0-windows7.0 and depends on real Windows-only native interop
+    # (SharpDX/D3D11, WASAPI, hand-written WinRT COM interop) - this has to build on an actual
+    # Windows runner, not just a Linux one with EnableWindowsTargeting set.
+    runs-on: windows-latest
 
     steps:
     - uses: actions/checkout@v4
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: 8.0.x
+        dotnet-version: 10.0.x
+
+    # Dalamud.NET.Sdk (see ScreenShare.Plugin.csproj) doesn't bundle the actual Dalamud DLLs it
+    # references (Dalamud.dll, Dalamud.Bindings.ImGui, FFXIVClientStructs, etc.) - it only knows
+    # where to LOOK for them (DALAMUD_HOME, or a real local XIVLauncher install). Neither exists on
+    # a bare CI runner, so this step downloads the real "Hooks/dev" binaries for a chosen Dalamud
+    # branch and points DALAMUD_HOME at them. "release" matches what an actual installed game/plugin
+    # would be running against.
+    - name: Setup Dalamud
+      uses: Blooym/setup-dalamud@v1
+      with:
+        branch: release
+
     - name: Restore dependencies
       run: dotnet restore
     - name: Build
