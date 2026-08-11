@@ -161,6 +161,9 @@ public sealed class H264Encoder : IDisposable
                 Interlocked.Add(ref encodedBytes, read);
                 ChunkEncoded?.Invoke(buffer[..read]);
             }
+
+            if (running)
+                encoderProcess.ThrowIfFailed();
         }
         catch (Exception ex) when (running)
         {

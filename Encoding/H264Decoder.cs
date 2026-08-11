@@ -67,7 +67,17 @@ public sealed class H264Decoder : IDisposable
             SingleWriter = false,
         });
 
-        string decodeArgs = $"-hide_banner -loglevel error -f {VideoEncoderSelector.RawFormatName(codec)} -i - -f rawvideo -pix_fmt bgra -";
+        // -hwaccel d3d11va offloads the actual decode work to the GPU's dedicated video decode
+        // hardware (works uniformly across NVIDIA/AMD/Intel via Windows' own D3D11 Video
+        // Acceleration API, unlike encode's per-vendor NVENC/AMF/QSV selection) - decode still had
+        // no hardware path at all before this, always running ffmpeg's plain software decoder
+        // regardless of codec. That mattered little for H264 but made HEVC (meaningfully more
+        // CPU-expensive to decode in software) prone to falling behind real-time on the viewer's
+        // CPU, which is already busy running the game - producing exactly the "freezes, catches
+        // up in a burst, freezes again" pattern a real in-game HEVC test surfaced. Verified byte-
+        // for-byte identical output against software decode for both H264 and HEVC using this
+        // exact bundled ffmpeg binary before adding this, not assumed.
+        string decodeArgs = $"-hide_banner -loglevel error -hwaccel d3d11va -f {VideoEncoderSelector.RawFormatName(codec)} -i - -f rawvideo -pix_fmt bgra -";
         decoderProcess = new FfmpegProcessRunner(ffmpegExePath, decodeArgs);
 
         running = true;
@@ -120,7 +130,11 @@ public sealed class H264Decoder : IDisposable
                 {
                     int read = decoderProcess.StandardOutput.Read(frame, offset, frameSize - offset);
                     if (read <= 0)
+                    {
+                        if (running)
+                            decoderProcess.ThrowIfFailed();
                         return;
+                    }
                     offset += read;
                 }
 

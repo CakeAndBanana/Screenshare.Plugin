@@ -9,8 +9,14 @@ namespace ScreenShare.Plugin.Encoding;
 /// </summary>
 public sealed class FfmpegProcessRunner : IDisposable
 {
+    // Bounds how much stderr text ThrowIfFailed's error message can quote - just needs enough to
+    // show the actual ffmpeg error line(s), not the whole log.
+    private const int MaxStderrTailChars = 4096;
+
     private readonly Process process;
     private readonly Task stderrDrainTask;
+    private readonly System.Text.StringBuilder stderrTail = new();
+    private readonly Lock stderrLock = new();
 
     public Stream StandardInput => process.StandardInput.BaseStream;
 
@@ -34,7 +40,8 @@ public sealed class FfmpegProcessRunner : IDisposable
         process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Failed to start '{ffmpegExePath}'.");
 
         // ffmpeg writes continuously to stderr; if nobody reads it, the pipe buffer fills and
-        // ffmpeg blocks. Drain it unconditionally on a background task.
+        // ffmpeg blocks. Drain it unconditionally on a background task - kept (bounded) rather
+        // than discarded so ThrowIfFailed can actually explain WHY ffmpeg died, not just that it did.
         stderrDrainTask = Task.Run(DrainStderrAsync);
     }
 
@@ -44,15 +51,41 @@ public sealed class FfmpegProcessRunner : IDisposable
         {
             using StreamReader reader = process.StandardError;
             char[] buffer = new char[4096];
-            while (await reader.ReadAsync(buffer).ConfigureAwait(false) > 0)
+            int read;
+            while ((read = await reader.ReadAsync(buffer).ConfigureAwait(false)) > 0)
             {
-                // Discarded - ffmpeg's stderr is progress/log noise, not needed for the local
-                // validation round trip. Surface actual failures via process exit code instead.
+                lock (stderrLock)
+                {
+                    stderrTail.Append(buffer, 0, read);
+                    if (stderrTail.Length > MaxStderrTailChars)
+                        stderrTail.Remove(0, stderrTail.Length - MaxStderrTailChars);
+                }
             }
         }
         catch (Exception ex)
         {
             LastError = ex;
+        }
+    }
+
+    /// <summary>Call once a reader observes EOF on <see cref="StandardOutput"/> while still
+    /// expecting more data - EOF alone doesn't distinguish "ffmpeg exited cleanly" from "ffmpeg
+    /// crashed/failed to initialize" (e.g. a hardware decode path failing on an unusual system),
+    /// which otherwise look identical from the reading side and would silently produce zero
+    /// output forever with no explanation. No-ops (returns normally) if the process hasn't
+    /// actually exited or exited with code 0.</summary>
+    public void ThrowIfFailed()
+    {
+        if (LastError is { } drainError)
+            throw drainError;
+
+        process.WaitForExit(2000);
+        if (process.HasExited && process.ExitCode != 0)
+        {
+            string tail;
+            lock (stderrLock)
+                tail = stderrTail.ToString();
+            throw new InvalidOperationException($"ffmpeg exited with code {process.ExitCode}: {tail}");
         }
     }
 
