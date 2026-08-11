@@ -142,6 +142,16 @@ public sealed class H264Decoder : IDisposable
                 {
                     var dataBox = new DataBox(pinned.AddrOfPinnedObject(), Width * 4, 0);
                     gameAdapterDevice.Device.ImmediateContext.UpdateSubresource(dataBox, decodedTexture);
+
+                    // decodedTexture is a classic (non-keyed-mutex) shared resource opened on a
+                    // SEPARATE device by the game's own render thread (see SharedTextureBridge) -
+                    // without an explicit Flush here, this UpdateSubresource can sit queued in the
+                    // driver's command buffer indefinitely, invisible to the other device until
+                    // something UNRELATED happens to trigger a flush. That's exactly consistent
+                    // with "sometimes gets a frame" rather than a clean success/failure - it's not
+                    // broken, it's just unsynchronized. Flush forces this write to actually reach
+                    // the GPU now, not whenever the driver next feels like it.
+                    gameAdapterDevice.Device.ImmediateContext.Flush();
                 }
 
                 Interlocked.Increment(ref framesDecoded);
