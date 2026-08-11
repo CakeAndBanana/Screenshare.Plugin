@@ -54,6 +54,20 @@ public sealed class RoomHubClient : IAsyncDisposable
 
     public event Action<string, bool>? ViewerStreamPermissionChanged;
 
+    /// <summary>Fired when the underlying transport drops and SignalR's automatic reconnect is
+    /// actively trying to re-establish it - purely informational (e.g. for a "Reconnecting..."
+    /// status label), nothing to act on here.</summary>
+    public event Action? Reconnecting;
+
+    /// <summary>Fired once the transport has a new live connection - critically, this is NOT the
+    /// same as "back in the room": automatic reconnect gives this connection a brand new
+    /// ConnectionId and does nothing on its own to restore server-side state tied to the old one
+    /// (SignalR group membership, this relay's own room/host tracking). Without a caller
+    /// explicitly re-running JoinRoom here, a reconnected client looks "Connected" but silently
+    /// stops receiving any room broadcasts at all - see RoomHub.JoinRoom's reconnect-detection
+    /// path, which this is designed to trigger.</summary>
+    public event Action? Reconnected;
+
     public async Task ConnectAsync(string relayUrl)
     {
         if (connection is not null)
@@ -72,6 +86,17 @@ public sealed class RoomHubClient : IAsyncDisposable
         newConnection.On<string>("ShareModeChanged", mode => ShareModeChanged?.Invoke(mode));
         newConnection.On<IReadOnlyCollection<ActiveStreamerInfo>>("ActiveStreamersChanged", streamers => ActiveStreamersChanged?.Invoke(streamers));
         newConnection.On<string, bool>("ViewerStreamPermissionChanged", (id, granted) => ViewerStreamPermissionChanged?.Invoke(id, granted));
+
+        newConnection.Reconnecting += _ =>
+        {
+            Reconnecting?.Invoke();
+            return Task.CompletedTask;
+        };
+        newConnection.Reconnected += _ =>
+        {
+            Reconnected?.Invoke();
+            return Task.CompletedTask;
+        };
 
         await newConnection.StartAsync().ConfigureAwait(false);
         connection = newConnection;

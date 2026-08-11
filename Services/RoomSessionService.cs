@@ -19,6 +19,13 @@ public sealed class RoomSessionService : IDisposable
     private readonly Lock activeStreamersLock = new();
     private List<ActiveStreamerInfo> activeStreamers = [];
 
+    // Cached so a silent SignalR reconnect (see the Reconnected handler below) can replay the
+    // exact same JoinRoom call - the relay's own reconnect-detection path (RoomState.
+    // TryReconnectParticipant) skips the password check for a genuine reconnect, but the RPC
+    // signature still requires passing something, and there's no other place this client keeps
+    // the password around long enough to survive past the initial Create/Join button click.
+    private string? lastRoomPassword;
+
     public string ConnectionStatus { get; private set; } = "Disconnected";
 
     public HubConnectionState State => client.State;
@@ -136,6 +143,49 @@ public sealed class RoomSessionService : IDisposable
                     members[index] = members[index] with { CanStream = granted };
             }
         };
+
+        client.Reconnecting += () => ConnectionStatus = "Reconnecting...";
+
+        // SignalR's automatic reconnect only restores the raw transport - it gives this
+        // connection a brand new ConnectionId and does nothing to re-register it with the room
+        // server-side (SignalR group membership, this relay's own participant/host tracking).
+        // Without explicitly rejoining here, this client would look "Connected" again but
+        // silently stop receiving any room broadcasts at all (new members, permission changes,
+        // etc.) - see RoomHub.JoinRoom's reconnect-detection path, which a JoinRoom call with the
+        // same ClientId triggers automatically.
+        client.Reconnected += () =>
+        {
+            ConnectionStatus = "Connected";
+            if (RoomId is not null)
+                _ = RejoinAfterReconnectAsync();
+        };
+    }
+
+    private async Task RejoinAfterReconnectAsync()
+    {
+        if (RoomId is not { } roomId)
+            return;
+
+        try
+        {
+            JoinRoomResult result = await client.JoinRoomAsync(
+                roomId, lastRoomPassword ?? string.Empty, ServiceCollector.Config.ClientId, ServiceCollector.Config.DisplayName).ConfigureAwait(false);
+
+            if (result.Success)
+            {
+                LastEvent = "Reconnected to the relay.";
+            }
+            else
+            {
+                LastError = $"Lost connection and couldn't automatically rejoin the room: {result.Error}";
+                ResetRoomState();
+            }
+        }
+        catch (Exception ex)
+        {
+            LastError = $"Lost connection and couldn't automatically rejoin the room: {ex.Message}";
+            ResetRoomState();
+        }
     }
 
     public void Connect(string relayUrl)
@@ -162,6 +212,7 @@ public sealed class RoomSessionService : IDisposable
     public void CreateRoom(string password, int maxViewers)
     {
         LastError = null;
+        lastRoomPassword = password;
         _ = CreateRoomCoreAsync(password, maxViewers);
     }
 
@@ -197,6 +248,7 @@ public sealed class RoomSessionService : IDisposable
     public void JoinRoom(string roomId, string password)
     {
         LastError = null;
+        lastRoomPassword = password;
         _ = JoinRoomCoreAsync(roomId, password);
     }
 
@@ -309,6 +361,7 @@ public sealed class RoomSessionService : IDisposable
         RoomId = null;
         IsHost = false;
         CanStream = false;
+        lastRoomPassword = null;
         lock (membersLock)
             members.Clear();
         lock (activeStreamersLock)
