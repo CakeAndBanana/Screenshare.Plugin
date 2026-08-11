@@ -46,6 +46,21 @@ public sealed class MediaSocketClient : IAsyncDisposable
         SingleWriter = false,
     });
 
+    // VideoMetadata/AudioMetadata are small, sent at most a couple of times per session, and MUST
+    // NOT be lost - unlike a dropped video/audio chunk (the next one arrives shortly and nothing
+    // is permanently broken), losing the one-time metadata message means the receiving side can
+    // never construct a decoder at all, no matter how many chunks/packets arrive afterward. They
+    // used to share sendQueue with regular media traffic, which under real network backpressure
+    // can (and did, in practice) silently evict the metadata message via DropOldest before
+    // SendLoopAsync ever got to transmit it - a real, confirmed failure, not a hypothetical one.
+    // This queue is unbounded and drained with priority over sendQueue specifically so that can't
+    // happen: metadata never waits behind, or gets evicted by, a backlog of routine chunks.
+    private readonly Channel<byte[]> reliableQueue = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions
+    {
+        SingleReader = true,
+        SingleWriter = false,
+    });
+
     private ClientWebSocket? socket;
     private Task? sendLoopTask;
     private Task? receiveLoopTask;
@@ -117,12 +132,19 @@ public sealed class MediaSocketClient : IAsyncDisposable
     }
 
     /// <summary>Never blocks - see the class doc comment for why. Safe to call from encoder
-    /// callback threads.</summary>
+    /// callback threads. Routes VideoMetadata/AudioMetadata onto the never-drop reliableQueue
+    /// instead of the regular bulk sendQueue - see reliableQueue's own doc comment for why.</summary>
     public void Send(MediaMessageType type, byte[] payload)
     {
         byte[] framed = new byte[payload.Length + 1];
         framed[0] = (byte)type;
         Buffer.BlockCopy(payload, 0, framed, 1, payload.Length);
+
+        if (type is MediaMessageType.VideoMetadata or MediaMessageType.AudioMetadata)
+        {
+            reliableQueue.Writer.TryWrite(framed);
+            return;
+        }
 
         // DropOldest's Writer.TryWrite always succeeds (it evicts to make room), so it can't
         // itself signal that a drop happened - checking the queue depth just before writing is
@@ -154,12 +176,34 @@ public sealed class MediaSocketClient : IAsyncDisposable
     {
         try
         {
-            await foreach (byte[] message in sendQueue.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            while (true)
             {
-                if (ws.State != WebSocketState.Open)
-                    return;
+                // reliableQueue is always fully drained before a single item comes off sendQueue -
+                // metadata jumps the whole bulk-media backlog rather than taking its turn behind it.
+                while (reliableQueue.Reader.TryRead(out byte[]? reliableMessage))
+                {
+                    if (ws.State != WebSocketState.Open)
+                        return;
 
-                await ws.SendAsync(message, WebSocketMessageType.Binary, true, cancellationToken).ConfigureAwait(false);
+                    await ws.SendAsync(reliableMessage, WebSocketMessageType.Binary, true, cancellationToken).ConfigureAwait(false);
+                }
+
+                if (sendQueue.Reader.TryRead(out byte[]? message))
+                {
+                    if (ws.State != WebSocketState.Open)
+                        return;
+
+                    await ws.SendAsync(message, WebSocketMessageType.Binary, true, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                // Nothing ready on either queue right now - wait for whichever gets an item
+                // first. DisposeAsync always cancels cancellationToken before completing either
+                // channel writer, so shutdown surfaces as an OperationCanceledException here
+                // rather than this loop ever seeing both channels merely "completed".
+                Task<bool> reliableWait = reliableQueue.Reader.WaitToReadAsync(cancellationToken).AsTask();
+                Task<bool> sendWait = sendQueue.Reader.WaitToReadAsync(cancellationToken).AsTask();
+                await (await Task.WhenAny(reliableWait, sendWait).ConfigureAwait(false)).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -225,6 +269,7 @@ public sealed class MediaSocketClient : IAsyncDisposable
     {
         cts?.Cancel();
         sendQueue.Writer.TryComplete();
+        reliableQueue.Writer.TryComplete();
 
         if (socket is { State: WebSocketState.Open } ws)
         {
