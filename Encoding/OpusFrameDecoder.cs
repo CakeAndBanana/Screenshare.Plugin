@@ -1,11 +1,11 @@
-using Concentus.Structs;
+using Concentus;
 
 namespace ScreenShare.Plugin.Encoding;
 
 /// <summary>Decodes Opus packets produced by <see cref="OpusFrameEncoder"/> back to interleaved float PCM.</summary>
 public sealed class OpusFrameDecoder
 {
-    private readonly OpusDecoder decoder;
+    private readonly IOpusDecoder decoder;
 
     public int FrameSizePerChannel { get; }
 
@@ -15,8 +15,10 @@ public sealed class OpusFrameDecoder
     {
         Channels = channels;
         FrameSizePerChannel = sampleRate * frameMilliseconds / 1000;
-        // See OpusFrameEncoder for why we stick with the pure-managed (obsolete) constructor.
-        decoder = new OpusDecoder(sampleRate, channels);
+        // See OpusFrameEncoder for why AttemptToUseNativeLibrary is forced off - same reasoning
+        // applies here.
+        OpusCodecFactory.AttemptToUseNativeLibrary = false;
+        decoder = OpusCodecFactory.CreateDecoder(sampleRate, channels);
     }
 
     public float[] Decode(ReadOnlySpan<byte> packet)

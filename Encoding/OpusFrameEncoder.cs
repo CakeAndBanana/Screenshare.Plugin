@@ -1,5 +1,5 @@
+using Concentus;
 using Concentus.Enums;
-using Concentus.Structs;
 
 namespace ScreenShare.Plugin.Encoding;
 
@@ -11,7 +11,7 @@ public sealed class OpusFrameEncoder
 {
     private const int MaxPacketBytes = 4000;
 
-    private readonly OpusEncoder encoder;
+    private readonly IOpusEncoder encoder;
     private readonly float[] accumulator;
     private int accumulatedSamples;
 
@@ -34,14 +34,15 @@ public sealed class OpusFrameEncoder
         Channels = channels;
         FrameSizePerChannel = sampleRate * frameMilliseconds / 1000;
 
-        // Deliberately using the obsolete pure-managed constructor rather than
-        // OpusCodecFactory's native-accelerated path - after the CEF native-hosting saga in
-        // this same plugin, Concentus's zero-native-dependency guarantee is worth more here
-        // than the performance win.
-        encoder = new OpusEncoder(sampleRate, channels, OpusApplication.OPUS_APPLICATION_AUDIO)
-        {
-            Bitrate = bitrate,
-        };
+        // OpusCodecFactory.CreateEncoder can potentially return a native P/Invoke-backed
+        // implementation if a native opus/libopus happens to be discoverable - after the CEF
+        // native-hosting saga in this same plugin, that's a real risk here, not a hypothetical
+        // one. Forcing AttemptToUseNativeLibrary = false makes it always fall through to the
+        // same pure-managed OpusEncoder the old (obsolete) constructor call created directly -
+        // identical behavior, just reachable through the non-obsolete factory API instead.
+        OpusCodecFactory.AttemptToUseNativeLibrary = false;
+        encoder = OpusCodecFactory.CreateEncoder(sampleRate, channels, OpusApplication.OPUS_APPLICATION_AUDIO);
+        encoder.Bitrate = bitrate;
 
         accumulator = new float[FrameSizePerChannel * channels];
     }
