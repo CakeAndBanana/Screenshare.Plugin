@@ -23,9 +23,12 @@ namespace ScreenShare.Plugin.Capture.AudioCapture;
 public sealed class ProcessAudioCapture : IAudioSource
 {
     // The process-loopback virtual device doesn't support GetMixFormat (documented as
-    // unsupported/E_NOTIMPL) - a format has to be supplied up front instead of queried. Matches
-    // the default NAudio 3's own equivalent feature settled on.
-    private const int SampleRate = 44100;
+    // unsupported/E_NOTIMPL) - a format has to be supplied up front instead of queried, so unlike
+    // SystemAudioCapture there's no device-native rate to negotiate around: we choose the rate
+    // outright. 48000 (not NAudio 3's 44100 default) specifically because Opus only accepts
+    // 8/12/16/24/48 kHz - 44100 would throw constructing OpusFrameEncoder ("Sample rate is
+    // invalid...") - and 48 kHz is Opus's own native internal rate besides.
+    private const int SampleRate = 48000;
     private const int Channels = 2;
     private const int PollIntervalMs = 50;
 

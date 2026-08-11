@@ -18,6 +18,7 @@ namespace ScreenShare.Plugin.Ui;
 public sealed class StreamViewWindow : Window
 {
     private static readonly Vector4 ErrorColor = new(1f, 0.4f, 0.4f, 1f);
+    private static readonly Vector4 WarnColor = new(1f, 0.7f, 0.2f, 1f);
 
     private readonly RoomSessionService roomSession;
     private readonly MediaSessionService mediaSession;
@@ -75,6 +76,12 @@ public sealed class StreamViewWindow : Window
         ImGui.TextUnformatted("Audio level:");
         ImGui.SameLine();
         ImGui.ProgressBar(Math.Clamp(mediaSession.ViewerAudioPeak, 0f, 1f), new Vector2(200, 0), "");
+
+        if (mediaSession.ViewerDecodeDrops > 0)
+        {
+            ImGui.TextColored(WarnColor,
+                $"{mediaSession.ViewerDecodeDrops} chunks dropped before decoding - the decoder can't keep up in real time.");
+        }
 
         if (mediaSession.ViewerVideoError is { } viewerVideoError)
             ImGui.TextColored(ErrorColor, $"Video decoder died mid-stream: {viewerVideoError.Message}");

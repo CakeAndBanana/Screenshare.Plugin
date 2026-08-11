@@ -37,7 +37,9 @@ public enum MediaMessageType : byte
 /// </summary>
 public sealed class MediaSocketClient : IAsyncDisposable
 {
-    private readonly Channel<byte[]> sendQueue = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(512)
+    private const int SendQueueCapacity = 512;
+
+    private readonly Channel<byte[]> sendQueue = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(SendQueueCapacity)
     {
         FullMode = BoundedChannelFullMode.DropOldest,
         SingleReader = true,
@@ -48,6 +50,14 @@ public sealed class MediaSocketClient : IAsyncDisposable
     private Task? sendLoopTask;
     private Task? receiveLoopTask;
     private CancellationTokenSource? cts;
+    private long droppedMessages;
+
+    /// <summary>How many outbound messages this socket has had to drop because the send queue
+    /// filled up faster than SendLoopAsync could push them over the wire - i.e. the network
+    /// couldn't keep up with encode rate. Approximate under concurrent Send() callers (video and
+    /// audio can both call Send around the same time) - exact enough for diagnosing "is this
+    /// actually a network bottleneck" without needing a fully synchronized counter.</summary>
+    public long DroppedMessages => Interlocked.Read(ref droppedMessages);
 
     public event Action<byte[]>? VideoChunkReceived;
 
@@ -113,6 +123,13 @@ public sealed class MediaSocketClient : IAsyncDisposable
         byte[] framed = new byte[payload.Length + 1];
         framed[0] = (byte)type;
         Buffer.BlockCopy(payload, 0, framed, 1, payload.Length);
+
+        // DropOldest's Writer.TryWrite always succeeds (it evicts to make room), so it can't
+        // itself signal that a drop happened - checking the queue depth just before writing is
+        // the cheap approximation.
+        if (sendQueue.Reader.Count >= SendQueueCapacity)
+            Interlocked.Increment(ref droppedMessages);
+
         sendQueue.Writer.TryWrite(framed);
     }
 

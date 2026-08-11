@@ -40,6 +40,19 @@ public sealed class SystemAudioCapture : IAudioSource
     {
         capture = new WasapiLoopbackCapture();
 
+        // Opus only accepts specific sample rates (8/12/16/24/48 kHz) and 1-2 channels, but a
+        // device's native mix format can be neither - commonly 44100 Hz (a very ordinary Windows
+        // default, not an edge case), and more than 2 channels on any surround-configured output
+        // device. Constructing OpusFrameEncoder with whatever the device happens to report would
+        // throw ("Sample rate is invalid..."). Requesting a compliant format here instead lets
+        // WASAPI's own shared-mode audio engine resample/downmix transparently - shared-mode
+        // capture already unconditionally requests AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM (see
+        // WasapiCapture.GetAudioClientStreamFlags), which per its documented contract also
+        // performs channel up/down-mixing, not just sample-rate conversion - rather than us
+        // hand-rolling a resampler. 48 kHz is Opus's own native internal rate (encoding at any
+        // other supported rate just makes Opus itself resample down from 48k internally anyway).
+        capture.WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(48000, capture.WaveFormat.Channels == 1 ? 1 : 2);
+
         // Bounded + DropOldest: OnDataAvailable's write can never block regardless of how far
         // behind the processing thread falls.
         sampleQueue = Channel.CreateBounded<float[]>(new BoundedChannelOptions(64)

@@ -425,6 +425,12 @@ public sealed class ShareWindow : Window, IDisposable
                 $"Streaming: {mediaSession.HostFramesEncoded} encoded / {mediaSession.HostFramesSkipped} skipped, " +
                 $"{mediaSession.HostEncodedBytes} bytes sent ({mediaSession.HostVendor}, {mediaSession.HostCodec})");
 
+            if (mediaSession.HostQueueDrops > 0)
+            {
+                ImGui.TextColored(WarnColor,
+                    $"{mediaSession.HostQueueDrops} chunks dropped before sending - upload can't keep up with the configured bitrate.");
+            }
+
             if (mediaSession.HostVideoError is { } hostVideoError)
                 ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), $"Video encoder died mid-stream: {hostVideoError.Message}");
         }

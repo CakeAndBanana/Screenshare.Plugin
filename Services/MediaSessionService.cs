@@ -58,12 +58,22 @@ public sealed class MediaSessionService : IDisposable
 
     public float ViewerAudioPeak => audioDecoder?.DecodedPeak ?? 0f;
 
+    /// <summary>See H264Decoder.DroppedChunks - non-zero here means the decoder itself can't keep
+    /// up with the incoming stream in real time (distinct from network drops, which would show up
+    /// on the HOST's <see cref="HostQueueDrops"/> instead).</summary>
+    public long ViewerDecodeDrops => videoDecoder?.DroppedChunks ?? 0;
+
     // Host-facing surface.
     public long HostFramesEncoded => videoEncoder?.FramesEncoded ?? 0;
 
     public long HostFramesSkipped => videoEncoder?.FramesSkipped ?? 0;
 
     public long HostEncodedBytes => videoEncoder?.EncodedBytes ?? 0;
+
+    /// <summary>See MediaSocketClient.DroppedMessages - non-zero here means this connection's
+    /// upload can't keep up with the configured bitrate, distinct from HostFramesSkipped (which
+    /// only measures whether GPU capture/readback is keeping up, not whether the network is).</summary>
+    public long HostQueueDrops => socket?.DroppedMessages ?? 0;
 
     public GpuVendor? HostVendor => videoEncoder?.Vendor;
 
@@ -122,8 +132,24 @@ public sealed class MediaSessionService : IDisposable
             videoEncoder = encoder;
             newSocket.SendVideoMetadata(encoder.Width, encoder.Height, codec);
 
+            // A broken audio source (unsupported format, device gone, etc.) shouldn't take the
+            // whole stream down with it - video is already live at this point, and killing it
+            // over an audio-only failure would be a strictly worse outcome than just streaming
+            // without audio. Caught locally rather than letting it propagate to the outer catch
+            // below, which calls Stop() and would tear down the video encoder too.
             if (audioCapture is not null)
-                WireAudio(newSocket, audioCapture, audioBitrateBps);
+            {
+                try
+                {
+                    WireAudio(newSocket, audioCapture, audioBitrateBps);
+                }
+                catch (Exception ex)
+                {
+                    LastError = $"Audio disabled: {ex.Message}";
+                    LastException = ex;
+                    ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to wire audio into the media stream - continuing video-only");
+                }
+            }
 
             IsHosting = true;
         }

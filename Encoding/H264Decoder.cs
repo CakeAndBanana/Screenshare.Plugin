@@ -18,6 +18,8 @@ namespace ScreenShare.Plugin.Encoding;
 /// </summary>
 public sealed class H264Decoder : IDisposable
 {
+    private const int FeedChannelCapacity = 256;
+
     private readonly GameAdapterDevice gameAdapterDevice;
     private readonly Texture2D decodedTexture;
     private readonly FfmpegProcessRunner decoderProcess;
@@ -28,6 +30,7 @@ public sealed class H264Decoder : IDisposable
     private int errorRecorded;
 
     private long framesDecoded;
+    private long droppedChunks;
 
     public int Width { get; }
 
@@ -36,6 +39,14 @@ public sealed class H264Decoder : IDisposable
     public nint SharedHandle { get; }
 
     public long FramesDecoded => Interlocked.Read(ref framesDecoded);
+
+    /// <summary>How many incoming network chunks got dropped because ffmpeg's decode couldn't
+    /// keep up in real time (feedChannel filling up faster than FeedWriterLoop could hand chunks
+    /// to the decoder's stdin) - the signal to check if playback looks like it's stalling and
+    /// bursting rather than playing smoothly: a high value here means the decoder itself is the
+    /// bottleneck (e.g. software HEVC decode being more expensive than the viewer's CPU can do in
+    /// real time), not the network or the encoder.</summary>
+    public long DroppedChunks => Interlocked.Read(ref droppedChunks);
 
     public Exception? LastError { get; private set; }
 
@@ -49,7 +60,7 @@ public sealed class H264Decoder : IDisposable
         decodedTexture = SharedTextureFactory.CreateEmpty(device, Width, Height);
         SharedHandle = SharedTextureFactory.GetSharedHandle(decodedTexture);
 
-        feedChannel = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(256)
+        feedChannel = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(FeedChannelCapacity)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
@@ -67,7 +78,13 @@ public sealed class H264Decoder : IDisposable
     }
 
     /// <summary>Never blocks - safe to call from a network receive thread.</summary>
-    public void Feed(byte[] chunk) => feedChannel.Writer.TryWrite(chunk);
+    public void Feed(byte[] chunk)
+    {
+        if (feedChannel.Reader.Count >= FeedChannelCapacity)
+            Interlocked.Increment(ref droppedChunks);
+
+        feedChannel.Writer.TryWrite(chunk);
+    }
 
     private void FeedWriterLoop()
     {
