@@ -19,7 +19,7 @@ public sealed class MediaSessionService : IDisposable
     // audio hostage forever waiting for it (a decode failure or unusually slow start shouldn't
     // mean the viewer hears nothing at all) - start it anyway after this, accepting whatever
     // desync results as strictly better than silence.
-    private static readonly TimeSpan AudioVideoSyncTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan AudioVideoSyncTimeout = TimeSpan.FromSeconds(10);
 
     private MediaSocketClient? socket;
 
