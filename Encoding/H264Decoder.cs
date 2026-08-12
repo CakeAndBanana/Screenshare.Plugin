@@ -40,6 +40,16 @@ public sealed class H264Decoder : IDisposable
 
     public long FramesDecoded => Interlocked.Read(ref framesDecoded);
 
+    /// <summary>Fires exactly once, the first time a frame is actually decoded and written to
+    /// <see cref="SharedHandle"/>'s texture - not the same moment this decoder is constructed
+    /// (which happens as soon as VideoMetadata arrives, well before ffmpeg has actually spun up
+    /// and produced anything). Used to synchronize audio playback start with video actually
+    /// being visible, since video's startup latency (spawning ffmpeg, initializing hardware
+    /// decode, waiting for the first keyframe) is normally much longer than audio's - starting
+    /// audio the instant ITS OWN buffer is ready, independent of video, was producing an
+    /// audible/visible desync at the start of playback.</summary>
+    public event Action? FirstFrameDecoded;
+
     /// <summary>How many incoming network chunks got dropped because ffmpeg's decode couldn't
     /// keep up in real time (feedChannel filling up faster than FeedWriterLoop could hand chunks
     /// to the decoder's stdin) - the signal to check if playback looks like it's stalling and
@@ -154,7 +164,8 @@ public sealed class H264Decoder : IDisposable
                     gameAdapterDevice.Device.ImmediateContext.Flush();
                 }
 
-                Interlocked.Increment(ref framesDecoded);
+                if (Interlocked.Increment(ref framesDecoded) == 1)
+                    FirstFrameDecoded?.Invoke();
             }
         }
         catch (Exception ex) when (running)

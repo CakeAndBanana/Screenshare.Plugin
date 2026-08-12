@@ -17,24 +17,23 @@ namespace ScreenShare.Plugin.Encoding;
 public sealed class AudioPlaybackDecoder : IDisposable
 {
     // Real-time audio needs SOME lead time between "packet arrived" and "sample played" to
-    // absorb ordinary network timing variance (jitter) - starting playback the instant the
-    // buffer is constructed (as this used to) gives the playback pointer zero margin against
-    // even minor arrival-timing variance, so every small gap in delivery becomes an audible
-    // glitch. This is the standard "jitter buffer" technique real-time audio/VoIP playback uses -
-    // but video has NO equivalent pre-buffer (it displays each decoded frame immediately, with no
-    // synchronization between the two beyond both being roughly "as fast as possible"), so this
-    // value directly becomes an audio-lags-video sync offset, not just added latency in
-    // isolation. 150ms was too much - clearly perceptible as audio trailing video, confirmed by a
-    // real report. Kept small now specifically to stay under the range most viewers would notice
-    // as an actual A/V sync mismatch, while still providing a bit of margin against genuine
-    // network jitter (distinct from the structural per-process-capture jitter bug already fixed
-    // by coalescing WASAPI packets in ProcessAudioCapture, which needed no delay to fix at all).
+    // absorb ordinary network timing variance (jitter) - feeding straight into playback with zero
+    // buffer gives the playback pointer no margin against even minor arrival-timing variance, so
+    // every small gap in delivery becomes an audible glitch. This is the standard "jitter buffer"
+    // technique real-time audio/VoIP playback uses. Kept small deliberately - this used to also be
+    // the ONLY thing controlling when playback started at all, which directly became an audio-vs-
+    // video sync offset since video has its own, usually LONGER startup latency (spawning ffmpeg,
+    // initializing hardware decode, waiting for a keyframe) with no coordination between the two.
+    // Actual playback start is now synchronized with video explicitly (see MediaSessionService) -
+    // this constant only controls how much margin exists once playback has actually begun.
     private const int PrebufferMilliseconds = 40;
 
+    private readonly Lock playbackLock = new();
     private readonly OpusFrameDecoder decoder;
     private readonly BufferedWaveProvider buffer;
     private readonly WaveOutEvent output;
-    private bool playbackStarted;
+    private bool isReady;
+    private bool isPlaying;
 
     private long decodedPackets;
     private float decodedPeak;
@@ -44,6 +43,12 @@ public sealed class AudioPlaybackDecoder : IDisposable
     public float DecodedPeak => Volatile.Read(ref decodedPeak);
 
     public Exception? LastError { get; private set; }
+
+    /// <summary>Fires exactly once, when PrebufferMilliseconds worth of audio has actually been
+    /// buffered - NOT the same as playback starting (see <see cref="StartPlayback"/>), which the
+    /// owner is expected to call once it decides this AND video are both ready, so the two start
+    /// together rather than audio racing ahead just because its own buffer filled up first.</summary>
+    public event Action? ReadyToPlay;
 
     public AudioPlaybackDecoder(int sampleRate, int channels)
     {
@@ -61,8 +66,31 @@ public sealed class AudioPlaybackDecoder : IDisposable
 
         output = new WaveOutEvent();
         output.Init(buffer);
-        // Deliberately NOT starting playback here - see Feed(), which starts it only once
-        // PrebufferMilliseconds worth of audio is actually buffered.
+        // Deliberately NOT starting playback here - see Feed()/StartPlayback().
+    }
+
+    /// <summary>Actually starts audio output - safe to call more than once (only the first call
+    /// does anything) and safe to call after this decoder has already been disposed (a stale
+    /// caller from a superseded session, e.g. a delayed sync-timeout fallback racing a Stop()on
+    /// the same session, is a real possible caller shape - not a hypothetical one - so this
+    /// swallows ObjectDisposedException specifically rather than letting it surface as an
+    /// unobserved background-task exception).</summary>
+    public void StartPlayback()
+    {
+        lock (playbackLock)
+        {
+            if (isPlaying)
+                return;
+            isPlaying = true;
+        }
+
+        try
+        {
+            output.Play();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     /// <summary>Safe to call from the network receive thread - Opus decode is fast, CPU-only
@@ -77,10 +105,10 @@ public sealed class AudioPlaybackDecoder : IDisposable
             Buffer.BlockCopy(samples, 0, bytes, 0, bytes.Length);
             buffer.AddSamples(bytes, 0, bytes.Length);
 
-            if (!playbackStarted && buffer.BufferedDuration >= TimeSpan.FromMilliseconds(PrebufferMilliseconds))
+            if (!isReady && buffer.BufferedDuration >= TimeSpan.FromMilliseconds(PrebufferMilliseconds))
             {
-                playbackStarted = true;
-                output.Play();
+                isReady = true;
+                ReadyToPlay?.Invoke();
             }
 
             Interlocked.Increment(ref decodedPackets);

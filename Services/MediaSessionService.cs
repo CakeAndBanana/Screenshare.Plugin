@@ -15,6 +15,12 @@ namespace ScreenShare.Plugin.Services;
 /// </summary>
 public sealed class MediaSessionService : IDisposable
 {
+    // If video's first frame hasn't shown up by the time audio is ready to play, don't hold
+    // audio hostage forever waiting for it (a decode failure or unusually slow start shouldn't
+    // mean the viewer hears nothing at all) - start it anyway after this, accepting whatever
+    // desync results as strictly better than silence.
+    private static readonly TimeSpan AudioVideoSyncTimeout = TimeSpan.FromSeconds(2);
+
     private MediaSocketClient? socket;
 
     private H264Encoder? videoEncoder;
@@ -25,6 +31,7 @@ public sealed class MediaSessionService : IDisposable
     private AudioPlaybackDecoder? audioDecoder;
     private GameAdapterDevice? viewerDevice;
     private string? viewerFfmpegExePath;
+    private bool audioReadyToStart;
 
     public bool IsHosting { get; private set; }
 
@@ -257,7 +264,9 @@ public sealed class MediaSessionService : IDisposable
 
         try
         {
-            videoDecoder = new H264Decoder(viewerDevice, viewerFfmpegExePath, width, height, codec);
+            var decoder = new H264Decoder(viewerDevice, viewerFfmpegExePath, width, height, codec);
+            decoder.FirstFrameDecoded += OnFirstVideoFrameDecoded;
+            videoDecoder = decoder;
         }
         catch (Exception ex)
         {
@@ -274,7 +283,9 @@ public sealed class MediaSessionService : IDisposable
 
         try
         {
-            audioDecoder = new AudioPlaybackDecoder(sampleRate, channels);
+            var decoder = new AudioPlaybackDecoder(sampleRate, channels);
+            decoder.ReadyToPlay += OnAudioReadyToPlay;
+            audioDecoder = decoder;
         }
         catch (Exception ex)
         {
@@ -282,6 +293,43 @@ public sealed class MediaSessionService : IDisposable
             LastException = ex;
             ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to create the viewer's AudioPlaybackDecoder");
         }
+    }
+
+    /// <summary>Video's own startup latency (spawning ffmpeg, initializing hardware decode,
+    /// waiting for a keyframe) is normally much longer than audio's small jitter-buffer delay -
+    /// starting each the instant its OWN buffer was ready, independent of the other, was
+    /// producing an audible/visible desync right at the start of playback. So audio playback is
+    /// deliberately held until video's first frame has actually been decoded (or a timeout
+    /// elapses - see <see cref="AudioVideoSyncTimeout"/>), rather than starting the moment its own
+    /// prebuffer fills.</summary>
+    private void OnFirstVideoFrameDecoded() => TryStartSyncedAudioPlayback();
+
+    private void OnAudioReadyToPlay()
+    {
+        audioReadyToStart = true;
+        if (TryStartSyncedAudioPlayback())
+            return;
+
+        // Video isn't ready yet - captured locally (not read back through the audioDecoder field
+        // later) so a stale timeout firing after a newer session has already replaced it can't
+        // accidentally force-start the WRONG session's audio; StartPlayback is also safe to call
+        // on an already-disposed instance regardless.
+        AudioPlaybackDecoder? decoderAtTimeoutStart = audioDecoder;
+        _ = Task.Delay(AudioVideoSyncTimeout).ContinueWith(
+            _ => decoderAtTimeoutStart?.StartPlayback(),
+            TaskScheduler.Default);
+    }
+
+    private bool TryStartSyncedAudioPlayback()
+    {
+        if (!audioReadyToStart || audioDecoder is null)
+            return false;
+
+        if (videoDecoder is not null && videoDecoder.FramesDecoded < 1)
+            return false;
+
+        audioDecoder.StartPlayback();
+        return true;
     }
 
     public void Stop()
@@ -300,6 +348,7 @@ public sealed class MediaSessionService : IDisposable
         viewerDevice = null;
         viewerFfmpegExePath = null;
         ViewingStreamerConnectionId = null;
+        audioReadyToStart = false;
 
         IsHosting = false;
         IsViewing = false;
