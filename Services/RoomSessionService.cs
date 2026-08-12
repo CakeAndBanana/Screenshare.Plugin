@@ -18,6 +18,8 @@ public sealed class RoomSessionService : IDisposable
     private readonly List<RoomMemberInfo> members = [];
     private readonly Lock activeStreamersLock = new();
     private List<ActiveStreamerInfo> activeStreamers = [];
+    private readonly Lock watchersLock = new();
+    private List<WatcherInfo> watchers = [];
 
     // Cached so a silent SignalR reconnect (see the Reconnected handler below) can replay the
     // exact same JoinRoom call - the relay's own reconnect-detection path (RoomState.
@@ -81,6 +83,18 @@ public sealed class RoomSessionService : IDisposable
         }
     }
 
+    /// <summary>Every current watcher-to-streamer pairing in the room - lets the UI show an eye
+    /// icon next to whoever's currently watching a stream, and (via a lookup on WatcherConnectionId)
+    /// which streamer's feed they're on.</summary>
+    public IReadOnlyList<WatcherInfo> Watchers
+    {
+        get
+        {
+            lock (watchersLock)
+                return watchers.ToArray();
+        }
+    }
+
     public RoomSessionService()
     {
         // Sent once, right after a successful join, with everyone already in the room (host
@@ -129,6 +143,12 @@ public sealed class RoomSessionService : IDisposable
         {
             lock (activeStreamersLock)
                 activeStreamers = streamers.ToList();
+        };
+
+        client.WatchersChanged += newWatchers =>
+        {
+            lock (watchersLock)
+                watchers = newWatchers.ToList();
         };
 
         client.ViewerStreamPermissionChanged += (targetConnectionId, granted) =>
@@ -366,6 +386,8 @@ public sealed class RoomSessionService : IDisposable
             members.Clear();
         lock (activeStreamersLock)
             activeStreamers = [];
+        lock (watchersLock)
+            watchers = [];
     }
 
     public void Dispose()

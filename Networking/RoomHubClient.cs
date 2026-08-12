@@ -52,6 +52,10 @@ public sealed class RoomHubClient : IAsyncDisposable
 
     public event Action<IReadOnlyCollection<ActiveStreamerInfo>>? ActiveStreamersChanged;
 
+    /// <summary>Sent to a caller right after they join (current state), and to the whole room
+    /// whenever it changes - mirrors ActiveStreamersChanged's own pattern.</summary>
+    public event Action<IReadOnlyCollection<WatcherInfo>>? WatchersChanged;
+
     public event Action<string, bool>? ViewerStreamPermissionChanged;
 
     /// <summary>Fired when the underlying transport drops and SignalR's automatic reconnect is
@@ -85,6 +89,7 @@ public sealed class RoomHubClient : IAsyncDisposable
         newConnection.On("RoomClosed", () => RoomClosed?.Invoke());
         newConnection.On<string>("ShareModeChanged", mode => ShareModeChanged?.Invoke(mode));
         newConnection.On<IReadOnlyCollection<ActiveStreamerInfo>>("ActiveStreamersChanged", streamers => ActiveStreamersChanged?.Invoke(streamers));
+        newConnection.On<IReadOnlyCollection<WatcherInfo>>("WatchersChanged", watchers => WatchersChanged?.Invoke(watchers));
         newConnection.On<string, bool>("ViewerStreamPermissionChanged", (id, granted) => ViewerStreamPermissionChanged?.Invoke(id, granted));
 
         newConnection.Reconnecting += _ =>

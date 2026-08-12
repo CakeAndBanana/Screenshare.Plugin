@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using NAudio.Wave;
 using ScreenShare.Plugin.Services;
 
@@ -32,8 +33,10 @@ public sealed class AudioPlaybackDecoder : IDisposable
     private readonly OpusFrameDecoder decoder;
     private readonly BufferedWaveProvider buffer;
     private readonly WaveOutEvent output;
+    private readonly Stopwatch playbackStopwatch = new();
     private bool isReady;
     private bool isPlaying;
+    private long? firstPacketPtsMs;
 
     private long decodedPackets;
     private float decodedPeak;
@@ -49,6 +52,27 @@ public sealed class AudioPlaybackDecoder : IDisposable
     /// owner is expected to call once it decides this AND video are both ready, so the two start
     /// together rather than audio racing ahead just because its own buffer filled up first.</summary>
     public event Action? ReadyToPlay;
+
+    /// <summary>Audio's own estimated current playback position, on the shared session-clock PTS
+    /// timeline (see MediaSessionService/H264Encoder) - null until StartPlayback has actually been
+    /// called. Computed as (PTS of the oldest content that was buffered when playback started) +
+    /// (real elapsed time since then) rather than tracked packet-by-packet, because once playing,
+    /// NAudio's WaveOutEvent consumes the buffer at exactly the hardware's real playback rate - a
+    /// genuinely drift-free clock, unlike anything paced by Thread.Sleep. This is what
+    /// H264Decoder.DisplayLoop treats as the master clock to reconcile video against.</summary>
+    public long? EstimatedCurrentPtsMs
+    {
+        get
+        {
+            lock (playbackLock)
+            {
+                if (!isPlaying || firstPacketPtsMs is not { } startPtsMs)
+                    return null;
+
+                return startPtsMs + playbackStopwatch.ElapsedMilliseconds;
+            }
+        }
+    }
 
     public AudioPlaybackDecoder(int sampleRate, int channels)
     {
@@ -82,6 +106,7 @@ public sealed class AudioPlaybackDecoder : IDisposable
             if (isPlaying)
                 return;
             isPlaying = true;
+            playbackStopwatch.Start();
         }
 
         try
@@ -95,11 +120,17 @@ public sealed class AudioPlaybackDecoder : IDisposable
 
     /// <summary>Safe to call from the network receive thread - Opus decode is fast, CPU-only
     /// work (no GPU, no I/O), and BufferedWaveProvider.AddSamples is documented as safe to call
-    /// from a different thread than the one driving playback.</summary>
-    public void Feed(byte[] opusPacket)
+    /// from a different thread than the one driving playback. <paramref name="ptsMs"/> is this
+    /// packet's PTS on the shared session clock - only the very FIRST call's value is kept (see
+    /// <see cref="EstimatedCurrentPtsMs"/>), since that's the packet that'll be at the front of
+    /// the buffer whenever playback eventually starts.</summary>
+    public void Feed(long ptsMs, byte[] opusPacket)
     {
         try
         {
+            lock (playbackLock)
+                firstPacketPtsMs ??= ptsMs;
+
             float[] samples = decoder.Decode(opusPacket);
             byte[] bytes = new byte[samples.Length * sizeof(float)];
             Buffer.BlockCopy(samples, 0, bytes, 0, bytes.Length);

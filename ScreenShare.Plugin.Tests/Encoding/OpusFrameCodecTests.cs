@@ -12,10 +12,10 @@ public class OpusFrameCodecTests
     {
         var encoder = new OpusFrameEncoder(SampleRate, Channels);
         int packetCount = 0;
-        encoder.PacketEncoded += _ => packetCount++;
+        encoder.PacketEncoded += (_, _) => packetCount++;
         float[] oneFrame = new float[encoder.FrameSizePerChannel * Channels];
 
-        encoder.Feed(oneFrame);
+        encoder.Feed(0, oneFrame);
 
         Assert.Equal(1, packetCount);
     }
@@ -25,10 +25,10 @@ public class OpusFrameCodecTests
     {
         var encoder = new OpusFrameEncoder(SampleRate, Channels);
         int packetCount = 0;
-        encoder.PacketEncoded += _ => packetCount++;
+        encoder.PacketEncoded += (_, _) => packetCount++;
         float[] partialFrame = new float[(encoder.FrameSizePerChannel * Channels) - 1];
 
-        encoder.Feed(partialFrame);
+        encoder.Feed(0, partialFrame);
 
         Assert.Equal(0, packetCount);
     }
@@ -38,11 +38,11 @@ public class OpusFrameCodecTests
     {
         var encoder = new OpusFrameEncoder(SampleRate, Channels);
         int packetCount = 0;
-        encoder.PacketEncoded += _ => packetCount++;
+        encoder.PacketEncoded += (_, _) => packetCount++;
         int frameLength = encoder.FrameSizePerChannel * Channels;
         float[] twoAndHalfFrames = new float[(frameLength * 2) + (frameLength / 2)];
 
-        encoder.Feed(twoAndHalfFrames);
+        encoder.Feed(0, twoAndHalfFrames);
 
         Assert.Equal(2, packetCount);
     }
@@ -55,12 +55,12 @@ public class OpusFrameCodecTests
         // rarely align to Opus's fixed 20ms frame size.
         var encoder = new OpusFrameEncoder(SampleRate, Channels);
         int packetCount = 0;
-        encoder.PacketEncoded += _ => packetCount++;
+        encoder.PacketEncoded += (_, _) => packetCount++;
         int frameLength = encoder.FrameSizePerChannel * Channels;
 
-        encoder.Feed(new float[frameLength - 10]);
+        encoder.Feed(0, new float[frameLength - 10]);
         Assert.Equal(0, packetCount);
-        encoder.Feed(new float[20]);
+        encoder.Feed(0, new float[20]);
 
         Assert.Equal(1, packetCount);
     }
@@ -81,9 +81,9 @@ public class OpusFrameCodecTests
         var encoder = new OpusFrameEncoder(SampleRate, Channels);
         var decoder = new OpusFrameDecoder(SampleRate, Channels);
         byte[]? packet = null;
-        encoder.PacketEncoded += p => packet = p;
+        encoder.PacketEncoded += (_, p) => packet = p;
 
-        encoder.Feed(new float[encoder.FrameSizePerChannel * Channels]); // all zeros
+        encoder.Feed(0, new float[encoder.FrameSizePerChannel * Channels]); // all zeros
 
         Assert.NotNull(packet);
         float[] decoded = decoder.Decode(packet);
@@ -97,12 +97,12 @@ public class OpusFrameCodecTests
         var encoder = new OpusFrameEncoder(SampleRate, Channels);
         var decoder = new OpusFrameDecoder(SampleRate, Channels);
         byte[]? packet = null;
-        encoder.PacketEncoded += p => packet = p;
+        encoder.PacketEncoded += (_, p) => packet = p;
 
         float[] squareWave = new float[encoder.FrameSizePerChannel * Channels];
         for (int i = 0; i < squareWave.Length; i++)
             squareWave[i] = (i / Channels) % 20 < 10 ? 0.9f : -0.9f;
-        encoder.Feed(squareWave);
+        encoder.Feed(0, squareWave);
 
         Assert.NotNull(packet);
         float[] decoded = decoder.Decode(packet);
@@ -115,12 +115,12 @@ public class OpusFrameCodecTests
     {
         var encoder = new OpusFrameEncoder(SampleRate, Channels, bitrate: 32000);
         byte[]? packet = null;
-        encoder.PacketEncoded += p => packet = p;
+        encoder.PacketEncoded += (_, p) => packet = p;
 
         float[] frame = new float[encoder.FrameSizePerChannel * Channels];
         for (int i = 0; i < frame.Length; i++)
             frame[i] = MathF.Sin(i * 0.1f);
-        encoder.Feed(frame);
+        encoder.Feed(0, frame);
 
         Assert.NotNull(packet);
         int rawBytes = frame.Length * sizeof(float);

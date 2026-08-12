@@ -331,7 +331,10 @@ public sealed class SettingsWindow : Window, IDisposable
 
     /// <summary>Outputs are enumerated from the same D3D11 adapter DesktopDuplicationCapture will
     /// actually use (via the lazily-created <see cref="enumerationDevice"/>), so the indices shown
-    /// here line up exactly with the outputIndex it's given.</summary>
+    /// here line up exactly with the outputIndex it's given. The label prefers the monitor's real
+    /// friendly name (e.g. "Dell U2720Q") over DXGI's own DeviceName, which is only ever a cryptic
+    /// "\\.\DISPLAYn" path - see MonitorNameHelper for how that's resolved. Falls back to the raw
+    /// DeviceName if the lookup can't find (or fails to find at all) a friendly name for it.</summary>
     private void RefreshMonitorCandidates()
     {
         try
@@ -339,6 +342,8 @@ public sealed class SettingsWindow : Window, IDisposable
             enumerationDevice ??= new GameAdapterDevice(ServiceCollector.PI.UiBuilder);
             using SharpDX.DXGI.Device dxgiDevice = enumerationDevice.Device.QueryInterface<SharpDX.DXGI.Device>();
             using SharpDX.DXGI.Adapter adapter = dxgiDevice.Adapter;
+
+            Dictionary<string, string> friendlyNames = MonitorNameHelper.TryGetFriendlyNames();
 
             var candidates = new List<(int Index, string Label)>();
             SharpDX.DXGI.Output[] outputs = adapter.Outputs;
@@ -348,7 +353,8 @@ public sealed class SettingsWindow : Window, IDisposable
                 SharpDX.DXGI.OutputDescription description = output.Description;
                 int width = description.DesktopBounds.Right - description.DesktopBounds.Left;
                 int height = description.DesktopBounds.Bottom - description.DesktopBounds.Top;
-                candidates.Add((i, $"Monitor {i + 1} - {description.DeviceName} ({width}x{height})"));
+                string name = friendlyNames.GetValueOrDefault(description.DeviceName, description.DeviceName);
+                candidates.Add((i, $"Monitor {i + 1} - {name} ({width}x{height})"));
             }
 
             monitorCandidates = candidates;

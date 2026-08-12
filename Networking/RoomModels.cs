@@ -12,6 +12,9 @@ public sealed record JoinRoomResult(bool Success, string? InstanceId, string? Re
 
 public sealed record ActiveStreamerInfo(string ConnectionId, string DisplayName);
 
+/// <summary>Broadcast payload for "who's watching whom in this room" - mirrors ActiveStreamerInfo.</summary>
+public sealed record WatcherInfo(string WatcherConnectionId, string StreamerConnectionId);
+
 public sealed record RoomMemberInfo(string ConnectionId, string DisplayName, bool IsHost, bool CanStream);
 
 /// <summary>Response from the relay's GET /rooms/{roomId}/location endpoint - lets a client

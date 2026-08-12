@@ -96,9 +96,13 @@ public sealed class MediaSocketClient : IAsyncDisposable
     /// stuttery-audio report can be attributed to the right side of the pipeline.</summary>
     public long DroppedAudioMessages => Interlocked.Read(ref droppedAudioMessages);
 
-    public event Action<byte[]>? VideoChunkReceived;
+    /// <summary>PTS (milliseconds since the host's shared session clock started) followed by the
+    /// raw chunk bytes - see MediaSessionService/H264Decoder for how this drives A/V sync.</summary>
+    public event Action<long, byte[]>? VideoChunkReceived;
 
-    public event Action<byte[]>? AudioPacketReceived;
+    /// <summary>Same PTS convention as <see cref="VideoChunkReceived"/>, on the same shared clock -
+    /// this is what makes the two comparable at all.</summary>
+    public event Action<long, byte[]>? AudioPacketReceived;
 
     public event Action<int, int, VideoCodec, int>? VideoMetadataReceived;
 
@@ -185,6 +189,22 @@ public sealed class MediaSocketClient : IAsyncDisposable
             Interlocked.Increment(ref droppedMessages);
 
         sendQueue.Writer.TryWrite(framed);
+    }
+
+    /// <summary>Prepends an 8-byte little-endian PTS (milliseconds since the host's shared
+    /// session clock started - see MediaSessionService) before the raw chunk bytes, so a viewer
+    /// can compare video and audio timing directly instead of only synchronizing playback start.</summary>
+    public void SendVideoChunk(long ptsMs, byte[] chunk) => Send(MediaMessageType.Video, WithPts(ptsMs, chunk));
+
+    /// <summary>Same PTS convention as <see cref="SendVideoChunk"/>, on the same shared clock.</summary>
+    public void SendAudioPacket(long ptsMs, byte[] packet) => Send(MediaMessageType.Audio, WithPts(ptsMs, packet));
+
+    private static byte[] WithPts(long ptsMs, byte[] data)
+    {
+        byte[] payload = new byte[8 + data.Length];
+        BitConverter.GetBytes(ptsMs).CopyTo(payload, 0);
+        Buffer.BlockCopy(data, 0, payload, 8, data.Length);
+        return payload;
     }
 
     public void SendVideoMetadata(int width, int height, VideoCodec codec, int fps)
@@ -288,11 +308,11 @@ public sealed class MediaSocketClient : IAsyncDisposable
                 byte[] payload = message[1..];
                 switch ((MediaMessageType)message[0])
                 {
-                    case MediaMessageType.Video:
-                        VideoChunkReceived?.Invoke(payload);
+                    case MediaMessageType.Video when payload.Length >= 8:
+                        VideoChunkReceived?.Invoke(BitConverter.ToInt64(payload, 0), payload[8..]);
                         break;
-                    case MediaMessageType.Audio:
-                        AudioPacketReceived?.Invoke(payload);
+                    case MediaMessageType.Audio when payload.Length >= 8:
+                        AudioPacketReceived?.Invoke(BitConverter.ToInt64(payload, 0), payload[8..]);
                         break;
                     case MediaMessageType.VideoMetadata when payload.Length >= 11:
                         VideoMetadataReceived?.Invoke(BitConverter.ToInt32(payload, 0), BitConverter.ToInt32(payload, 4), (VideoCodec)payload[8], BitConverter.ToUInt16(payload, 9));

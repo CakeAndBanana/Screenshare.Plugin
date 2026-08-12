@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using ScreenShare.Plugin.Capture.AudioCapture;
 using ScreenShare.Plugin.Capture.ScreenCapture;
 using ScreenShare.Plugin.Encoding;
@@ -29,6 +30,13 @@ public sealed class MediaSessionService : IDisposable
     private H264Encoder? videoEncoder;
     private OpusFrameEncoder? audioEncoder;
     private IAudioSource? hostAudioCapture;
+
+    /// <summary>Single clock shared by the video encoder and every audio sample batch for the
+    /// whole hosting session, so their PTS values are directly comparable on the viewer's side -
+    /// two independently-started clocks (even started moments apart) would make "video chunk PTS
+    /// 5000ms" and "audio packet PTS 5000ms" refer to different real moments, defeating the whole
+    /// point. Created once per StartHostingCoreAsync call, before either encoder exists.</summary>
+    private Stopwatch? hostSessionClock;
 
     private MediaSocketClient? viewerSocket;
     private H264Decoder? videoDecoder;
@@ -166,8 +174,11 @@ public sealed class MediaSessionService : IDisposable
             await newSocket.ConnectAsync(relayUrl, roomId, connectionId, isStreamer: true).ConfigureAwait(false);
             hostSocket = newSocket;
 
-            var encoder = new H264Encoder(gameAdapterDevice, screenCapture, ffmpegExePath, targetHeight, bitrateKbps, fps, codec);
-            encoder.ChunkEncoded += chunk => hostSocket?.Send(MediaMessageType.Video, chunk);
+            var sessionClock = Stopwatch.StartNew();
+            hostSessionClock = sessionClock;
+
+            var encoder = new H264Encoder(gameAdapterDevice, screenCapture, ffmpegExePath, sessionClock, targetHeight, bitrateKbps, fps, codec);
+            encoder.ChunkEncoded += (ptsMs, chunk) => hostSocket?.SendVideoChunk(ptsMs, chunk);
             videoEncoder = encoder;
             newSocket.SendVideoMetadata(encoder.Width, encoder.Height, codec, fps);
 
@@ -201,7 +212,11 @@ public sealed class MediaSessionService : IDisposable
         }
     }
 
-    private void OnHostSamplesAvailable(float[] samples) => audioEncoder?.Feed(samples);
+    private void OnHostSamplesAvailable(float[] samples)
+    {
+        if (hostSessionClock is { } clock)
+            audioEncoder?.Feed(clock.ElapsedMilliseconds, samples);
+    }
 
     private void WireAudio(MediaSocketClient targetSocket, IAudioSource audioCapture, int bitrateBps)
     {
@@ -209,7 +224,7 @@ public sealed class MediaSessionService : IDisposable
         int channels = audioCapture.WaveFormat.Channels;
 
         var opusEncoder = new OpusFrameEncoder(sampleRate, channels, bitrate: bitrateBps);
-        opusEncoder.PacketEncoded += packet => hostSocket?.Send(MediaMessageType.Audio, packet);
+        opusEncoder.PacketEncoded += (ptsMs, packet) => hostSocket?.SendAudioPacket(ptsMs, packet);
         audioCapture.SamplesAvailable += OnHostSamplesAvailable;
 
         audioEncoder = opusEncoder;
@@ -264,9 +279,9 @@ public sealed class MediaSessionService : IDisposable
         {
             var newSocket = new MediaSocketClient();
             newSocket.VideoMetadataReceived += OnVideoMetadataReceived;
-            newSocket.VideoChunkReceived += chunk => videoDecoder?.Feed(chunk);
+            newSocket.VideoChunkReceived += (ptsMs, chunk) => videoDecoder?.Feed(ptsMs, chunk);
             newSocket.AudioMetadataReceived += OnAudioMetadataReceived;
-            newSocket.AudioPacketReceived += packet => audioDecoder?.Feed(packet);
+            newSocket.AudioPacketReceived += (ptsMs, packet) => audioDecoder?.Feed(ptsMs, packet);
 
             await newSocket.ConnectAsync(relayUrl, roomId, connectionId, isStreamer: false, streamerConnectionId).ConfigureAwait(false);
             viewerSocket = newSocket;
@@ -292,7 +307,7 @@ public sealed class MediaSessionService : IDisposable
 
         try
         {
-            var decoder = new H264Decoder(viewerDevice, viewerFfmpegExePath, width, height, fps, codec);
+            var decoder = new H264Decoder(viewerDevice, viewerFfmpegExePath, width, height, fps, codec, () => audioDecoder?.EstimatedCurrentPtsMs);
             decoder.ReadyToDisplay += OnVideoReadyToDisplay;
             videoDecoder = decoder;
         }
@@ -396,6 +411,7 @@ public sealed class MediaSessionService : IDisposable
         if (oldEncoder is not null)
             _ = Task.Run(() => DisposeSafely(oldEncoder, "H264Encoder"));
 
+        hostSessionClock = null;
         IsHosting = false;
 
         MediaSocketClient? oldSocket = hostSocket;

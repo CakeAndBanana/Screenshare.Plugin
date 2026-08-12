@@ -27,7 +27,11 @@ public sealed class OpusFrameEncoder
         set => encoder.Bitrate = value;
     }
 
-    public event Action<byte[]>? PacketEncoded;
+    /// <summary>PTS (milliseconds on the same shared session clock H264Encoder uses) alongside
+    /// each packet - see OpusFrameEncoder.Feed. Approximated as the timestamp of whichever Feed()
+    /// call happened to complete this packet's accumulator, which given a 20ms frame size is
+    /// accurate enough for A/V sync purposes (well under the sync tolerance H264Decoder applies).</summary>
+    public event Action<long, byte[]>? PacketEncoded;
 
     public OpusFrameEncoder(int sampleRate, int channels, int frameMilliseconds = 20, int bitrate = 32000)
     {
@@ -47,7 +51,7 @@ public sealed class OpusFrameEncoder
         accumulator = new float[FrameSizePerChannel * channels];
     }
 
-    public void Feed(ReadOnlySpan<float> interleavedSamples)
+    public void Feed(long timestampMs, ReadOnlySpan<float> interleavedSamples)
     {
         int offset = 0;
         while (offset < interleavedSamples.Length)
@@ -62,7 +66,7 @@ public sealed class OpusFrameEncoder
             {
                 byte[] packet = new byte[MaxPacketBytes];
                 int length = encoder.Encode(accumulator, FrameSizePerChannel, packet, packet.Length);
-                PacketEncoded?.Invoke(packet[..length]);
+                PacketEncoded?.Invoke(timestampMs, packet[..length]);
                 accumulatedSamples = 0;
             }
         }

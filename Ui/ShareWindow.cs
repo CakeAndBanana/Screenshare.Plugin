@@ -18,6 +18,7 @@ public sealed class ShareWindow : Window, IDisposable
     private static readonly Vector4 CrownColor = new(1f, 0.85f, 0.2f, 1f);
     private static readonly Vector4 StreamingColor = new(1f, 0.35f, 0.35f, 1f);
     private static readonly Vector4 PermittedColor = new(0.4f, 0.85f, 0.45f, 1f);
+    private static readonly Vector4 WatchingColor = new(0.4f, 0.75f, 1f, 1f);
 
     private GameAdapterDevice? device;
     private ICaptureSource? screenCapture;
@@ -191,13 +192,13 @@ public sealed class ShareWindow : Window, IDisposable
     }
 
     /// <summary>Renders every current room member (host included) with icon badges - a crown for
-    /// the owner, a camera for whoever is actively streaming right now, and a "permitted" badge
-    /// for anyone else who's been granted streaming permission but isn't live at the moment.
-    /// A member who's actively streaming (and isn't yourself) has a clickable name that opens
-    /// <see cref="StreamView"/> on their feed - hosting and viewing run on independent
-    /// MediaSessionService connections, so this stays clickable even while you're streaming your
-    /// own feed. Kick/grant/revoke buttons only render for the host, and never against their own
-    /// row.</summary>
+    /// the owner, a camera for whoever is actively streaming right now, an eye for whoever is
+    /// currently watching a stream (hovering shows which one), and a "permitted" badge for anyone
+    /// else who's been granted streaming permission but isn't live at the moment. A member who's
+    /// actively streaming (and isn't yourself) has a clickable name that opens <see cref="StreamView"/>
+    /// on their feed - hosting and viewing run on independent MediaSessionService connections, so
+    /// this stays clickable even while you're streaming your own feed. Kick/grant/revoke buttons
+    /// only render for the host, and never against their own row.</summary>
     private void DrawMemberList()
     {
         ImGui.TextUnformatted("Members:");
@@ -207,7 +208,13 @@ public sealed class ShareWindow : Window, IDisposable
             bool isStreaming = roomSession.ActiveStreamers.Any(s => s.ConnectionId == member.ConnectionId);
             bool isWatchable = isStreaming && !isSelf;
 
-            DrawMemberIcons(member, isStreaming);
+            string? watchingDisplayName = null;
+            if (roomSession.Watchers.FirstOrDefault(w => w.WatcherConnectionId == member.ConnectionId) is { } watching)
+            {
+                watchingDisplayName = roomSession.Members.FirstOrDefault(m => m.ConnectionId == watching.StreamerConnectionId)?.DisplayName ?? "someone";
+            }
+
+            DrawMemberIcons(member, isStreaming, watchingDisplayName);
 
             if (isWatchable)
             {
@@ -248,7 +255,7 @@ public sealed class ShareWindow : Window, IDisposable
         }
     }
 
-    private static void DrawMemberIcons(RoomMemberInfo member, bool isStreaming)
+    private static void DrawMemberIcons(RoomMemberInfo member, bool isStreaming, string? watchingDisplayName)
     {
         bool any = false;
         using (ServiceCollector.PI.UiBuilder.IconFontHandle.Push())
@@ -272,6 +279,17 @@ public sealed class ShareWindow : Window, IDisposable
                     ImGui.SameLine(0, 4);
                 ImGui.TextColored(PermittedColor, FontAwesomeIcon.UserCheck.ToIconString());
                 any = true;
+            }
+
+            if (watchingDisplayName is not null)
+            {
+                if (any)
+                    ImGui.SameLine(0, 4);
+                ImGui.TextColored(WatchingColor, FontAwesomeIcon.Eye.ToIconString());
+                any = true;
+
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip($"Watching: {watchingDisplayName}");
             }
         }
 

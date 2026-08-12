@@ -37,11 +37,12 @@ public sealed class H264Encoder : IDisposable
     private volatile bool running;
     private int errorRecorded;
 
-    private readonly Stopwatch sessionStopwatch = Stopwatch.StartNew();
+    private readonly Stopwatch sessionClock;
 
     private long framesEncoded;
     private long framesSkipped;
     private long encodedBytes;
+    private long lastCaptureTimestampMs;
 
     public int Width { get; }
 
@@ -60,13 +61,19 @@ public sealed class H264Encoder : IDisposable
     /// exactly where a stream's effective FPS actually drops below its configured target: at
     /// capture/encode (this number), or somewhere downstream (network, decode, or the viewer's
     /// own render loop) if this number looks healthy but playback still looks choppy.</summary>
-    public double AverageFps => FramesEncoded / Math.Max(sessionStopwatch.Elapsed.TotalSeconds, 0.001);
+    public double AverageFps => FramesEncoded / Math.Max(sessionClock.Elapsed.TotalSeconds, 0.001);
 
     public Exception? LastError { get; private set; }
 
     /// <summary>Raised on the internal reader thread - handlers must not block (e.g. hand the
-    /// bytes to MediaSocketClient.Send, which itself never blocks).</summary>
-    public event Action<byte[]>? ChunkEncoded;
+    /// bytes to MediaSocketClient.SendVideoChunk, which itself never blocks). The long is a PTS
+    /// in milliseconds on the shared sessionClock passed into this encoder's constructor - the
+    /// most recently CAPTURED frame's timestamp as of when this chunk was read from ffmpeg's
+    /// stdout (chunks aren't frame-aligned, so this is an approximation, but ffmpeg's low-latency
+    /// tuning keeps the gap small enough for A/V sync purposes). Comparable directly against
+    /// audio's own PTS on the viewer side only because both encoders share the exact same clock -
+    /// see MediaSessionService.StartHostingCoreAsync.</summary>
+    public event Action<long, byte[]>? ChunkEncoded;
 
     public VideoCodec Codec { get; }
 
@@ -74,6 +81,7 @@ public sealed class H264Encoder : IDisposable
         GameAdapterDevice gameAdapterDevice,
         ICaptureSource source,
         string ffmpegExePath,
+        Stopwatch sessionClock,
         int targetHeight = 720,
         int bitrateKbps = 1500,
         int fps = 15,
@@ -81,6 +89,7 @@ public sealed class H264Encoder : IDisposable
     {
         this.gameAdapterDevice = gameAdapterDevice;
         this.source = source;
+        this.sessionClock = sessionClock;
         frameIntervalMs = 1000 / fps;
         Codec = codec;
 
@@ -153,6 +162,7 @@ public sealed class H264Encoder : IDisposable
 
                 if (gotFrame)
                 {
+                    Interlocked.Exchange(ref lastCaptureTimestampMs, sessionClock.ElapsedMilliseconds);
                     encoderProcess.StandardInput.Write(frame, 0, frame.Length);
                     Interlocked.Increment(ref framesEncoded);
                 }
@@ -188,7 +198,7 @@ public sealed class H264Encoder : IDisposable
             while (running && (read = encoderProcess.StandardOutput.Read(buffer, 0, buffer.Length)) > 0)
             {
                 Interlocked.Add(ref encodedBytes, read);
-                ChunkEncoded?.Invoke(buffer[..read]);
+                ChunkEncoded?.Invoke(Interlocked.Read(ref lastCaptureTimestampMs), buffer[..read]);
             }
 
             if (running)
