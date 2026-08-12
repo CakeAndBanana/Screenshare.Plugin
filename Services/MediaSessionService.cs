@@ -61,6 +61,10 @@ public sealed class MediaSessionService : IDisposable
 
     public long ViewerFramesDecoded => videoDecoder?.FramesDecoded ?? 0;
 
+    /// <summary>See H264Decoder.AverageFps - directly comparable to HostAverageFps to see
+    /// whether a stream's effective FPS is dropping at capture/encode or somewhere downstream.</summary>
+    public double ViewerAverageFps => videoDecoder?.AverageFps ?? 0;
+
     public long ViewerAudioPackets => audioDecoder?.DecodedPackets ?? 0;
 
     public float ViewerAudioPeak => audioDecoder?.DecodedPeak ?? 0f;
@@ -74,6 +78,9 @@ public sealed class MediaSessionService : IDisposable
     public long HostFramesEncoded => videoEncoder?.FramesEncoded ?? 0;
 
     public long HostFramesSkipped => videoEncoder?.FramesSkipped ?? 0;
+
+    /// <summary>See H264Encoder.AverageFps - directly comparable to ViewerAverageFps.</summary>
+    public double HostAverageFps => videoEncoder?.AverageFps ?? 0;
 
     public long HostEncodedBytes => videoEncoder?.EncodedBytes ?? 0;
 

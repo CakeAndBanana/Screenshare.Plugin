@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using ScreenShare.Plugin.Rendering;
@@ -29,6 +30,8 @@ public sealed class H264Decoder : IDisposable
     private volatile bool running;
     private int errorRecorded;
 
+    private readonly Stopwatch sessionStopwatch = Stopwatch.StartNew();
+
     private long framesDecoded;
     private long droppedChunks;
 
@@ -39,6 +42,15 @@ public sealed class H264Decoder : IDisposable
     public nint SharedHandle { get; }
 
     public long FramesDecoded => Interlocked.Read(ref framesDecoded);
+
+    /// <summary>Average decode rate since this decoder was constructed - not an instantaneous
+    /// rate, but a simple, cheap signal for "is decode actually keeping up with the stream's
+    /// target FPS overall" without needing a rolling window. Directly comparable to
+    /// H264Encoder.AverageFps on the host's side: if this is meaningfully lower than the
+    /// configured target FPS while HostQueueDrops/DroppedChunks are both near zero, decode itself
+    /// (not the network, not the encoder) is the bottleneck - most likely relevant for software
+    /// decode of a CPU-expensive codec, though -hwaccel d3d11va should mostly rule that out.</summary>
+    public double AverageFps => FramesDecoded / Math.Max(sessionStopwatch.Elapsed.TotalSeconds, 0.001);
 
     /// <summary>Fires exactly once, the first time a frame is actually decoded and written to
     /// <see cref="SharedHandle"/>'s texture - not the same moment this decoder is constructed

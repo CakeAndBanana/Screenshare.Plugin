@@ -72,7 +72,9 @@ public sealed class StreamViewWindow : Window
         }
 
         ImGui.Separator();
-        ImGui.TextUnformatted($"{mediaSession.ViewerFramesDecoded} frames decoded, {mediaSession.ViewerAudioPackets} audio packets");
+        ImGui.TextUnformatted(
+            $"{mediaSession.ViewerFramesDecoded} frames decoded ({mediaSession.ViewerAverageFps:F1} fps avg), " +
+            $"{mediaSession.ViewerAudioPackets} audio packets");
         ImGui.TextUnformatted("Audio level:");
         ImGui.SameLine();
         ImGui.ProgressBar(Math.Clamp(mediaSession.ViewerAudioPeak, 0f, 1f), new Vector2(200, 0), "");

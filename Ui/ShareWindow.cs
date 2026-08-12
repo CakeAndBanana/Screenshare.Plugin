@@ -422,8 +422,9 @@ public sealed class ShareWindow : Window, IDisposable
         if (mediaSession.IsHosting)
         {
             ImGui.TextUnformatted(
-                $"Streaming: {mediaSession.HostFramesEncoded} encoded / {mediaSession.HostFramesSkipped} skipped, " +
-                $"{mediaSession.HostEncodedBytes} bytes sent ({mediaSession.HostVendor}, {mediaSession.HostCodec})");
+                $"Streaming: {mediaSession.HostFramesEncoded} encoded / {mediaSession.HostFramesSkipped} skipped " +
+                $"({mediaSession.HostAverageFps:F1} fps avg), {mediaSession.HostEncodedBytes} bytes sent " +
+                $"({mediaSession.HostVendor}, {mediaSession.HostCodec})");
 
             if (mediaSession.HostQueueDrops > 0)
             {

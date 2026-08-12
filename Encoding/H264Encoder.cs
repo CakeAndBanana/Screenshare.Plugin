@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using ScreenShare.Plugin.Capture.ScreenCapture;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
@@ -36,6 +37,8 @@ public sealed class H264Encoder : IDisposable
     private volatile bool running;
     private int errorRecorded;
 
+    private readonly Stopwatch sessionStopwatch = Stopwatch.StartNew();
+
     private long framesEncoded;
     private long framesSkipped;
     private long encodedBytes;
@@ -51,6 +54,13 @@ public sealed class H264Encoder : IDisposable
     public long FramesSkipped => Interlocked.Read(ref framesSkipped);
 
     public long EncodedBytes => Interlocked.Read(ref encodedBytes);
+
+    /// <summary>Average encode rate since this encoder was constructed - directly comparable to
+    /// H264Decoder.AverageFps on the viewer's side, so the two can be checked side by side to see
+    /// exactly where a stream's effective FPS actually drops below its configured target: at
+    /// capture/encode (this number), or somewhere downstream (network, decode, or the viewer's
+    /// own render loop) if this number looks healthy but playback still looks choppy.</summary>
+    public double AverageFps => FramesEncoded / Math.Max(sessionStopwatch.Elapsed.TotalSeconds, 0.001);
 
     public Exception? LastError { get; private set; }
 
