@@ -377,13 +377,24 @@ public sealed class MediaSessionService : IDisposable
     }
 
     /// <summary>Tears down only the outgoing broadcast (encoders + host socket) - an active watch
-    /// session on the independent viewer socket is left completely untouched.</summary>
+    /// session on the independent viewer socket is left completely untouched.
+    ///
+    /// StartHosting/StopHosting/StartViewing/StopViewing are all called directly from ShareWindow's
+    /// Draw() (a button click), so anything synchronous here runs on the game's own render thread.
+    /// H264Encoder.Dispose() joins its background threads with a bounded-but-still-real 1s timeout
+    /// each - blocking the render thread for up to that long is a real, reported stutter every time
+    /// streaming is stopped, not just a rare edge case. Fields are still nulled and IsHosting
+    /// flipped synchronously (so the UI reflects "stopped" immediately), but the actual encoder
+    /// disposal is fired onto a background task, mirroring the socket's own DisposeAsync fire-and-
+    /// forget pattern below.</summary>
     public void StopHosting()
     {
         UnwireAudio();
 
-        videoEncoder?.Dispose();
+        H264Encoder? oldEncoder = videoEncoder;
         videoEncoder = null;
+        if (oldEncoder is not null)
+            _ = Task.Run(() => DisposeSafely(oldEncoder, "H264Encoder"));
 
         IsHosting = false;
 
@@ -394,14 +405,20 @@ public sealed class MediaSessionService : IDisposable
     }
 
     /// <summary>Tears down only the incoming watch session (decoders + viewer socket) - an active
-    /// outgoing broadcast on the independent host socket is left completely untouched.</summary>
+    /// outgoing broadcast on the independent host socket is left completely untouched. Disposal is
+    /// backgrounded for the same reason as StopHosting above - H264Decoder.Dispose() has the same
+    /// shape of bounded-but-blocking thread joins.</summary>
     public void StopViewing()
     {
-        videoDecoder?.Dispose();
+        H264Decoder? oldVideoDecoder = videoDecoder;
         videoDecoder = null;
+        if (oldVideoDecoder is not null)
+            _ = Task.Run(() => DisposeSafely(oldVideoDecoder, "H264Decoder"));
 
-        audioDecoder?.Dispose();
+        AudioPlaybackDecoder? oldAudioDecoder = audioDecoder;
         audioDecoder = null;
+        if (oldAudioDecoder is not null)
+            _ = Task.Run(() => DisposeSafely(oldAudioDecoder, "AudioPlaybackDecoder"));
 
         viewerDevice = null;
         viewerFfmpegExePath = null;
@@ -417,15 +434,67 @@ public sealed class MediaSessionService : IDisposable
             _ = oldSocket.DisposeAsync().AsTask();
     }
 
-    /// <summary>Full teardown of both roles - for leaving a room or disposing the plugin, where
-    /// nothing about either session should survive. Role-specific start/stop (StartHosting,
-    /// StartViewing, StopHosting, StopViewing) never calls this; each only ever touches its own
-    /// side.</summary>
+    /// <summary>Full teardown of both roles - for leaving a room, where nothing about either
+    /// session should survive but the render thread still shouldn't block (this runs from a
+    /// button click during normal play, same as StopHosting/StopViewing individually). Role-
+    /// specific start/stop never calls this; each only ever touches its own side. NOT used by
+    /// <see cref="Dispose"/> - see its own doc comment for why plugin-unload teardown deliberately
+    /// stays synchronous instead.</summary>
     public void Stop()
     {
         StopHosting();
         StopViewing();
     }
 
-    public void Dispose() => Stop();
+    /// <summary>Runs a disposal off the render thread (see StopHosting/StopViewing) and logs
+    /// rather than lets any failure become an unobserved background-task exception - Dispose()
+    /// isn't expected to throw, but it's no longer running somewhere a normal try/catch around the
+    /// call site would ever see it either way.</summary>
+    private static void DisposeSafely(IDisposable disposable, string typeName)
+    {
+        try
+        {
+            disposable.Dispose();
+        }
+        catch (Exception ex)
+        {
+            ServiceCollector.PluginLog.Error(ex, $"ScreenShare failed to dispose a stopped {typeName}");
+        }
+    }
+
+    /// <summary>Plugin-unload teardown - deliberately synchronous, unlike StopHosting/StopViewing/
+    /// Stop() above (all backgrounded to avoid blocking the render thread during normal play).
+    /// Dalamud expects a plugin's Dispose to have fully released everything before its
+    /// AssemblyLoadContext unloads; a background thread still running past that point risks the
+    /// exact "stale assembly still loaded" class of problem this project already hit once with
+    /// audio capture. Socket disposal stays fire-and-forget even here, matching this class's
+    /// original design from before today's hosting/viewing split - only the encoder/decoder
+    /// threads (the ones with real Join-based shutdown) need to actually finish before this
+    /// returns.</summary>
+    public void Dispose()
+    {
+        UnwireAudio();
+
+        videoEncoder?.Dispose();
+        videoEncoder = null;
+
+        videoDecoder?.Dispose();
+        videoDecoder = null;
+
+        audioDecoder?.Dispose();
+        audioDecoder = null;
+
+        IsHosting = false;
+        IsViewing = false;
+
+        MediaSocketClient? oldHostSocket = hostSocket;
+        hostSocket = null;
+        if (oldHostSocket is not null)
+            _ = oldHostSocket.DisposeAsync().AsTask();
+
+        MediaSocketClient? oldViewerSocket = viewerSocket;
+        viewerSocket = null;
+        if (oldViewerSocket is not null)
+            _ = oldViewerSocket.DisposeAsync().AsTask();
+    }
 }

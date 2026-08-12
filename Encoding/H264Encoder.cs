@@ -220,12 +220,31 @@ public sealed class H264Encoder : IDisposable
         }
     }
 
+    /// <summary>The 1s Join timeout is bounded on purpose (Dispose must not hang forever), but
+    /// that means it's only a best-effort wait, not a guarantee writerThread has actually stopped
+    /// touching GPU resources - if the GPU is genuinely stalled/removed, a Map/blit call can stay
+    /// blocked well past 1s. Disposing downscaledTexture/sourceSrv/downscaler/readback regardless
+    /// of that would be a real use-after-dispose race: if the stuck call eventually returns (once
+    /// the driver unstalls, or mid-TDR-reset), it touches COM objects that were already released,
+    /// which crashes natively rather than throwing a catchable .NET exception - a real, reported
+    /// "rare crash when stopping a stream that had a stalled GPU" traced back to exactly this.
+    /// Skipping the GPU-resource disposal (intentionally leaking them) in that rare case is a far
+    /// better outcome than risking that crash.</summary>
     public void Dispose()
     {
         running = false;
-        writerThread.Join(1000);
+        bool writerExited = writerThread.Join(1000);
         readerThread.Join(1000);
         encoderProcess.Dispose();
+
+        if (!writerExited)
+        {
+            ServiceCollector.PluginLog.Warning(
+                "ScreenShare H264Encoder's capture thread didn't exit within 1s (likely a stalled/hung GPU) - " +
+                "leaking its GPU resources rather than risking a use-after-dispose crash.");
+            return;
+        }
+
         readback.Dispose();
         downscaledRtv.Dispose();
         downscaledTexture.Dispose();

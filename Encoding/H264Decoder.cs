@@ -321,6 +321,12 @@ public sealed class H264Decoder : IDisposable
         }
     }
 
+    /// <summary>See the matching comment on H264Encoder.Dispose() - same reasoning, mirrored here:
+    /// displayThread is the one thread that touches the shared GPU texture (via
+    /// WriteFrameToTexture), so its Join result specifically gates whether decodedTexture.Dispose()
+    /// is safe to run. If the GPU is stalled and displayThread is still stuck past the 1s timeout,
+    /// disposing decodedTexture out from under it risks a native use-after-dispose crash once the
+    /// stuck call eventually returns - leaking it in that rare case is the safer outcome.</summary>
     public void Dispose()
     {
         running = false;
@@ -328,8 +334,17 @@ public sealed class H264Decoder : IDisposable
         presentationQueue.Writer.TryComplete();
         feedWriterThread.Join(1000);
         readerThread.Join(1000);
-        displayThread.Join(1000);
+        bool displayExited = displayThread.Join(1000);
         decoderProcess.Dispose();
+
+        if (!displayExited)
+        {
+            ServiceCollector.PluginLog.Warning(
+                "ScreenShare H264Decoder's display thread didn't exit within 1s (likely a stalled/hung GPU) - " +
+                "leaking its shared texture rather than risking a use-after-dispose crash.");
+            return;
+        }
+
         decodedTexture.Dispose();
     }
 }
