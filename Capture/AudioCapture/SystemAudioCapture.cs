@@ -61,14 +61,30 @@ public sealed class SystemAudioCapture : IAudioSource
         Marshal.ThrowExceptionForHR(device.Activate(typeof(IAudioClient).GUID, SystemLoopbackInterop.ClsCtxInprocServer, 0, out object audioClientObj));
         audioClient = (IAudioClient)audioClientObj;
 
+        // Initialize is [PreserveSig] (confirmed by decompile, matching ProcessAudioCapture's own
+        // equivalent call) - a failing HRESULT does NOT auto-throw, it has to be checked
+        // explicitly. Missing this check here was a real bug: a genuine Initialize failure went
+        // completely unnoticed, and the only visible symptom was a confusing downstream
+        // AUDCLNT_E_NOT_INITIALIZED (0x88890001) from GetService below, which correctly reports
+        // the client was never actually initialized but gives no hint why the real call failed.
+        //
+        // AutoConvertPcm | SrcDefaultQuality matter here in a way they don't for
+        // ProcessAudioCapture's equivalent call: the process-loopback virtual device has no fixed
+        // native format (a format is supplied, not queried), so any requested format is just
+        // accepted. A REAL device has its own native mix format, and shared-mode WASAPI requires
+        // either an exact format match or these flags to let the audio engine convert between
+        // whatever we request (48kHz/2ch here) and the device's actual format - almost certainly
+        // the real reason Initialize was failing, not just the missing HRESULT check. Matches
+        // NAudio's own WasapiCapture.GetAudioClientStreamFlags() exactly for shared-mode loopback.
         Guid sessionGuid = Guid.Empty;
-        audioClient.Initialize(
+        int initializeHr = audioClient.Initialize(
             AudioClientShareMode.Shared,
-            AudioClientStreamFlags.Loopback,
+            AudioClientStreamFlags.Loopback | AudioClientStreamFlags.AutoConvertPcm | AudioClientStreamFlags.SrcDefaultQuality,
             1_000_000, // 100ms, matches ProcessAudioCapture/NAudio's own WasapiCapture default
             0,
             waveFormat,
             ref sessionGuid);
+        Marshal.ThrowExceptionForHR(initializeHr);
 
         Marshal.ThrowExceptionForHR(audioClient.GetService(typeof(ProcessLoopbackInterop.IAudioCaptureClient).GUID, out object serviceObj));
         captureClient = (ProcessLoopbackInterop.IAudioCaptureClient)serviceObj;
