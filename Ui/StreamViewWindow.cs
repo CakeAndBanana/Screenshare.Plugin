@@ -54,8 +54,8 @@ public sealed class StreamViewWindow : Window
 
     public override void Draw()
     {
-        if (mediaSession.LastError is not null)
-            ImGui.TextColored(ErrorColor, $"Media stream error: {mediaSession.LastError}");
+        if (mediaSession.ViewerLastError is not null)
+            ImGui.TextColored(ErrorColor, $"Media stream error: {mediaSession.ViewerLastError}");
 
         RawTextureWrap? texture = getPreviewTexture();
         if (texture is null)

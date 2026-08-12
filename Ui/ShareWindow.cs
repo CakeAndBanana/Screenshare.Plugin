@@ -37,7 +37,8 @@ public sealed class ShareWindow : Window, IDisposable
     private string joinPasswordInput = "";
     private bool wasViewerInRoom;
     private nint? lastOpenedViewerVideoHandle;
-    private Exception? lastHandledMediaException;
+    private Exception? lastHandledHostMediaException;
+    private Exception? lastHandledViewerMediaException;
 
     /// <summary>Watching a stream happens in a separate popout window rather than inline here, so
     /// it can stay visible (or be moved/resized) independently of the room UI - this is also the
@@ -193,10 +194,10 @@ public sealed class ShareWindow : Window, IDisposable
     /// the owner, a camera for whoever is actively streaming right now, and a "permitted" badge
     /// for anyone else who's been granted streaming permission but isn't live at the moment.
     /// A member who's actively streaming (and isn't yourself) has a clickable name that opens
-    /// <see cref="StreamView"/> on their feed - disabled while you're hosting yourself, since
-    /// starting a watch session would tear down your own outgoing stream (they share one
-    /// MediaSessionService). Kick/grant/revoke buttons only render for the host, and never
-    /// against their own row.</summary>
+    /// <see cref="StreamView"/> on their feed - hosting and viewing run on independent
+    /// MediaSessionService connections, so this stays clickable even while you're streaming your
+    /// own feed. Kick/grant/revoke buttons only render for the host, and never against their own
+    /// row.</summary>
     private void DrawMemberList()
     {
         ImGui.TextUnformatted("Members:");
@@ -204,7 +205,7 @@ public sealed class ShareWindow : Window, IDisposable
         {
             bool isSelf = member.ConnectionId == roomSession.ConnectionId;
             bool isStreaming = roomSession.ActiveStreamers.Any(s => s.ConnectionId == member.ConnectionId);
-            bool isWatchable = isStreaming && !isSelf && !mediaSession.IsHosting;
+            bool isWatchable = isStreaming && !isSelf;
 
             DrawMemberIcons(member, isStreaming);
 
@@ -373,11 +374,18 @@ public sealed class ShareWindow : Window, IDisposable
         // in ToggleMediaStreaming that normally call TryRecoverFromDeviceRemoved - confirmed by a
         // real DeviceRemoved failure landing here instead of there, which would otherwise have
         // left the stale device in place until some unrelated button happened to trigger recovery
-        // first.
-        if (mediaSession.LastException is { } mediaEx && !ReferenceEquals(mediaEx, lastHandledMediaException))
+        // first. Checked separately for each independent role/connection - a device-removed
+        // failure could in principle hit either the encoder or the decoder side.
+        if (mediaSession.HostLastException is { } hostMediaEx && !ReferenceEquals(hostMediaEx, lastHandledHostMediaException))
         {
-            lastHandledMediaException = mediaEx;
-            TryRecoverFromDeviceRemoved(mediaEx);
+            lastHandledHostMediaException = hostMediaEx;
+            TryRecoverFromDeviceRemoved(hostMediaEx);
+        }
+
+        if (mediaSession.ViewerLastException is { } viewerMediaEx && !ReferenceEquals(viewerMediaEx, lastHandledViewerMediaException))
+        {
+            lastHandledViewerMediaException = viewerMediaEx;
+            TryRecoverFromDeviceRemoved(viewerMediaEx);
         }
     }
 
@@ -407,7 +415,7 @@ public sealed class ShareWindow : Window, IDisposable
 
     private void StopWatching()
     {
-        mediaSession.Stop();
+        mediaSession.StopViewing();
         previewTexture?.Dispose();
         previewTexture = null;
         lastOpenedViewerVideoHandle = null;
@@ -416,8 +424,8 @@ public sealed class ShareWindow : Window, IDisposable
 
     private void DrawMediaStreamStatus()
     {
-        if (mediaSession.LastError is not null)
-            ImGui.TextColored(ErrorColor, $"Media stream error: {mediaSession.LastError}");
+        if (mediaSession.HostLastError is not null)
+            ImGui.TextColored(ErrorColor, $"Media stream error: {mediaSession.HostLastError}");
 
         if (mediaSession.IsHosting)
         {
@@ -530,7 +538,7 @@ public sealed class ShareWindow : Window, IDisposable
     {
         if (mediaSession.IsHosting)
         {
-            mediaSession.Stop();
+            mediaSession.StopHosting();
             DisposeStreamCapture();
             return;
         }

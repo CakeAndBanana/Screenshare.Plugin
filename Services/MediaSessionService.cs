@@ -7,11 +7,15 @@ using ScreenShare.Plugin.Rendering;
 namespace ScreenShare.Plugin.Services;
 
 /// <summary>
-/// Owns the media-plane WebSocket and, depending on room role, either the host-side encoders
-/// (capture -&gt; encode -&gt; send) or the viewer-side decoders (receive -&gt; decode -&gt;
-/// display/play). Mirrors RoomSessionService's design: every public method fires its async work
-/// and returns immediately, safe to call directly from Draw(). Status is exposed via plain
-/// properties the UI polls each frame.
+/// Owns the media-plane WebSocket(s) for both the host-side encoders (capture -&gt; encode -&gt;
+/// send) and the viewer-side decoders (receive -&gt; decode -&gt; display/play). Hosting and
+/// viewing are two fully independent lifecycles - a room can have multiple simultaneous
+/// streamers, and a client should be able to watch one of them while also streaming their own
+/// feed, so each role gets its own MediaSocketClient connection (the relay ties one WebSocket to
+/// one role) and its own start/stop/error state; nothing here couples the two together. Mirrors
+/// RoomSessionService's design otherwise: every public method fires its async work and returns
+/// immediately, safe to call directly from Draw(). Status is exposed via plain properties the UI
+/// polls each frame.
 /// </summary>
 public sealed class MediaSessionService : IDisposable
 {
@@ -21,12 +25,12 @@ public sealed class MediaSessionService : IDisposable
     // desync results as strictly better than silence.
     private static readonly TimeSpan AudioVideoSyncTimeout = TimeSpan.FromSeconds(10);
 
-    private MediaSocketClient? socket;
-
+    private MediaSocketClient? hostSocket;
     private H264Encoder? videoEncoder;
     private OpusFrameEncoder? audioEncoder;
     private IAudioSource? hostAudioCapture;
 
+    private MediaSocketClient? viewerSocket;
     private H264Decoder? videoDecoder;
     private AudioPlaybackDecoder? audioDecoder;
     private GameAdapterDevice? viewerDevice;
@@ -43,15 +47,22 @@ public sealed class MediaSessionService : IDisposable
     /// so it can stop and clear the selection instead of hanging on a dead feed.</summary>
     public string? ViewingStreamerConnectionId { get; private set; }
 
-    public string? LastError { get; private set; }
+    public string? HostLastError { get; private set; }
 
-    /// <summary>Same failure as <see cref="LastError"/>, but as the real exception rather than
+    /// <summary>Same failure as <see cref="HostLastError"/>, but as the real exception rather than
     /// just its message - needed so ShareWindow can pattern-match a DXGI device-removed failure
     /// the same way it already does for the synchronous preview-mode buttons. Without this, a
     /// device-removed failure on this async start path left ShareWindow's stale device reference
     /// in place forever, since TryRecoverFromDeviceRemoved was only ever reachable from
     /// synchronous catch blocks - confirmed by a real DeviceRemoved failure landing here instead.</summary>
-    public Exception? LastException { get; private set; }
+    public Exception? HostLastException { get; private set; }
+
+    public string? ViewerLastError { get; private set; }
+
+    /// <summary>See <see cref="HostLastException"/> - same reasoning, kept separate from the host
+    /// side now that hosting and viewing are independent connections; a failure on one side should
+    /// never surface as the other role's error.</summary>
+    public Exception? ViewerLastException { get; private set; }
 
     // Viewer-facing surface for ShareWindow to render/report.
     public nint? ViewerSharedHandle => videoDecoder?.SharedHandle;
@@ -95,13 +106,13 @@ public sealed class MediaSessionService : IDisposable
     /// upload can't keep up with the configured VIDEO bitrate, distinct from HostFramesSkipped
     /// (which only measures whether GPU capture/readback is keeping up, not whether the network
     /// is) and from <see cref="HostQueueAudioDrops"/> (audio has its own queue now).</summary>
-    public long HostQueueDrops => socket?.DroppedMessages ?? 0;
+    public long HostQueueDrops => hostSocket?.DroppedMessages ?? 0;
 
     /// <summary>See MediaSocketClient.DroppedAudioMessages - audio has its own send queue,
     /// separate from video, specifically so video backpressure can't crowd it out; non-zero here
     /// means audio itself is being throttled (e.g. genuinely insufficient upload bandwidth for
     /// even the small audio stream), not just competing with video for the same queue.</summary>
-    public long HostQueueAudioDrops => socket?.DroppedAudioMessages ?? 0;
+    public long HostQueueAudioDrops => hostSocket?.DroppedAudioMessages ?? 0;
 
     public GpuVendor? HostVendor => videoEncoder?.Vendor;
 
@@ -129,9 +140,9 @@ public sealed class MediaSessionService : IDisposable
         VideoCodec codec = VideoCodec.H264,
         int audioBitrateBps = 32000)
     {
-        Stop();
-        LastError = null;
-        LastException = null;
+        StopHosting();
+        HostLastError = null;
+        HostLastException = null;
         _ = StartHostingCoreAsync(relayUrl, roomId, connectionId, gameAdapterDevice, screenCapture, audioCapture, ffmpegExePath, targetHeight, bitrateKbps, fps, codec, audioBitrateBps);
     }
 
@@ -153,10 +164,10 @@ public sealed class MediaSessionService : IDisposable
         {
             var newSocket = new MediaSocketClient();
             await newSocket.ConnectAsync(relayUrl, roomId, connectionId, isStreamer: true).ConfigureAwait(false);
-            socket = newSocket;
+            hostSocket = newSocket;
 
             var encoder = new H264Encoder(gameAdapterDevice, screenCapture, ffmpegExePath, targetHeight, bitrateKbps, fps, codec);
-            encoder.ChunkEncoded += chunk => socket?.Send(MediaMessageType.Video, chunk);
+            encoder.ChunkEncoded += chunk => hostSocket?.Send(MediaMessageType.Video, chunk);
             videoEncoder = encoder;
             newSocket.SendVideoMetadata(encoder.Width, encoder.Height, codec, fps);
 
@@ -164,7 +175,7 @@ public sealed class MediaSessionService : IDisposable
             // whole stream down with it - video is already live at this point, and killing it
             // over an audio-only failure would be a strictly worse outcome than just streaming
             // without audio. Caught locally rather than letting it propagate to the outer catch
-            // below, which calls Stop() and would tear down the video encoder too.
+            // below, which calls StopHosting() and would tear down the video encoder too.
             if (audioCapture is not null)
             {
                 try
@@ -173,8 +184,8 @@ public sealed class MediaSessionService : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    LastError = $"Audio disabled: {ex.Message}";
-                    LastException = ex;
+                    HostLastError = $"Audio disabled: {ex.Message}";
+                    HostLastException = ex;
                     ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to wire audio into the media stream - continuing video-only");
                 }
             }
@@ -183,10 +194,10 @@ public sealed class MediaSessionService : IDisposable
         }
         catch (Exception ex)
         {
-            LastError = ex.Message;
-            LastException = ex;
+            HostLastError = ex.Message;
+            HostLastException = ex;
             ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to start hosting the media stream");
-            Stop();
+            StopHosting();
         }
     }
 
@@ -198,7 +209,7 @@ public sealed class MediaSessionService : IDisposable
         int channels = audioCapture.WaveFormat.Channels;
 
         var opusEncoder = new OpusFrameEncoder(sampleRate, channels, bitrate: bitrateBps);
-        opusEncoder.PacketEncoded += packet => socket?.Send(MediaMessageType.Audio, packet);
+        opusEncoder.PacketEncoded += packet => hostSocket?.Send(MediaMessageType.Audio, packet);
         audioCapture.SamplesAvailable += OnHostSamplesAvailable;
 
         audioEncoder = opusEncoder;
@@ -220,7 +231,7 @@ public sealed class MediaSessionService : IDisposable
     /// until the whole stream was stopped and restarted.</summary>
     public void UpdateAudioSource(IAudioSource? audioCapture, int audioBitrateBps = 32000)
     {
-        if (!IsHosting || socket is not { } activeSocket)
+        if (!IsHosting || hostSocket is not { } activeSocket)
             return;
 
         UnwireAudio();
@@ -231,13 +242,16 @@ public sealed class MediaSessionService : IDisposable
     /// <summary>Watches one specific streamer's feed - <paramref name="streamerConnectionId"/>
     /// picks which one, since a room can have more than one active streamer at once and each
     /// gets an independent channel on the relay (see MediaRelay). Switching who you're watching
-    /// means calling this again (via Stop() + StartViewing) rather than resubscribing an open
-    /// connection - there's no protocol support for that on today's binary media socket.</summary>
+    /// means calling this again (via StopViewing() + StartViewing) rather than resubscribing an
+    /// open connection - there's no protocol support for that on today's binary media socket.
+    /// Only tears down an existing WATCH session, never an active hosting session - the two run
+    /// on independent connections, so you can watch someone else while streaming your own
+    /// feed.</summary>
     public void StartViewing(string relayUrl, string roomId, string connectionId, string streamerConnectionId, GameAdapterDevice gameAdapterDevice, string ffmpegExePath)
     {
-        Stop();
-        LastError = null;
-        LastException = null;
+        StopViewing();
+        ViewerLastError = null;
+        ViewerLastException = null;
         viewerDevice = gameAdapterDevice;
         viewerFfmpegExePath = ffmpegExePath;
         ViewingStreamerConnectionId = streamerConnectionId;
@@ -255,16 +269,16 @@ public sealed class MediaSessionService : IDisposable
             newSocket.AudioPacketReceived += packet => audioDecoder?.Feed(packet);
 
             await newSocket.ConnectAsync(relayUrl, roomId, connectionId, isStreamer: false, streamerConnectionId).ConfigureAwait(false);
-            socket = newSocket;
+            viewerSocket = newSocket;
 
             IsViewing = true;
         }
         catch (Exception ex)
         {
-            LastError = ex.Message;
-            LastException = ex;
+            ViewerLastError = ex.Message;
+            ViewerLastException = ex;
             ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to start viewing the media stream");
-            Stop();
+            StopViewing();
         }
     }
 
@@ -284,8 +298,8 @@ public sealed class MediaSessionService : IDisposable
         }
         catch (Exception ex)
         {
-            LastError = ex.Message;
-            LastException = ex;
+            ViewerLastError = ex.Message;
+            ViewerLastException = ex;
             ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to create the viewer's H264Decoder");
         }
     }
@@ -303,8 +317,8 @@ public sealed class MediaSessionService : IDisposable
         }
         catch (Exception ex)
         {
-            LastError = ex.Message;
-            LastException = ex;
+            ViewerLastError = ex.Message;
+            ViewerLastException = ex;
             ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to create the viewer's AudioPlaybackDecoder");
         }
     }
@@ -362,13 +376,27 @@ public sealed class MediaSessionService : IDisposable
         return true;
     }
 
-    public void Stop()
+    /// <summary>Tears down only the outgoing broadcast (encoders + host socket) - an active watch
+    /// session on the independent viewer socket is left completely untouched.</summary>
+    public void StopHosting()
     {
         UnwireAudio();
 
         videoEncoder?.Dispose();
         videoEncoder = null;
 
+        IsHosting = false;
+
+        MediaSocketClient? oldSocket = hostSocket;
+        hostSocket = null;
+        if (oldSocket is not null)
+            _ = oldSocket.DisposeAsync().AsTask();
+    }
+
+    /// <summary>Tears down only the incoming watch session (decoders + viewer socket) - an active
+    /// outgoing broadcast on the independent host socket is left completely untouched.</summary>
+    public void StopViewing()
+    {
         videoDecoder?.Dispose();
         videoDecoder = null;
 
@@ -381,13 +409,22 @@ public sealed class MediaSessionService : IDisposable
         audioReadyToStart = false;
         videoReadyToStart = false;
 
-        IsHosting = false;
         IsViewing = false;
 
-        MediaSocketClient? oldSocket = socket;
-        socket = null;
+        MediaSocketClient? oldSocket = viewerSocket;
+        viewerSocket = null;
         if (oldSocket is not null)
             _ = oldSocket.DisposeAsync().AsTask();
+    }
+
+    /// <summary>Full teardown of both roles - for leaving a room or disposing the plugin, where
+    /// nothing about either session should survive. Role-specific start/stop (StartHosting,
+    /// StartViewing, StopHosting, StopViewing) never calls this; each only ever touches its own
+    /// side.</summary>
+    public void Stop()
+    {
+        StopHosting();
+        StopViewing();
     }
 
     public void Dispose() => Stop();
