@@ -10,9 +10,11 @@ public enum MediaMessageType : byte
     Audio = 1,
 
     /// <summary>Sent once by the host at stream start: int32 width + int32 height + 1-byte
-    /// VideoCodec (little-endian). A viewer has no other way to know the host's chosen
-    /// capture/encode resolution or codec before the first video chunk arrives, and needs both
-    /// up front to size the decoded-frame buffer/texture and pick the right ffmpeg decode format.</summary>
+    /// VideoCodec + uint16 target fps (little-endian). A viewer has no other way to know the
+    /// host's chosen capture/encode resolution, codec, or target frame rate before the first
+    /// video chunk arrives - width/height/codec size the decoded-frame buffer/texture and pick
+    /// the right ffmpeg decode format, and fps paces the viewer's own presentation buffer (see
+    /// H264Decoder's display loop) at the same rate frames are actually meant to be shown.</summary>
     VideoMetadata = 2,
 
     /// <summary>Sent once by the host at stream start: int32 sample rate + int32 channel count
@@ -98,7 +100,7 @@ public sealed class MediaSocketClient : IAsyncDisposable
 
     public event Action<byte[]>? AudioPacketReceived;
 
-    public event Action<int, int, VideoCodec>? VideoMetadataReceived;
+    public event Action<int, int, VideoCodec, int>? VideoMetadataReceived;
 
     public event Action<int, int>? AudioMetadataReceived;
 
@@ -185,12 +187,13 @@ public sealed class MediaSocketClient : IAsyncDisposable
         sendQueue.Writer.TryWrite(framed);
     }
 
-    public void SendVideoMetadata(int width, int height, VideoCodec codec)
+    public void SendVideoMetadata(int width, int height, VideoCodec codec, int fps)
     {
-        byte[] payload = new byte[9];
+        byte[] payload = new byte[11];
         BitConverter.GetBytes(width).CopyTo(payload, 0);
         BitConverter.GetBytes(height).CopyTo(payload, 4);
         payload[8] = (byte)codec;
+        BitConverter.GetBytes((ushort)Math.Clamp(fps, 1, ushort.MaxValue)).CopyTo(payload, 9);
         Send(MediaMessageType.VideoMetadata, payload);
     }
 
@@ -291,8 +294,8 @@ public sealed class MediaSocketClient : IAsyncDisposable
                     case MediaMessageType.Audio:
                         AudioPacketReceived?.Invoke(payload);
                         break;
-                    case MediaMessageType.VideoMetadata when payload.Length >= 9:
-                        VideoMetadataReceived?.Invoke(BitConverter.ToInt32(payload, 0), BitConverter.ToInt32(payload, 4), (VideoCodec)payload[8]);
+                    case MediaMessageType.VideoMetadata when payload.Length >= 11:
+                        VideoMetadataReceived?.Invoke(BitConverter.ToInt32(payload, 0), BitConverter.ToInt32(payload, 4), (VideoCodec)payload[8], BitConverter.ToUInt16(payload, 9));
                         break;
                     case MediaMessageType.AudioMetadata when payload.Length >= 8:
                         AudioMetadataReceived?.Invoke(BitConverter.ToInt32(payload, 0), BitConverter.ToInt32(payload, 4));

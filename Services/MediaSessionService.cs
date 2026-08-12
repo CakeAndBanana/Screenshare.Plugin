@@ -32,6 +32,7 @@ public sealed class MediaSessionService : IDisposable
     private GameAdapterDevice? viewerDevice;
     private string? viewerFfmpegExePath;
     private bool audioReadyToStart;
+    private bool videoReadyToStart;
 
     public bool IsHosting { get; private set; }
 
@@ -73,6 +74,12 @@ public sealed class MediaSessionService : IDisposable
     /// up with the incoming stream in real time (distinct from network drops, which would show up
     /// on the HOST's <see cref="HostQueueDrops"/> instead).</summary>
     public long ViewerDecodeDrops => videoDecoder?.DroppedChunks ?? 0;
+
+    /// <summary>See H264Decoder.DisplayQueueDrops - distinct from <see cref="ViewerDecodeDrops"/>:
+    /// non-zero here means decode itself is keeping up (or bursting ahead) but the presentation
+    /// buffer that paces actual on-screen display is overflowing, not the decoder falling
+    /// behind.</summary>
+    public long ViewerDisplayDrops => videoDecoder?.DisplayQueueDrops ?? 0;
 
     // Host-facing surface.
     public long HostFramesEncoded => videoEncoder?.FramesEncoded ?? 0;
@@ -151,7 +158,7 @@ public sealed class MediaSessionService : IDisposable
             var encoder = new H264Encoder(gameAdapterDevice, screenCapture, ffmpegExePath, targetHeight, bitrateKbps, fps, codec);
             encoder.ChunkEncoded += chunk => socket?.Send(MediaMessageType.Video, chunk);
             videoEncoder = encoder;
-            newSocket.SendVideoMetadata(encoder.Width, encoder.Height, codec);
+            newSocket.SendVideoMetadata(encoder.Width, encoder.Height, codec, fps);
 
             // A broken audio source (unsupported format, device gone, etc.) shouldn't take the
             // whole stream down with it - video is already live at this point, and killing it
@@ -264,15 +271,15 @@ public sealed class MediaSessionService : IDisposable
     /// <summary>Fires on the socket's background receive loop, not the render thread - texture
     /// creation is safe there (see GameAdapterDevice's doc comment: resource creation on a D3D11
     /// device is thread-safe by default, only the ImmediateContext itself needs external locking).</summary>
-    private void OnVideoMetadataReceived(int width, int height, VideoCodec codec)
+    private void OnVideoMetadataReceived(int width, int height, VideoCodec codec, int fps)
     {
         if (videoDecoder is not null || viewerDevice is null || viewerFfmpegExePath is null)
             return;
 
         try
         {
-            var decoder = new H264Decoder(viewerDevice, viewerFfmpegExePath, width, height, codec);
-            decoder.FirstFrameDecoded += OnFirstVideoFrameDecoded;
+            var decoder = new H264Decoder(viewerDevice, viewerFfmpegExePath, width, height, fps, codec);
+            decoder.ReadyToDisplay += OnVideoReadyToDisplay;
             videoDecoder = decoder;
         }
         catch (Exception ex)
@@ -302,40 +309,56 @@ public sealed class MediaSessionService : IDisposable
         }
     }
 
-    /// <summary>Video's own startup latency (spawning ffmpeg, initializing hardware decode,
-    /// waiting for a keyframe) is normally much longer than audio's small jitter-buffer delay -
-    /// starting each the instant its OWN buffer was ready, independent of the other, was
-    /// producing an audible/visible desync right at the start of playback. So audio playback is
-    /// deliberately held until video's first frame has actually been decoded (or a timeout
-    /// elapses - see <see cref="AudioVideoSyncTimeout"/>), rather than starting the moment its own
-    /// prebuffer fills.</summary>
-    private void OnFirstVideoFrameDecoded() => TryStartSyncedAudioPlayback();
+    /// <summary>Both video (once its presentation buffer has enough margin to play smoothly - see
+    /// H264Decoder.ReadyToDisplay) and audio (once its own small jitter buffer is full - see
+    /// AudioPlaybackDecoder.ReadyToPlay) are held from actually starting until BOTH are ready, per
+    /// the same reasoning that motivated video's own jitter buffer: starting each the instant its
+    /// own buffer happened to fill, independent of the other, was producing an audible/visible
+    /// desync right at the start of playback. Either side falls back to starting alone after
+    /// <see cref="AudioVideoSyncTimeout"/> so a stuck decode/format failure on one side can't mean
+    /// the other never plays at all.</summary>
+    private void OnVideoReadyToDisplay()
+    {
+        videoReadyToStart = true;
+        if (TryStartSyncedPlayback())
+            return;
+
+        // Captured locally (not read back through the videoDecoder field later) so a stale
+        // timeout firing after a newer session has already replaced it can't accidentally
+        // force-start the WRONG session's video; StartDisplay is idempotent regardless.
+        H264Decoder? decoderAtTimeoutStart = videoDecoder;
+        _ = Task.Delay(AudioVideoSyncTimeout).ContinueWith(
+            _ => decoderAtTimeoutStart?.StartDisplay(),
+            TaskScheduler.Default);
+    }
 
     private void OnAudioReadyToPlay()
     {
         audioReadyToStart = true;
-        if (TryStartSyncedAudioPlayback())
+        if (TryStartSyncedPlayback())
             return;
 
-        // Video isn't ready yet - captured locally (not read back through the audioDecoder field
-        // later) so a stale timeout firing after a newer session has already replaced it can't
-        // accidentally force-start the WRONG session's audio; StartPlayback is also safe to call
-        // on an already-disposed instance regardless.
+        // Same reasoning as OnVideoReadyToDisplay's timeout above, mirrored for audio.
         AudioPlaybackDecoder? decoderAtTimeoutStart = audioDecoder;
         _ = Task.Delay(AudioVideoSyncTimeout).ContinueWith(
             _ => decoderAtTimeoutStart?.StartPlayback(),
             TaskScheduler.Default);
     }
 
-    private bool TryStartSyncedAudioPlayback()
+    /// <summary>Video is always the primary stream when viewing, so its own readiness always
+    /// gates playback; audio only gates it when actually present - a video-only stream (audio
+    /// never enabled by the host) would otherwise wait the full AudioVideoSyncTimeout for an
+    /// audio decoder that will never exist.</summary>
+    private bool TryStartSyncedPlayback()
     {
-        if (!audioReadyToStart || audioDecoder is null)
+        if (!videoReadyToStart || videoDecoder is null)
             return false;
 
-        if (videoDecoder is not null && videoDecoder.FramesDecoded < 1)
+        if (audioDecoder is not null && !audioReadyToStart)
             return false;
 
-        audioDecoder.StartPlayback();
+        videoDecoder.StartDisplay();
+        audioDecoder?.StartPlayback();
         return true;
     }
 
@@ -356,6 +379,7 @@ public sealed class MediaSessionService : IDisposable
         viewerFfmpegExePath = null;
         ViewingStreamerConnectionId = null;
         audioReadyToStart = false;
+        videoReadyToStart = false;
 
         IsHosting = false;
         IsViewing = false;

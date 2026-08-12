@@ -85,6 +85,12 @@ public sealed class StreamViewWindow : Window
                 $"{mediaSession.ViewerDecodeDrops} chunks dropped before decoding - the decoder can't keep up in real time.");
         }
 
+        if (mediaSession.ViewerDisplayDrops > 0)
+        {
+            ImGui.TextColored(WarnColor,
+                $"{mediaSession.ViewerDisplayDrops} decoded frames dropped before display - decode is bursting ahead of playback.");
+        }
+
         if (mediaSession.ViewerVideoError is { } viewerVideoError)
             ImGui.TextColored(ErrorColor, $"Video decoder died mid-stream: {viewerVideoError.Message}");
     }

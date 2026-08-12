@@ -21,19 +21,35 @@ public sealed class H264Decoder : IDisposable
 {
     private const int FeedChannelCapacity = 256;
 
+    /// <summary>How much decoded video to hold before it's actually shown, absorbing network/
+    /// decode jitter so playback runs on a steady clock instead of however bursty frame arrival
+    /// happened to be. Without this, each frame was written to the display texture the instant it
+    /// finished decoding - since decode completion directly follows network arrival timing (itself
+    /// bursty: bounded drop-oldest queues at multiple hops, WebSocket message boundaries, etc.),
+    /// playback visibly sped up through arrival bursts and slowed down through gaps, rather than
+    /// running at a steady pace. 200ms is enough margin for typical jitter without adding much
+    /// perceptible extra latency on top of it.</summary>
+    private const int PresentationBufferMilliseconds = 200;
+
     private readonly GameAdapterDevice gameAdapterDevice;
     private readonly Texture2D decodedTexture;
     private readonly FfmpegProcessRunner decoderProcess;
     private readonly Channel<byte[]> feedChannel;
+    private readonly Channel<byte[]> presentationQueue;
+    private readonly int presentationCapacity;
+    private readonly int frameIntervalMs;
     private readonly Thread feedWriterThread;
     private readonly Thread readerThread;
+    private readonly Thread displayThread;
     private volatile bool running;
+    private volatile bool displayStarted;
     private int errorRecorded;
 
     private readonly Stopwatch sessionStopwatch = Stopwatch.StartNew();
 
     private long framesDecoded;
     private long droppedChunks;
+    private long displayQueueDrops;
 
     public int Width { get; }
 
@@ -52,15 +68,15 @@ public sealed class H264Decoder : IDisposable
     /// decode of a CPU-expensive codec, though -hwaccel d3d11va should mostly rule that out.</summary>
     public double AverageFps => FramesDecoded / Math.Max(sessionStopwatch.Elapsed.TotalSeconds, 0.001);
 
-    /// <summary>Fires exactly once, the first time a frame is actually decoded and written to
-    /// <see cref="SharedHandle"/>'s texture - not the same moment this decoder is constructed
-    /// (which happens as soon as VideoMetadata arrives, well before ffmpeg has actually spun up
-    /// and produced anything). Used to synchronize audio playback start with video actually
-    /// being visible, since video's startup latency (spawning ffmpeg, initializing hardware
-    /// decode, waiting for the first keyframe) is normally much longer than audio's - starting
-    /// audio the instant ITS OWN buffer is ready, independent of video, was producing an
-    /// audible/visible desync at the start of playback.</summary>
-    public event Action? FirstFrameDecoded;
+    /// <summary>Fires exactly once, when the presentation buffer has filled enough to start
+    /// playback smoothly (see <see cref="PresentationBufferMilliseconds"/>) - not the same moment
+    /// this decoder is constructed (which happens as soon as VideoMetadata arrives, well before
+    /// ffmpeg has actually spun up and produced anything) or the moment the first frame decodes
+    /// (too early - there's no jitter margin yet). Actual display doesn't start until
+    /// <see cref="StartDisplay"/> is called; used to synchronize with audio playback start the
+    /// same way AudioPlaybackDecoder.ReadyToPlay does, so both start together rather than
+    /// whichever buffer happened to fill first.</summary>
+    public event Action? ReadyToDisplay;
 
     /// <summary>How many incoming network chunks got dropped because ffmpeg's decode couldn't
     /// keep up in real time (feedChannel filling up faster than FeedWriterLoop could hand chunks
@@ -70,9 +86,16 @@ public sealed class H264Decoder : IDisposable
     /// real time), not the network or the encoder.</summary>
     public long DroppedChunks => Interlocked.Read(ref droppedChunks);
 
+    /// <summary>How many decoded frames got evicted from the presentation buffer before ever
+    /// being shown, because decode is racing far enough ahead of the paced display clock to fill
+    /// it faster than DisplayLoop can drain it. Should normally stay near zero (decode is
+    /// throttled by the same network arrival rate driving display); a high value points at
+    /// FeedWriterLoop/decode momentarily bursting well beyond the target fps.</summary>
+    public long DisplayQueueDrops => Interlocked.Read(ref displayQueueDrops);
+
     public Exception? LastError { get; private set; }
 
-    public H264Decoder(GameAdapterDevice gameAdapterDevice, string ffmpegExePath, int width, int height, VideoCodec codec = VideoCodec.H264)
+    public H264Decoder(GameAdapterDevice gameAdapterDevice, string ffmpegExePath, int width, int height, int fps, VideoCodec codec = VideoCodec.H264)
     {
         this.gameAdapterDevice = gameAdapterDevice;
         Width = width;
@@ -81,6 +104,15 @@ public sealed class H264Decoder : IDisposable
         Device device = gameAdapterDevice.Device;
         decodedTexture = SharedTextureFactory.CreateEmpty(device, Width, Height);
         SharedHandle = SharedTextureFactory.GetSharedHandle(decodedTexture);
+
+        frameIntervalMs = Math.Max(1, 1000 / Math.Max(1, fps));
+        presentationCapacity = Math.Clamp(fps * PresentationBufferMilliseconds / 1000, 2, 15);
+        presentationQueue = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(presentationCapacity)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = true,
+        });
 
         feedChannel = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(FeedChannelCapacity)
         {
@@ -105,9 +137,18 @@ public sealed class H264Decoder : IDisposable
         running = true;
         feedWriterThread = new Thread(FeedWriterLoop) { IsBackground = true, Name = "ScreenShare-H264DecFeed" };
         readerThread = new Thread(ReadLoop) { IsBackground = true, Name = "ScreenShare-H264DecRead" };
+        displayThread = new Thread(DisplayLoop) { IsBackground = true, Name = "ScreenShare-H264Display" };
         feedWriterThread.Start();
         readerThread.Start();
+        displayThread.Start();
     }
+
+    /// <summary>Begins draining the presentation buffer onto the display texture at the paced
+    /// target-fps rate - held off until called so playback can be started in lockstep with audio
+    /// (see MediaSessionService's sync coordination) rather than the instant the buffer fills.
+    /// Idempotent and safe to call more than once (e.g. if audio joins the stream mid-session,
+    /// after video is already playing).</summary>
+    public void StartDisplay() => displayStarted = true;
 
     /// <summary>Never blocks - safe to call from a network receive thread.</summary>
     public void Feed(byte[] chunk)
@@ -138,11 +179,15 @@ public sealed class H264Decoder : IDisposable
         }
     }
 
+    /// <summary>Reads each raw decoded frame from ffmpeg as soon as it's available and hands it
+    /// to the presentation buffer - deliberately NOT written to the display texture here anymore.
+    /// Decode completion tracks network arrival timing (itself bursty), so displaying immediately
+    /// on this thread made playback speed follow that jitter directly; DisplayLoop now owns
+    /// actually showing frames, on its own steady clock.</summary>
     private void ReadLoop()
     {
         int frameSize = Width * Height * 4;
         byte[] frame = new byte[frameSize];
-        GCHandle pinned = GCHandle.Alloc(frame, GCHandleType.Pinned);
         try
         {
             while (running)
@@ -160,29 +205,75 @@ public sealed class H264Decoder : IDisposable
                     offset += read;
                 }
 
-                lock (gameAdapterDevice.ImmediateContextLock)
-                {
-                    var dataBox = new DataBox(pinned.AddrOfPinnedObject(), Width * 4, 0);
-                    gameAdapterDevice.Device.ImmediateContext.UpdateSubresource(dataBox, decodedTexture);
+                Interlocked.Increment(ref framesDecoded);
 
-                    // decodedTexture is a classic (non-keyed-mutex) shared resource opened on a
-                    // SEPARATE device by the game's own render thread (see SharedTextureBridge) -
-                    // without an explicit Flush here, this UpdateSubresource can sit queued in the
-                    // driver's command buffer indefinitely, invisible to the other device until
-                    // something UNRELATED happens to trigger a flush. That's exactly consistent
-                    // with "sometimes gets a frame" rather than a clean success/failure - it's not
-                    // broken, it's just unsynchronized. Flush forces this write to actually reach
-                    // the GPU now, not whenever the driver next feels like it.
-                    gameAdapterDevice.Device.ImmediateContext.Flush();
-                }
-
-                if (Interlocked.Increment(ref framesDecoded) == 1)
-                    FirstFrameDecoded?.Invoke();
+                if (presentationQueue.Reader.Count >= presentationCapacity)
+                    Interlocked.Increment(ref displayQueueDrops);
+                presentationQueue.Writer.TryWrite((byte[])frame.Clone());
             }
         }
         catch (Exception ex) when (running)
         {
-            RecordError("ReadLoop (decoder stdout -> shared texture)", ex);
+            RecordError("ReadLoop (decoder stdout -> presentation buffer)", ex);
+        }
+    }
+
+    /// <summary>Drains the presentation buffer onto the display texture at a steady, paced clock
+    /// (one frame every frameIntervalMs) rather than whenever decode happens to produce one - this
+    /// is what actually fixes playback speeding up/slowing down with network jitter. Waits for the
+    /// buffer to fill before raising <see cref="ReadyToDisplay"/>, then waits again for
+    /// <see cref="StartDisplay"/> so playback can begin in lockstep with audio. On an underrun
+    /// (buffer empty - decode/network genuinely falling behind, a distinct problem from jitter)
+    /// this just holds the last displayed frame and waits for the next tick rather than blocking
+    /// indefinitely or busy-spinning.</summary>
+    private void DisplayLoop()
+    {
+        try
+        {
+            while (running && presentationQueue.Reader.Count < presentationCapacity)
+                Thread.Sleep(5);
+            if (!running)
+                return;
+
+            ReadyToDisplay?.Invoke();
+
+            while (running && !displayStarted)
+                Thread.Sleep(5);
+
+            while (running)
+            {
+                if (presentationQueue.Reader.TryRead(out byte[]? frame))
+                    WriteFrameToTexture(frame);
+
+                Thread.Sleep(frameIntervalMs);
+            }
+        }
+        catch (Exception ex) when (running)
+        {
+            RecordError("DisplayLoop (presentation buffer -> shared texture)", ex);
+        }
+    }
+
+    private void WriteFrameToTexture(byte[] frame)
+    {
+        GCHandle pinned = GCHandle.Alloc(frame, GCHandleType.Pinned);
+        try
+        {
+            lock (gameAdapterDevice.ImmediateContextLock)
+            {
+                var dataBox = new DataBox(pinned.AddrOfPinnedObject(), Width * 4, 0);
+                gameAdapterDevice.Device.ImmediateContext.UpdateSubresource(dataBox, decodedTexture);
+
+                // decodedTexture is a classic (non-keyed-mutex) shared resource opened on a
+                // SEPARATE device by the game's own render thread (see SharedTextureBridge) -
+                // without an explicit Flush here, this UpdateSubresource can sit queued in the
+                // driver's command buffer indefinitely, invisible to the other device until
+                // something UNRELATED happens to trigger a flush. That's exactly consistent
+                // with "sometimes gets a frame" rather than a clean success/failure - it's not
+                // broken, it's just unsynchronized. Flush forces this write to actually reach
+                // the GPU now, not whenever the driver next feels like it.
+                gameAdapterDevice.Device.ImmediateContext.Flush();
+            }
         }
         finally
         {
@@ -214,8 +305,10 @@ public sealed class H264Decoder : IDisposable
     {
         running = false;
         feedChannel.Writer.TryComplete();
+        presentationQueue.Writer.TryComplete();
         feedWriterThread.Join(1000);
         readerThread.Join(1000);
+        displayThread.Join(1000);
         decoderProcess.Dispose();
         decodedTexture.Dispose();
     }
