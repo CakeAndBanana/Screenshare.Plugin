@@ -20,14 +20,16 @@ public sealed class AudioPlaybackDecoder : IDisposable
     // absorb ordinary network timing variance (jitter) - starting playback the instant the
     // buffer is constructed (as this used to) gives the playback pointer zero margin against
     // even minor arrival-timing variance, so every small gap in delivery becomes an audible
-    // glitch (heard as "jittery" audio) - not because packets are being lost, just because
-    // there's no cushion between when they arrive and when they're needed. This is the standard
-    // "jitter buffer" technique real-time audio/VoIP playback uses; 150ms is a common, modest
-    // choice for it - enough headroom to absorb ordinary variance without adding noticeable lag
-    // for a "watch a stream" use case (unlike interactive voice chat, a bit more latency here is
-    // a fully acceptable tradeoff for smoothness, the same tradeoff already made for video's ~2s
-    // keyframe interval).
-    private const int PrebufferMilliseconds = 150;
+    // glitch. This is the standard "jitter buffer" technique real-time audio/VoIP playback uses -
+    // but video has NO equivalent pre-buffer (it displays each decoded frame immediately, with no
+    // synchronization between the two beyond both being roughly "as fast as possible"), so this
+    // value directly becomes an audio-lags-video sync offset, not just added latency in
+    // isolation. 150ms was too much - clearly perceptible as audio trailing video, confirmed by a
+    // real report. Kept small now specifically to stay under the range most viewers would notice
+    // as an actual A/V sync mismatch, while still providing a bit of margin against genuine
+    // network jitter (distinct from the structural per-process-capture jitter bug already fixed
+    // by coalescing WASAPI packets in ProcessAudioCapture, which needed no delay to fix at all).
+    private const int PrebufferMilliseconds = 40;
 
     private readonly OpusFrameDecoder decoder;
     private readonly BufferedWaveProvider buffer;
