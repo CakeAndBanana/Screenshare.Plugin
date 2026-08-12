@@ -478,7 +478,7 @@ public sealed class ShareWindow : Window, IDisposable
         }
         catch (Exception ex)
         {
-            audioError = ex.Message;
+            audioError = DescribeAudioCaptureError(ex);
             ServiceCollector.PluginLog.Error(ex, "ScreenShare audio capture init failed");
         }
     }
@@ -497,9 +497,32 @@ public sealed class ShareWindow : Window, IDisposable
         }
         catch (Exception ex)
         {
-            audioError = ex.Message;
+            audioError = DescribeAudioCaptureError(ex);
             ServiceCollector.PluginLog.Error(ex, "ScreenShare process audio capture init failed");
         }
+    }
+
+    /// <summary>NAudio's WASAPI/COM interop can throw an InvalidCastException where both the
+    /// source and target type names in the message are IDENTICAL (e.g. "cannot cast
+    /// MMDeviceEnumeratorComObject to MMDeviceEnumeratorComObject") - confirmed as a real
+    /// occurrence, not hypothetical. This is the classic .NET signature for two separate copies
+    /// of the same assembly being loaded into the process at once, most likely here from a
+    /// dev-plugin reload leaving a stale AssemblyLoadContext around from a previous load (COM
+    /// interop objects are a common reason a load context fails to fully unload). No amount of
+    /// retrying or picking a different capture source fixes this - the stale assembly is either
+    /// loaded or it isn't - so this exists purely to replace an extremely confusing raw exception
+    /// message with the one thing that actually helps: restart the whole game, not just reload
+    /// the plugin.</summary>
+    private static string DescribeAudioCaptureError(Exception ex)
+    {
+        if (ex is InvalidCastException)
+        {
+            return "Audio capture failed to initialize, likely because the plugin was reloaded " +
+                   "without a full game restart (a stale copy of an audio library is still loaded). " +
+                   $"Try fully restarting the game. ({ex.Message})";
+        }
+
+        return ex.Message;
     }
 
     private void ToggleMediaStreaming()
