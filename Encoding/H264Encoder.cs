@@ -123,9 +123,23 @@ public sealed class H264Encoder : IDisposable
         return (Math.Max(2, width), Math.Max(2, height));
     }
 
+    /// <summary>Paced against a Stopwatch schedule (target = frameIndex * frameIntervalMs) rather
+    /// than a plain Thread.Sleep(frameIntervalMs) each iteration - the latter doesn't account for
+    /// how long the GPU blit/readback/stdin-write themselves take (real, non-zero work under
+    /// ImmediateContextLock), so each loop iteration actually took slightly LONGER than
+    /// frameIntervalMs and the error compounded every frame, silently capturing/encoding at a rate
+    /// below the configured target regardless of what the target was set to. Very likely the real
+    /// explanation for an earlier, previously-unresolved report of the viewer consistently
+    /// receiving close to half of whatever target FPS was configured (e.g. 60 -> ~30, 30 -> ~16):
+    /// if the per-iteration work time happens to land in the same ballpark as frameIntervalMs
+    /// itself, an open-loop Sleep-per-iteration produces almost exactly that ratio. Scheduling
+    /// against elapsed time instead means a slow iteration just eats into the next frame's sleep
+    /// rather than permanently pushing every future frame later.</summary>
     private void WriteLoop()
     {
         byte[] frame = new byte[Width * Height * 4];
+        var clock = Stopwatch.StartNew();
+        long frameIndex = 0;
         try
         {
             while (running)
@@ -147,7 +161,12 @@ public sealed class H264Encoder : IDisposable
                     Interlocked.Increment(ref framesSkipped);
                 }
 
-                Thread.Sleep(frameIntervalMs);
+                frameIndex++;
+                long sleepMs = frameIndex * frameIntervalMs - clock.ElapsedMilliseconds;
+                if (sleepMs > 0)
+                    Thread.Sleep((int)sleepMs);
+                // else already behind schedule - loop again immediately rather than sleeping, so
+                // a burst of slow iterations catches back up instead of the shortfall compounding.
             }
         }
         catch (Exception ex) when (running)

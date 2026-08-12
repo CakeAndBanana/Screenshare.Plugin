@@ -225,7 +225,18 @@ public sealed class H264Decoder : IDisposable
     /// <see cref="StartDisplay"/> so playback can begin in lockstep with audio. On an underrun
     /// (buffer empty - decode/network genuinely falling behind, a distinct problem from jitter)
     /// this just holds the last displayed frame and waits for the next tick rather than blocking
-    /// indefinitely or busy-spinning.</summary>
+    /// indefinitely or busy-spinning.
+    ///
+    /// Paced against a Stopwatch schedule (target = frameIndex * frameIntervalMs) rather than a
+    /// plain Thread.Sleep(frameIntervalMs) each iteration - the latter doesn't account for how
+    /// long WriteFrameToTexture itself takes (a lock plus real GPU calls, non-zero real work), so
+    /// each loop iteration actually took slightly LONGER than frameIntervalMs and the error
+    /// compounded every single frame. Over a real session that added up to video visibly
+    /// lagging further and further behind audio's hardware-clocked, drift-free playback -
+    /// confirmed as the actual cause by a real report of video specifically falling behind.
+    /// Scheduling against elapsed time instead means a slow iteration just eats into (or, if
+    /// there's a burst of them, temporarily eliminates) the next frame's sleep rather than
+    /// permanently pushing every future frame later.</summary>
     private void DisplayLoop()
     {
         try
@@ -240,12 +251,21 @@ public sealed class H264Decoder : IDisposable
             while (running && !displayStarted)
                 Thread.Sleep(5);
 
+            var clock = Stopwatch.StartNew();
+            long frameIndex = 0;
+
             while (running)
             {
                 if (presentationQueue.Reader.TryRead(out byte[]? frame))
                     WriteFrameToTexture(frame);
 
-                Thread.Sleep(frameIntervalMs);
+                frameIndex++;
+                long sleepMs = frameIndex * frameIntervalMs - clock.ElapsedMilliseconds;
+                if (sleepMs > 0)
+                    Thread.Sleep((int)sleepMs);
+                // else already behind schedule - loop again immediately rather than sleeping,
+                // which is how a burst of slow iterations catches back up instead of the delay
+                // becoming permanent.
             }
         }
         catch (Exception ex) when (running)
