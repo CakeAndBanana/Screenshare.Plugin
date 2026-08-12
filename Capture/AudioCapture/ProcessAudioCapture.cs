@@ -169,8 +169,19 @@ public sealed class ProcessAudioCapture : IAudioSource
         }
     }
 
+    /// <summary>Coalesces every WASAPI packet available THIS poll into a single combined array
+    /// before queuing it, rather than queuing one entry per packet (which is what this used to
+    /// do). This isn't just tidiness - sampleQueue's capacity is measured in ITEMS, not audio
+    /// duration, so queuing many small per-packet entries instead of one larger one per poll
+    /// gives this capture path meaningfully LESS actual buffered-audio headroom for the same
+    /// nominal queue size before DropOldest starts discarding audio. Matches what NAudio's own
+    /// WasapiCapture does internally for system-wide capture (confirmed by decompiling it) -
+    /// audio being jittery specifically when using per-process capture and not system-wide
+    /// capture traced back to exactly this difference.</summary>
     private void ReadAvailablePackets()
     {
+        List<float> pending = [];
+
         Marshal.ThrowExceptionForHR(captureClient.GetNextPacketSize(out int packetFrames));
         while (packetFrames != 0)
         {
@@ -178,16 +189,22 @@ public sealed class ProcessAudioCapture : IAudioSource
                 out nint buffer, out int framesToRead, out AudioClientBufferFlags flags, out _, out _));
 
             int sampleCount = framesToRead * waveFormat.Channels;
-            var samples = new float[sampleCount];
+            float[] samples = new float[sampleCount];
             if ((flags & AudioClientBufferFlags.Silent) == 0)
                 Marshal.Copy(buffer, samples, 0, sampleCount);
 
-            Volatile.Write(ref currentPeak, ComputePeak(samples));
-            sampleQueue.Writer.TryWrite(samples);
+            pending.AddRange(samples);
 
             Marshal.ThrowExceptionForHR(captureClient.ReleaseBuffer(framesToRead));
             Marshal.ThrowExceptionForHR(captureClient.GetNextPacketSize(out packetFrames));
         }
+
+        if (pending.Count == 0)
+            return;
+
+        float[] combined = pending.ToArray();
+        Volatile.Write(ref currentPeak, ComputePeak(combined));
+        sampleQueue.Writer.TryWrite(combined);
     }
 
     private static float ComputePeak(float[] samples)

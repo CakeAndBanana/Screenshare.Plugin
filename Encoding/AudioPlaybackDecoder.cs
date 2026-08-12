@@ -16,9 +16,23 @@ namespace ScreenShare.Plugin.Encoding;
 /// </summary>
 public sealed class AudioPlaybackDecoder : IDisposable
 {
+    // Real-time audio needs SOME lead time between "packet arrived" and "sample played" to
+    // absorb ordinary network timing variance (jitter) - starting playback the instant the
+    // buffer is constructed (as this used to) gives the playback pointer zero margin against
+    // even minor arrival-timing variance, so every small gap in delivery becomes an audible
+    // glitch (heard as "jittery" audio) - not because packets are being lost, just because
+    // there's no cushion between when they arrive and when they're needed. This is the standard
+    // "jitter buffer" technique real-time audio/VoIP playback uses; 150ms is a common, modest
+    // choice for it - enough headroom to absorb ordinary variance without adding noticeable lag
+    // for a "watch a stream" use case (unlike interactive voice chat, a bit more latency here is
+    // a fully acceptable tradeoff for smoothness, the same tradeoff already made for video's ~2s
+    // keyframe interval).
+    private const int PrebufferMilliseconds = 150;
+
     private readonly OpusFrameDecoder decoder;
     private readonly BufferedWaveProvider buffer;
     private readonly WaveOutEvent output;
+    private bool playbackStarted;
 
     private long decodedPackets;
     private float decodedPeak;
@@ -45,7 +59,8 @@ public sealed class AudioPlaybackDecoder : IDisposable
 
         output = new WaveOutEvent();
         output.Init(buffer);
-        output.Play();
+        // Deliberately NOT starting playback here - see Feed(), which starts it only once
+        // PrebufferMilliseconds worth of audio is actually buffered.
     }
 
     /// <summary>Safe to call from the network receive thread - Opus decode is fast, CPU-only
@@ -59,6 +74,12 @@ public sealed class AudioPlaybackDecoder : IDisposable
             byte[] bytes = new byte[samples.Length * sizeof(float)];
             Buffer.BlockCopy(samples, 0, bytes, 0, bytes.Length);
             buffer.AddSamples(bytes, 0, bytes.Length);
+
+            if (!playbackStarted && buffer.BufferedDuration >= TimeSpan.FromMilliseconds(PrebufferMilliseconds))
+            {
+                playbackStarted = true;
+                output.Play();
+            }
 
             Interlocked.Increment(ref decodedPackets);
 
