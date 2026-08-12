@@ -100,7 +100,18 @@ public sealed class ProcessAudioCapture : IAudioSource
             Guid sessionGuid = Guid.Empty;
             int hr = client.Initialize(
                 AudioClientShareMode.Shared,
-                AudioClientStreamFlags.Loopback,
+                // AutoConvertPcm | SrcDefaultQuality matches SystemAudioCapture's own Initialize
+                // call - originally omitted here on the theory that the process-loopback virtual
+                // device doesn't support GetMixFormat, so there'd be nothing to convert FROM. That
+                // theory was never actually verified against real hardware, and a real report of
+                // extremely glitchy/"robotic" audio specifically when targeting one process (never
+                // when using system-wide capture, which already has these flags) points at it
+                // being wrong: the virtual device is still a view into a real device's actual mix
+                // format, so without these flags WASAPI can hand back samples in a format that
+                // doesn't match what was requested, and this class was blindly copying those bytes
+                // into a float[] as if it did - exactly what a garbled/robotic artifact looks like,
+                // as opposed to the choppiness a timing/buffering issue would cause instead.
+                AudioClientStreamFlags.Loopback | AudioClientStreamFlags.AutoConvertPcm | AudioClientStreamFlags.SrcDefaultQuality,
                 1_000_000, // 100ms, matches SystemAudioCapture/NAudio's own WasapiCapture default
                 0,
                 format,
