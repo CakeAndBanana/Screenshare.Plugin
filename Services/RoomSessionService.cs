@@ -70,7 +70,7 @@ public sealed class RoomSessionService : IDisposable
         get
         {
             lock (membersLock)
-                return members.ToArray();
+                return [.. members];
         }
     }
 
@@ -79,7 +79,7 @@ public sealed class RoomSessionService : IDisposable
         get
         {
             lock (activeStreamersLock)
-                return activeStreamers.ToArray();
+                return [.. activeStreamers];
         }
     }
 
@@ -91,7 +91,7 @@ public sealed class RoomSessionService : IDisposable
         get
         {
             lock (watchersLock)
-                return watchers.ToArray();
+                return [.. watchers];
         }
     }
 
@@ -142,13 +142,13 @@ public sealed class RoomSessionService : IDisposable
         client.ActiveStreamersChanged += streamers =>
         {
             lock (activeStreamersLock)
-                activeStreamers = streamers.ToList();
+                activeStreamers = [.. streamers];
         };
 
         client.WatchersChanged += newWatchers =>
         {
             lock (watchersLock)
-                watchers = newWatchers.ToList();
+                watchers = [.. newWatchers];
         };
 
         client.ViewerStreamPermissionChanged += (targetConnectionId, granted) =>

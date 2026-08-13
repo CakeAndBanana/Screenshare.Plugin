@@ -213,7 +213,7 @@ public sealed class ProcessAudioCapture : IAudioSource
         if (pending.Count == 0)
             return;
 
-        float[] combined = pending.ToArray();
+        float[] combined = [.. pending];
         Volatile.Write(ref currentPeak, ComputePeak(combined));
         sampleQueue.Writer.TryWrite(combined);
     }

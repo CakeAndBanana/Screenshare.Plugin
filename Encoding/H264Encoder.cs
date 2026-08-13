@@ -24,7 +24,6 @@ namespace ScreenShare.Plugin.Encoding;
 public sealed class H264Encoder : IDisposable
 {
     private readonly GameAdapterDevice gameAdapterDevice;
-    private readonly ICaptureSource source;
     private readonly GpuDownscaler downscaler;
     private readonly ShaderResourceView sourceSrv;
     private readonly Texture2D downscaledTexture;
@@ -88,7 +87,6 @@ public sealed class H264Encoder : IDisposable
         VideoCodec codec = VideoCodec.H264)
     {
         this.gameAdapterDevice = gameAdapterDevice;
-        this.source = source;
         this.sessionClock = sessionClock;
         frameIntervalMs = 1000 / fps;
         Codec = codec;

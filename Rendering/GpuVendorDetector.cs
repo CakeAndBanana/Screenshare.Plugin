@@ -1,4 +1,3 @@
-using SharpDX.Direct3D11;
 using Device = SharpDX.Direct3D11.Device;
 using DxgiDevice = SharpDX.DXGI.Device;
 

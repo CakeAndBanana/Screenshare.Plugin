@@ -234,8 +234,7 @@ public sealed class MediaSessionService : IDisposable
 
     private void UnwireAudio()
     {
-        if (hostAudioCapture is not null)
-            hostAudioCapture.SamplesAvailable -= OnHostSamplesAvailable;
+        hostAudioCapture?.SamplesAvailable -= OnHostSamplesAvailable;
         hostAudioCapture = null;
         audioEncoder = null;
     }

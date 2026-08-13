@@ -11,7 +11,7 @@ namespace ScreenShare.Plugin.Rendering;
 /// </summary>
 public sealed class RawTextureWrap(nint shaderResourceView, int width, int height) : IDalamudTextureWrap
 {
-    private nint handle = shaderResourceView;
+    private readonly nint handle = shaderResourceView;
     private bool disposed;
 
     public ImTextureID Handle => new(handle);

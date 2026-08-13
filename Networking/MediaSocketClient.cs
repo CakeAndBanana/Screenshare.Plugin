@@ -132,8 +132,8 @@ public sealed class MediaSocketClient : IAsyncDisposable
 
         socket = newSocket;
         cts = new CancellationTokenSource();
-        sendLoopTask = Task.Run(() => SendLoopAsync(newSocket, cts.Token));
-        receiveLoopTask = Task.Run(() => ReceiveLoopAsync(newSocket, cts.Token));
+        sendLoopTask = Task.Run(() => SendLoopAsync(newSocket, cts.Token), cancellationToken);
+        receiveLoopTask = Task.Run(() => ReceiveLoopAsync(newSocket, cts.Token), cancellationToken);
     }
 
     /// <summary>Derives the media endpoint from the control-plane hub URL (same origin, ws(s)
