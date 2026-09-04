@@ -71,6 +71,17 @@ public sealed class Configuration : IPluginConfiguration
     /// and whether it shares a scale with our own fragment depth.</summary>
     public int WorldScreenDiagnostic { get; set; }
 
+    /// <summary>Playback volume for a stream you're watching, 0-1. Per-viewer and local: it is
+    /// nobody else's business how loud you have someone's stream.</summary>
+    public float ViewerVolume { get; set; } = 1f;
+
+    /// <summary>Milliseconds to hold video back so it lines up with audio. Audio is the master
+    /// clock (see SyncedPlaybackBuffer), so this shifts the clock video is reconciled against
+    /// rather than delaying anything: positive values push video later, for when audio sounds late
+    /// against the picture. The residual offset depends on the output device's own latency, which
+    /// varies per machine, so it's a setting rather than a constant.</summary>
+    public int AvSyncOffsetMs { get; set; }
+
     /// <summary>Draw the panel inside the game's render pass rather than on top of it, so the
     /// game's HUD covers the screen instead of the other way round. On by default now that it's
     /// confirmed working; it needs a hook into the game's renderer, which is the most patch-fragile

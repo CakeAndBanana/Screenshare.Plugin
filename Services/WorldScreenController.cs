@@ -54,6 +54,11 @@ public sealed class WorldScreenController : IDisposable
         // panel was queued, and that counter has to roll over even on frames that draw nothing.
         sceneHook?.EndFrame();
 
+        // Also unconditional, and re-applied every frame rather than on change: the audio decoder
+        // is created lazily when the stream's audio metadata arrives, which is long after the user
+        // last touched the slider, so a one-shot apply would be lost for every session.
+        mediaSession.SetViewerVolume(config.ViewerVolume);
+
         if (!TryResolveVisible(config, roomSession, mediaSession, videoTexture, out ScreenPlacementInfo? placement)
             || videoTexture is null
             || device is null)

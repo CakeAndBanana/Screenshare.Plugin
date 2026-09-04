@@ -45,11 +45,16 @@ public sealed class SpeakerMixWaveProvider : IWaveProvider
     private volatile float targetRightToRight = 1f;
     private volatile float targetMono = 1f;
 
+    /// <summary>Master playback volume, applied on top of the speaker mix. Ramped through the same
+    /// path as the gains so dragging the slider doesn't step the waveform.</summary>
+    private volatile float targetVolume = 1f;
+
     private float leftToLeft = 1f;
     private float leftToRight;
     private float rightToLeft;
     private float rightToRight = 1f;
     private float mono = 1f;
+    private float volume = 1f;
 
     public WaveFormat WaveFormat => source.WaveFormat;
 
@@ -66,6 +71,10 @@ public sealed class SpeakerMixWaveProvider : IWaveProvider
             ? 1f - MathF.Exp(-1f / (RampSeconds * sampleRate))
             : 1f;
     }
+
+    /// <summary>Sets the master playback volume, 0-1. Separate from the speaker mix because it
+    /// survives the in-world screen being off, where the mix falls back to identity.</summary>
+    public void SetVolume(float value) => targetVolume = Math.Clamp(value, 0f, 1f);
 
     /// <summary>Sets the mix the output ramps toward. Safe to call every frame from the render
     /// thread. Pass <see cref="SpeakerGains.Identity"/> to return to untouched playback - which is
@@ -113,9 +122,10 @@ public sealed class SpeakerMixWaveProvider : IWaveProvider
             leftToRight += (targetLeftToRight - leftToRight) * rampAlpha;
             rightToLeft += (targetRightToLeft - rightToLeft) * rampAlpha;
             rightToRight += (targetRightToRight - rightToRight) * rampAlpha;
+            volume += (targetVolume - volume) * rampAlpha;
 
-            samples[frame * 2] = (left * leftToLeft) + (right * rightToLeft);
-            samples[(frame * 2) + 1] = (left * leftToRight) + (right * rightToRight);
+            samples[frame * 2] = ((left * leftToLeft) + (right * rightToLeft)) * volume;
+            samples[(frame * 2) + 1] = ((left * leftToRight) + (right * rightToRight)) * volume;
         }
     }
 
@@ -130,10 +140,11 @@ public sealed class SpeakerMixWaveProvider : IWaveProvider
         for (int frame = 0; frame < frames; frame++)
         {
             mono += (targetMono - mono) * rampAlpha;
+            volume += (targetVolume - volume) * rampAlpha;
 
             int start = frame * perFrame;
             for (int channel = 0; channel < perFrame; channel++)
-                samples[start + channel] *= mono;
+                samples[start + channel] *= mono * volume;
         }
     }
 }

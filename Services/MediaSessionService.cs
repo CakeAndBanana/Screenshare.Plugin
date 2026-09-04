@@ -94,6 +94,10 @@ public sealed class MediaSessionService : IDisposable
     /// never depends on the in-world feature being on.</summary>
     public void SetViewerSpeakerGains(SpeakerGains gains) => audioDecoder?.SetSpeakerGains(gains);
 
+    /// <summary>Master playback volume for the stream being watched, 0-1. No-ops before audio
+    /// metadata has arrived, which is normal for the first second of a session.</summary>
+    public void SetViewerVolume(float volume) => audioDecoder?.SetVolume(volume);
+
     public long ViewerFramesDecoded => videoDecoder?.FramesDecoded ?? 0;
 
     /// <summary>See H264Decoder.AverageFps - directly comparable to HostAverageFps to see
@@ -360,7 +364,13 @@ public sealed class MediaSessionService : IDisposable
 
         try
         {
-            var decoder = new H264Decoder(viewerDevice, viewerFfmpegExePath, width, height, fps, codec, () => audioDecoder?.EstimatedCurrentPtsMs);
+            // The clock video reconciles against, shifted by the user's A/V offset. Subtracting
+            // holds video BACK: DisplayLoop shows frames whose PTS has passed on this clock, so a
+            // clock reading earlier means frames wait longer. Read per call rather than captured so
+            // dragging the slider takes effect immediately instead of on the next stream.
+            var decoder = new H264Decoder(
+                viewerDevice, viewerFfmpegExePath, width, height, fps, codec,
+                () => audioDecoder?.EstimatedCurrentPtsMs - ServiceCollector.Config.AvSyncOffsetMs);
             decoder.ReadyToDisplay += OnVideoReadyToDisplay;
             videoDecoder = decoder;
         }

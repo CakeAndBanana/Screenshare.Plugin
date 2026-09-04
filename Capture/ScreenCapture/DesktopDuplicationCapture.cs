@@ -120,10 +120,13 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         }
     }
 
-    /// <summary>Wraps the one failure that is worth explaining in full. E_INVALIDARG here almost
-    /// always means this process is ALREADY duplicating that monitor and never released it (see
-    /// the class doc comment) - the raw "The parameter is incorrect" gives no hint of that, and
-    /// the only reliable cure once it happens is restarting the game.</summary>
+    /// <summary>Wraps the one failure worth explaining in full. E_INVALIDARG here has two quite
+    /// different causes and the raw "The parameter is incorrect" hints at neither: either this
+    /// process is already duplicating that monitor and never released it (see the class doc
+    /// comment), or the game is holding that monitor in exclusive fullscreen, which Desktop
+    /// Duplication cannot capture at all. The second is easy to mistake for a plugin bug, because
+    /// window capture keeps working perfectly - it goes through Windows.Graphics.Capture, which
+    /// has no such restriction. DXGI does not distinguish the two, so the message names both.</summary>
     private static OutputDuplication DuplicateOrThrow(Output1 output1, Device device, string deviceName)
     {
         try
@@ -133,16 +136,164 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         catch (SharpDXException ex) when (ex.ResultCode == SharpDX.Result.InvalidArg)
         {
             throw new InvalidOperationException(
-                $"Windows refused to duplicate {deviceName}: something in this process is still " +
-                "holding a capture of that monitor. That usually means a previous capture was not " +
-                "cleaned up (most often after reloading the plugin without restarting the game). " +
-                "Restart the game, or share a different monitor.", ex);
+                $"Windows refused to duplicate {deviceName}. {DescribeAdapterTopology(device, deviceName)} " +
+                $"{ProbeEveryOutput(device, deviceName)} " +
+                "Sharing a window instead works regardless - it uses a different capture API.", ex);
         }
         catch (SharpDXException ex) when (ex.ResultCode == SharpDX.DXGI.ResultCode.Unsupported)
         {
             throw new InvalidOperationException(
                 $"Windows does not support duplicating {deviceName} on this GPU. If the game is " +
                 "running in exclusive fullscreen, switch it to borderless windowed and try again.", ex);
+        }
+    }
+
+    /// <summary>Names which GPU each monitor is really attached to, for the error above.
+    ///
+    /// Desktop Duplication requires the D3D11 device to be on the adapter that genuinely drives the
+    /// output, and E_INVALIDARG is what DXGI returns when it isn't. That mismatch happens routinely
+    /// on hybrid-graphics machines: the discrete GPU enumerates monitors that are physically wired
+    /// through the integrated one, so the output looks available on this adapter and then refuses
+    /// to duplicate. Nothing in the raw HRESULT hints at any of that, and it is indistinguishable
+    /// by eye from the other causes - so the message says outright where the monitor actually
+    /// lives and where we tried to capture it from.</summary>
+    private static string DescribeAdapterTopology(Device device, string deviceName)
+    {
+        try
+        {
+            using DxgiDevice dxgiDevice = device.QueryInterface<DxgiDevice>();
+            using SharpDX.DXGI.Adapter ownAdapter = dxgiDevice.Adapter;
+            long ownLuid = ownAdapter.Description.Luid;
+            string ownName = ownAdapter.Description.Description;
+
+            using var factory = new SharpDX.DXGI.Factory1();
+            for (int i = 0; i < factory.GetAdapterCount1(); i++)
+            {
+                using SharpDX.DXGI.Adapter1 adapter = factory.GetAdapter1(i);
+                foreach (SharpDX.DXGI.Output output in adapter.Outputs)
+                {
+                    using (output)
+                    {
+                        if (output.Description.DeviceName != deviceName)
+                            continue;
+
+                        if (adapter.Description1.Luid == ownLuid)
+                            return $"It is on this GPU ({ownName}), so the GPU pairing is not the problem.";
+
+                        return $"That monitor is driven by {adapter.Description1.Description}, but capture " +
+                               $"runs on {ownName} (the GPU the game renders on). Desktop Duplication cannot " +
+                               "cross GPUs, which is why this monitor fails while others may work.";
+                    }
+                }
+            }
+
+            return $"No GPU reported owning it, while capture runs on {ownName}.";
+        }
+        catch (Exception ex)
+        {
+            // Diagnostics must never replace the real failure with one of their own.
+            return $"(could not determine which GPU owns it: {ex.Message})";
+        }
+    }
+
+    /// <summary>Tries to duplicate every output on this adapter and reports which ones actually
+    /// work, plus whether the target is attached to the desktop at all.
+    ///
+    /// This is the measurement that separates the remaining explanations, which are otherwise
+    /// indistinguishable from a single failing HRESULT. If EVERY output refuses, the problem is
+    /// process-wide or device-wide and nothing about this particular monitor matters. If only this
+    /// one refuses while others succeed, something owns this specific output - another application
+    /// duplicating it, or the display not being in a duplicable state. Guessing between those from
+    /// the outside is what made this bug take several rounds; the probe answers it directly.
+    ///
+    /// Each probe is released immediately. A duplication left behind here would itself become the
+    /// permanent, process-wide failure this class's doc comment warns about - the diagnostic would
+    /// cause the disease it is trying to identify.</summary>
+    private static string ProbeEveryOutput(Device device, string targetDeviceName)
+    {
+        try
+        {
+            using DxgiDevice dxgiDevice = device.QueryInterface<DxgiDevice>();
+            using SharpDX.DXGI.Adapter adapter = dxgiDevice.Adapter;
+
+            var results = new List<string>();
+            string attachment = "unknown";
+
+            foreach (Output output in adapter.Outputs)
+            {
+                using (output)
+                {
+                    SharpDX.DXGI.OutputDescription description = output.Description;
+                    if (description.DeviceName == targetDeviceName)
+                        attachment = description.IsAttachedToDesktop ? "attached to the desktop" : "NOT attached to the desktop";
+
+                    using Output1 output1 = output.QueryInterface<Output1>();
+                    try
+                    {
+                        using OutputDuplication probe = output1.DuplicateOutput(device);
+                        results.Add($"{description.DeviceName}=ok");
+                    }
+                    catch (SharpDXException probeEx)
+                    {
+                        results.Add($"{description.DeviceName}={probeEx.Descriptor.ApiCode}");
+                    }
+                }
+            }
+
+            return $"The monitor is {attachment}. Duplication probe across every output: " +
+                   $"{string.Join(", ", results)}. {ProbeWithFreshDevice(adapter, targetDeviceName)}";
+        }
+        catch (Exception ex)
+        {
+            return $"(output probe failed: {ex.Message})";
+        }
+    }
+
+    /// <summary>Repeats the duplication attempt with a brand-new, independently created D3D11
+    /// device on the same adapter.
+    ///
+    /// Splits the last two explanations apart. If a fresh device succeeds where ours fails, the
+    /// fault is in how the capture device is built - it is created pinned to the game device's
+    /// feature level, which is not necessarily a level Desktop Duplication accepts. If a fresh
+    /// device fails identically, nothing this plugin does is responsible: something outside the
+    /// process holds the outputs, or duplication is unavailable machine-wide, and the fix is not
+    /// in this codebase at all.</summary>
+    private static string ProbeWithFreshDevice(SharpDX.DXGI.Adapter adapter, string targetDeviceName)
+    {
+        try
+        {
+            // Deliberately no feature-level argument: let D3D pick, which is exactly the variable
+            // being tested against the pinned level GameAdapterDevice uses.
+            using var freshDevice = new Device(adapter, DeviceCreationFlags.BgraSupport);
+
+            foreach (Output output in adapter.Outputs)
+            {
+                using (output)
+                {
+                    if (output.Description.DeviceName != targetDeviceName)
+                        continue;
+
+                    using Output1 output1 = output.QueryInterface<Output1>();
+                    try
+                    {
+                        using OutputDuplication probe = output1.DuplicateOutput(freshDevice);
+                        return $"A FRESH device duplicates it fine (feature level {freshDevice.FeatureLevel}), " +
+                               "so the capture device itself is what Windows is rejecting.";
+                    }
+                    catch (SharpDXException probeEx)
+                    {
+                        return $"A fresh device fails too ({probeEx.Descriptor.ApiCode}, feature level " +
+                               $"{freshDevice.FeatureLevel}), so something outside this plugin is holding " +
+                               "the display - another capture application, or a machine-wide restriction.";
+                    }
+                }
+            }
+
+            return "(the target output vanished between probes)";
+        }
+        catch (Exception ex)
+        {
+            return $"(fresh-device probe failed: {ex.Message})";
         }
     }
 

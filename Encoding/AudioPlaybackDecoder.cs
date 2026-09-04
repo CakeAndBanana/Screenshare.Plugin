@@ -138,6 +138,9 @@ public sealed class AudioPlaybackDecoder : IDisposable
     /// in-world screen is up, and with <see cref="SpeakerGains.Identity"/> whenever it isn't.</summary>
     public void SetSpeakerGains(SpeakerGains gains) => speakerMix.SetGains(gains);
 
+    /// <summary>Master playback volume for this stream, 0-1.</summary>
+    public void SetVolume(float volume) => speakerMix.SetVolume(volume);
+
     /// <summary>Actually starts audio output - safe to call more than once (only the first call
     /// does anything) and safe to call after this decoder has already been disposed (a stale
     /// caller from a superseded session, e.g. a delayed sync-timeout fallback racing a Stop() on

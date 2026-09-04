@@ -38,6 +38,8 @@ public sealed class StreamViewWindow : Window
     private int hookOccurrence = ServiceCollector.Config.WorldScreenHookOccurrence;
     private int diagnostic = ServiceCollector.Config.WorldScreenDiagnostic;
     private float opacity = ServiceCollector.Config.WorldScreenOpacity;
+    private float volume = ServiceCollector.Config.ViewerVolume;
+    private int avSyncOffsetMs = ServiceCollector.Config.AvSyncOffsetMs;
 
     // Placement slider state. These MUST persist across frames rather than being re-read from the
     // placement each time. ImGui hands a slider's live value back through the ref it was given, so
@@ -140,7 +142,42 @@ public sealed class StreamViewWindow : Window
         if (mediaSession.ViewerVideoError is { } viewerVideoError)
             ImGui.TextColored(ErrorColor, $"Video decoder died mid-stream: {viewerVideoError.Message}");
 
+        DrawPlaybackControls();
         DrawWorldScreenSection();
+    }
+
+    /// <summary>Volume and A/V sync for the stream being watched. Deliberately outside the in-world
+    /// section and above it: these apply to any way of watching, and burying playback volume inside
+    /// a projection feature nobody has enabled would make it unfindable.</summary>
+    private void DrawPlaybackControls()
+    {
+        Configuration config = ServiceCollector.Config;
+
+        ImGui.SetNextItemWidth(200);
+        int volumePercent = (int)MathF.Round(volume * 100f);
+        if (ImGui.SliderInt("Volume", ref volumePercent, 0, 100, "%d%%"))
+            volume = Math.Clamp(volumePercent / 100f, 0f, 1f);
+
+        // Applied live while dragging - unlike the placement sliders, this one is only ever local,
+        // so there's no hub call to throttle and hearing the change as you drag is the point.
+        ServiceCollector.Config.ViewerVolume = volume;
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            ServiceCollector.PI.SavePluginConfig(config);
+
+        ImGui.SetNextItemWidth(200);
+        if (ImGui.SliderInt("A/V sync (ms)", ref avSyncOffsetMs, -500, 500))
+            config.AvSyncOffsetMs = avSyncOffsetMs;
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            ServiceCollector.PI.SavePluginConfig(config);
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Holds video back to line it up with audio. Raise it if the audio sounds late " +
+                "against the picture. How much is needed depends on your output device's own " +
+                "latency, so there is no single right value.");
+        }
     }
 
     /// <summary>Controls for projecting the stream onto a panel in the game world. Where the panel

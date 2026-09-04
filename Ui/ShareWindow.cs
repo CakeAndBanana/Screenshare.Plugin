@@ -431,7 +431,33 @@ public sealed class ShareWindow : Window, IDisposable
         if (streamSetupError is not null)
             ImGui.TextColored(ErrorColor, streamSetupError);
 
+        DrawScreenCaptureStatus();
         DrawAudioStatus();
+    }
+
+    /// <summary>Surfaces failures from the capture THREAD, which streamSetupError above cannot
+    /// reach - it only ever sees construction failures. A capture that starts cleanly and then dies
+    /// (a monitor whose duplication is lost and can't be rebuilt, most often) previously produced
+    /// no message at all: streaming reported itself as running, no frames flowed, and nothing in
+    /// the UI said why. The frame count is shown alongside because zero frames with no error is
+    /// itself the diagnosis - the capture is alive but the desktop isn't handing it anything.</summary>
+    private void DrawScreenCaptureStatus()
+    {
+        if (screenCapture is null)
+            return;
+
+        if (screenCapture.LastError is { } captureError)
+            ImGui.TextColored(WarnColor, $"Screen capture error: {captureError.Message}");
+
+        if (screenCapture.FramesCaptured == 0)
+        {
+            ImGui.TextColored(WarnColor,
+                "No frames captured yet - if this doesn't move, the selected monitor isn't producing frames.");
+        }
+        else
+        {
+            ImGui.TextDisabled($"{screenCapture.FramesCaptured} frames captured ({screenCapture.Width}x{screenCapture.Height})");
+        }
     }
 
     private void DrawAudioStatus()
@@ -698,7 +724,13 @@ public sealed class ShareWindow : Window, IDisposable
         {
             streamSetupError = null;
             device ??= new GameAdapterDevice(ServiceCollector.PI.UiBuilder);
-            screenCapture ??= Settings.CaptureWindowMode
+
+            // Always built fresh rather than reused. A capture only survives past a stream stopping
+            // when a previous start FAILED after creating it - StartHosting below can throw - and
+            // reusing that one silently ignores every capture setting changed since, so picking
+            // Monitor after a failed Window attempt would carry on sharing the window.
+            DisposeStreamCapture();
+            screenCapture = Settings.CaptureWindowMode
                 ? new WindowCapture(device, Settings.SelectedWindowHandle)
                 : new DesktopDuplicationCapture(device, Settings.MonitorIndex);
         }
