@@ -1,0 +1,251 @@
+# Builds the plugin and publishes it to the PUBLIC repository at CakeAndBanana/Screenshare: the
+# zip lands there as a GitHub Release asset, and repo.json (the Dalamud plugin master list players
+# paste into "Custom Plugin Repositories") is regenerated to point at it.
+#
+# This runs here rather than in the public repo because this repo is private - a workflow over
+# there could not check this source out with its own GITHUB_TOKEN. The cost of that is one secret:
+#
+#   REPO_TOKEN - a fine-grained personal access token, Contents: Read and write, scoped to
+#   CakeAndBanana/Screenshare and nothing else. Add it under this repo's
+#   Settings -> Secrets and variables -> Actions -> New repository secret.
+#
+# Then run this workflow from the Actions tab. Nothing here triggers automatically: releases are a
+# deliberate act, and every run publishes a build to players.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, e.g. 0.2.0. Leave empty to use <Version> from ScreenShare.Plugin.csproj."
+        required: false
+        default: ""
+      changelog:
+        description: "Release notes, shown on the GitHub release and in the Dalamud installer."
+        required: false
+        default: ""
+      prerelease:
+        description: "Mark the GitHub release as a pre-release"
+        type: boolean
+        default: false
+      ffmpeg_url:
+        description: "ffmpeg win64-gpl build to bundle. Leave empty for the pinned, tested n7.1 build."
+        required: false
+        default: ""
+
+env:
+  # The public repository that serves repo.json and hosts the release zips.
+  RELEASE_REPO: CakeAndBanana/Screenshare
+
+  # BtbN's ffmpeg-n7.1 GPL static build - the exact source revision this plugin was developed and
+  # tested against (see README, "Building from source"). Pinned rather than tracking "latest"
+  # because the hardware encoder paths (NVENC/AMF/QSV) are sensitive to the ffmpeg version, and
+  # BtbN's `latest` tag has already moved on to n8.1/n9.0. BtbN does eventually prune old autobuild
+  # releases; if this starts 404ing, pick a current n7.1 asset from
+  # https://github.com/BtbN/FFmpeg-Builds/releases and pass it as the ffmpeg_url input.
+  DEFAULT_FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n7.1.5-12-g1fdbca85aa-win64-gpl-7.1.zip
+
+jobs:
+  release:
+    # Same reasoning as the .NET workflow: Windows-only native interop (SharpDX/D3D11, WASAPI,
+    # hand-written WinRT COM) means this has to be a real Windows runner.
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out plugin source
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup Dalamud
+        uses: Blooym/setup-dalamud@v1
+        with:
+          branch: release
+
+      # ffmpeg.exe is not committed (~132MB, over GitHub's 100MB push limit) but a release build
+      # has to bundle it - it is what NVENC/AMF/QSV encoding and viewer-side decoding actually run
+      # through. Extracted under RUNNER_TEMP so the extra ~500MB of the archive never sits inside
+      # the working tree that DalamudPackager later walks.
+      - name: Fetch ffmpeg
+        shell: pwsh
+        env:
+          FFMPEG_URL: ${{ inputs.ffmpeg_url }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $url = if ($env:FFMPEG_URL) { $env:FFMPEG_URL } else { $env:DEFAULT_FFMPEG_URL }
+          Write-Host "Downloading $url"
+
+          $zip = Join-Path $env:RUNNER_TEMP 'ffmpeg.zip'
+          $dist = Join-Path $env:RUNNER_TEMP 'ffmpeg-dist'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -LiteralPath $zip -DestinationPath $dist -Force
+
+          $exe = Get-ChildItem -LiteralPath $dist -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+          if (-not $exe) { throw "No ffmpeg.exe inside $url" }
+
+          New-Item -ItemType Directory -Force -Path 'ffmpeg' | Out-Null
+          Copy-Item -LiteralPath $exe.FullName -Destination 'ffmpeg/ffmpeg.exe' -Force
+
+          # Parenthesised so ffmpeg runs to completion before Select-Object trims the output -
+          # piping into "-First 1" directly would stop the pipeline early and kill the process.
+          Write-Host ((& ./ffmpeg/ffmpeg.exe -version) | Select-Object -First 1)
+
+      - name: Build
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $buildArgs = @('build', 'ScreenShare.Plugin.slnx', '-c', 'Release')
+          if ($env:VERSION) { $buildArgs += "-p:Version=$env:VERSION" }
+
+          Write-Host "dotnet $buildArgs"
+          dotnet @buildArgs
+
+      - name: Test
+        run: dotnet test ScreenShare.Plugin.slnx -c Release --no-build --verbosity normal
+
+      # DalamudPackager drops latest.zip plus the fully-populated manifest (InternalName,
+      # AssemblyVersion, DalamudApiLevel - none of which exist in the hand-written source manifest)
+      # into a subfolder of the Release output. Globbed rather than hardcoded because that exact
+      # path moves with platform/TFM settings.
+      - name: Locate package
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $zip = Get-ChildItem -Path 'bin' -Recurse -Filter 'latest.zip' |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $zip) { throw 'DalamudPackager produced no latest.zip under bin/.' }
+
+          $manifest = Join-Path $zip.DirectoryName 'ScreenShare.Plugin.json'
+          if (-not (Test-Path -LiteralPath $manifest)) { throw "No packaged manifest next to $($zip.FullName)." }
+
+          $version = (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).AssemblyVersion
+          if (-not $version) { throw 'Packaged manifest has no AssemblyVersion.' }
+
+          # Named after the plugin rather than left as latest.zip: the asset filename is what
+          # players see in their browser, and every release would otherwise collide in a
+          # downloads folder.
+          $asset = Join-Path $zip.DirectoryName 'ScreenShare.Plugin.zip'
+          Copy-Item -LiteralPath $zip.FullName -Destination $asset -Force
+
+          "version=$version"   >> $env:GITHUB_OUTPUT
+          "tag=v$version"      >> $env:GITHUB_OUTPUT
+          "asset=$asset"       >> $env:GITHUB_OUTPUT
+          "manifest=$manifest" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Packaged ScreenShare.Plugin $version ($([Math]::Round($zip.Length / 1MB)) MB)"
+
+      - name: Check out release repository
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.RELEASE_REPO }}
+          token: ${{ secrets.REPO_TOKEN }}
+          path: release-repo
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.REPO_TOKEN }}
+          CHANGELOG: ${{ inputs.changelog }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          TAG: ${{ steps.package.outputs.tag }}
+          VERSION: ${{ steps.package.outputs.version }}
+          ASSET: ${{ steps.package.outputs.asset }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # A missing release is the expected case below, not a failure - keep gh's exit code as
+          # data rather than letting pwsh turn it into a terminating error.
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          # Refuse to clobber: a released version is something players may already have installed,
+          # and silently replacing its asset would leave them on a build that no longer matches
+          # the version they think they are running.
+          gh release view $env:TAG --repo $env:RELEASE_REPO 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            throw "$env:RELEASE_REPO already has release $env:TAG. Bump <Version> in ScreenShare.Plugin.csproj, or pass a new 'version' input."
+          }
+
+          $notes = @(
+            $env:CHANGELOG
+            ''
+            "Built from $env:GITHUB_REPOSITORY@$env:GITHUB_SHA."
+            'Bundles ffmpeg (BtbN win64-gpl static build) for hardware encoding and viewer-side decoding.'
+            ''
+            'Installing: you do not need this zip by hand. Add the plugin repository to Dalamud instead -'
+            '/xlsettings -> Experimental -> Custom Plugin Repositories ->'
+            "https://raw.githubusercontent.com/$env:RELEASE_REPO/main/repo.json"
+          ) -join "`n"
+          $notes = $notes.Trim()
+
+          $ghArgs = @(
+            'release', 'create', $env:TAG, $env:ASSET,
+            '--repo', $env:RELEASE_REPO,
+            '--target', 'main',
+            '--title', "ScreenShare $env:VERSION",
+            '--notes', $notes
+          )
+          if ($env:PRERELEASE -eq 'true') { $ghArgs += '--prerelease' }
+
+          gh @ghArgs
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }
+
+      # Only after the asset is live - repo.json's download links must never point at a release
+      # that does not exist yet, or every player who refreshes in between gets a failed install.
+      - name: Update repo.json
+        shell: pwsh
+        env:
+          CHANGELOG: ${{ inputs.changelog }}
+          TAG: ${{ steps.package.outputs.tag }}
+          VERSION: ${{ steps.package.outputs.version }}
+          MANIFEST: ${{ steps.package.outputs.manifest }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # "git diff --cached --quiet" reports "there are changes" as exit code 1, which pwsh
+          # would otherwise raise as a terminating error on the normal path.
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $url = "https://github.com/$env:RELEASE_REPO/releases/download/$env:TAG/ScreenShare.Plugin.zip"
+
+          ./release-repo/.github/scripts/Update-RepoJson.ps1 `
+            -ManifestPath $env:MANIFEST `
+            -DownloadUrl $url `
+            -RepoJsonPath './release-repo/repo.json' `
+            -RepoUrl "https://github.com/$env:RELEASE_REPO" `
+            -Changelog $env:CHANGELOG
+
+          Set-Location release-repo
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add repo.json
+
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host 'repo.json unchanged.'
+          } else {
+            git commit -m "Release ScreenShare $env:VERSION"
+            if ($LASTEXITCODE -ne 0) { throw 'Committing repo.json failed.' }
+            git push
+            if ($LASTEXITCODE -ne 0) { throw 'Pushing repo.json failed - the release exists but the repository manifest still points at the previous version.' }
+          }
+
+      - name: Summary
+        shell: pwsh
+        env:
+          TAG: ${{ steps.package.outputs.tag }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          @(
+            "### ScreenShare $env:VERSION released"
+            ''
+            "- Release: https://github.com/$env:RELEASE_REPO/releases/tag/$env:TAG"
+            "- Repository manifest: https://raw.githubusercontent.com/$env:RELEASE_REPO/main/repo.json"
+          ) -join "`n" >> $env:GITHUB_STEP_SUMMARY
