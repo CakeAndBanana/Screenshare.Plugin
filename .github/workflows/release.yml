@@ -5,7 +5,7 @@
 # This runs here rather than in the public repo because this repo is private - a workflow over
 # there could not check this source out with its own GITHUB_TOKEN. The cost of that is one secret:
 #
-#   RELEASE_TOKEN - a fine-grained personal access token, Contents: Read and write, scoped to
+#   REPO_TOKEN - a fine-grained personal access token, Contents: Read and write, scoped to
 #   CakeAndBanana/Screenshare and nothing else. Add it under this repo's
 #   Settings -> Secrets and variables -> Actions -> New repository secret.
 #
@@ -148,13 +148,13 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: ${{ env.RELEASE_REPO }}
-          token: ${{ secrets.RELEASE_TOKEN }}
+          token: ${{ secrets.REPO_TOKEN }}
           path: release-repo
 
       - name: Publish release
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.REPO_TOKEN }}
           CHANGELOG: ${{ inputs.changelog }}
           PRERELEASE: ${{ inputs.prerelease }}
           TAG: ${{ steps.package.outputs.tag }}
