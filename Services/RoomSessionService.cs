@@ -41,6 +41,9 @@ public sealed class RoomSessionService : IDisposable
     /// <see cref="RecordStreamerChanges"/>. Reset when leaving so a later room starts fresh.</summary>
     private bool hasStreamerBaseline;
 
+    /// <summary>The watcher-list equivalent of <see cref="hasStreamerBaseline"/>.</summary>
+    private bool hasWatcherBaseline;
+
     public string ConnectionStatus { get; private set; } = "Disconnected";
 
     public HubConnectionState State => client.State;
@@ -134,6 +137,44 @@ public sealed class RoomSessionService : IDisposable
         }
 
         hasStreamerBaseline = true;
+    }
+
+    /// <summary>Same shape as <see cref="RecordStreamerChanges"/>, over the watcher list: a full
+    /// snapshot each time, so transitions are derived by diffing.
+    ///
+    /// Keyed on the WATCHER rather than the pair, so someone switching directly from one streamer
+    /// to another reads as a single "started watching" line instead of a stop immediately followed
+    /// by a start.</summary>
+    private void RecordWatcherChanges(List<WatcherInfo> previous, IReadOnlyCollection<WatcherInfo> current)
+    {
+        foreach (WatcherInfo watcher in current)
+        {
+            WatcherInfo? before = previous.FirstOrDefault(p => p.WatcherConnectionId == watcher.WatcherConnectionId);
+            if (before is not null && before.StreamerConnectionId == watcher.StreamerConnectionId)
+                continue;
+
+            string who = DisplayNameFor(watcher.WatcherConnectionId);
+            string whom = DisplayNameFor(watcher.StreamerConnectionId);
+            RecordEvent(hasWatcherBaseline
+                ? $"{who} started watching {whom}"
+                : $"{who} is already watching {whom}");
+        }
+
+        foreach (WatcherInfo watcher in previous)
+        {
+            if (!current.Any(c => c.WatcherConnectionId == watcher.WatcherConnectionId))
+                RecordEvent($"{DisplayNameFor(watcher.WatcherConnectionId)} stopped watching");
+        }
+
+        hasWatcherBaseline = true;
+    }
+
+    /// <summary>Falls back to "someone" rather than showing a raw connection id - these broadcasts
+    /// can arrive fractionally before the member list that explains who the id belongs to.</summary>
+    private string DisplayNameFor(string connectionId)
+    {
+        lock (membersLock)
+            return members.FirstOrDefault(m => m.ConnectionId == connectionId)?.DisplayName ?? "someone";
     }
 
     private void RecordEvent(string message)
@@ -243,8 +284,14 @@ public sealed class RoomSessionService : IDisposable
 
         client.WatchersChanged += newWatchers =>
         {
+            List<WatcherInfo> previous;
             lock (watchersLock)
+            {
+                previous = watchers;
                 watchers = [.. newWatchers];
+            }
+
+            RecordWatcherChanges(previous, newWatchers);
         };
 
         client.ViewerStreamPermissionChanged += (targetConnectionId, granted) =>
@@ -520,6 +567,7 @@ public sealed class RoomSessionService : IDisposable
         lastRoomPassword = null;
         ScreenPlacement = null;
         hasStreamerBaseline = false;
+        hasWatcherBaseline = false;
         lock (membersLock)
             members.Clear();
         lock (activeStreamersLock)
