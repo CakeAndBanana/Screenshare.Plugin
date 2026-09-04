@@ -22,6 +22,11 @@ public sealed class ShareWindow : Window, IDisposable
 
     private GameAdapterDevice? device;
     private ICaptureSource? screenCapture;
+
+    /// <summary>True only while the CURRENT audio capture was started by streaming rather than by
+    /// the user clicking the audio button. Stopping the stream undoes an auto-start, but must
+    /// leave a hand-started capture alone - that was an explicit choice, not a side effect.</summary>
+    private bool autoStartedAudioCapture;
     private RawTextureWrap? previewTexture;
     private string? streamSetupError;
 
@@ -30,6 +35,12 @@ public sealed class ShareWindow : Window, IDisposable
 
     private readonly RoomSessionService roomSession = new();
     private readonly MediaSessionService mediaSession = new();
+
+    /// <summary>Projects the watched stream onto a panel in the game world, and points the audio
+    /// at the virtual speakers flanking it. Lives here rather than in StreamViewWindow because it
+    /// needs the device and decoded texture ShareWindow owns; StreamViewWindow only supplies the
+    /// controls for it.</summary>
+    private readonly WorldScreenController worldScreen = new();
     private string relayUrlInput = ServiceCollector.Config.RelayUrl;
     private string displayNameInput = ServiceCollector.Config.DisplayName;
     private string createPasswordInput = "";
@@ -59,7 +70,7 @@ public sealed class ShareWindow : Window, IDisposable
     {
         Size = new Vector2(560, 560);
         SizeCondition = ImGuiCond.FirstUseEver;
-        StreamView = new StreamViewWindow(roomSession, mediaSession, () => previewTexture, StopWatching);
+        StreamView = new StreamViewWindow(roomSession, mediaSession, () => previewTexture, () => worldScreen, StopWatching);
         Settings = new SettingsWindow(
             isStreaming: () => screenCapture is not null,
             isAudioCapturing: () => audioCapture is not null,
@@ -70,10 +81,18 @@ public sealed class ShareWindow : Window, IDisposable
             });
     }
 
+    /// <summary>Per-frame work that must happen whether or not any of this plugin's windows are
+    /// open, wired to UiBuilder.Draw in Plugin.cs rather than living in <see cref="Draw"/>.
+    ///
+    /// Dalamud only calls Draw() on an OPEN window, and "set the screen up, then close the UI and
+    /// watch" is the normal way to use the in-world projection - so leaving this in Draw() meant
+    /// the panel vanished and the audio mix froze the moment the user tidied the window away. It
+    /// also keeps the popout's decoded texture current in that same situation, which it previously
+    /// wasn't.</summary>
+    public void TickFrame() => HandleViewerMediaLifecycle();
+
     public override void Draw()
     {
-        HandleViewerMediaLifecycle();
-
         if (ImGui.Button("Settings"))
         {
             Settings.IsOpen = true;
@@ -160,6 +179,8 @@ public sealed class ShareWindow : Window, IDisposable
 
     private void DrawRoomScreen()
     {
+        // Room identity and Leave stay ABOVE the tab bar: they're navigation rather than content,
+        // and putting "Leave Room" inside a tab would hide it behind whichever one is selected.
         ImGui.TextUnformatted($"Room {roomSession.RoomId} - {(roomSession.IsHost ? "Hosting" : "Viewing")}");
         ImGui.SameLine();
         if (ImGui.Button("Leave Room"))
@@ -168,7 +189,26 @@ public sealed class ShareWindow : Window, IDisposable
         if (roomSession.InstanceId is { } instanceId)
             ImGui.TextDisabled($"Relay instance: {instanceId} ({roomSession.RelayUrl})");
 
-        ImGui.Separator();
+        if (!ImGui.BeginTabBar("##roomTabs"))
+            return;
+
+        if (ImGui.BeginTabItem("Room"))
+        {
+            DrawRoomTab();
+            ImGui.EndTabItem();
+        }
+
+        if (ImGui.BeginTabItem("Events"))
+        {
+            DrawEventLog();
+            ImGui.EndTabItem();
+        }
+
+        ImGui.EndTabBar();
+    }
+
+    private void DrawRoomTab()
+    {
         DrawMemberList();
         DrawWatchingStatus();
         ImGui.Separator();
@@ -185,10 +225,52 @@ public sealed class ShareWindow : Window, IDisposable
 
         DrawMediaStreamStatus();
 
-        if (roomSession.LastEvent is not null)
-            ImGui.TextUnformatted($"Last event: {roomSession.LastEvent}");
+        // Errors stay on this tab rather than moving to the log with the events: they're the one
+        // thing the user may need to act on, and burying them behind a tab switch would mean a
+        // failed room action could go unnoticed entirely.
         if (roomSession.LastError is not null)
             ImGui.TextColored(ErrorColor, $"Relay error: {roomSession.LastError}");
+    }
+
+    /// <summary>The room's event history, on its own tab. The room view used to end with a single
+    /// "Last event:" line, which only ever showed the most recent one - anything that happened
+    /// while you were looking at something else was simply gone by the time you looked back.</summary>
+    private void DrawEventLog()
+    {
+        IReadOnlyList<RoomEvent> events = roomSession.Events;
+
+        ImGui.BeginDisabled(events.Count == 0);
+        if (ImGui.Button("Clear"))
+            roomSession.ClearEvents();
+        ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        ImGui.TextDisabled(events.Count == 1 ? "1 event" : $"{events.Count} events");
+        ImGui.Separator();
+
+        if (ImGui.BeginChild("##eventLog", Vector2.Zero, false))
+        {
+            if (events.Count == 0)
+            {
+                ImGui.TextDisabled("Nothing has happened in this room yet.");
+            }
+            else
+            {
+                foreach (RoomEvent entry in events)
+                {
+                    ImGui.TextDisabled(entry.TimestampLocal.ToString("HH:mm:ss"));
+                    ImGui.SameLine();
+                    ImGui.TextUnformatted(entry.Message);
+                }
+
+                // Follows new entries only while the user is already at the bottom, so scrolling
+                // back through history isn't yanked away every time someone joins or leaves.
+                if (ImGui.GetScrollY() >= ImGui.GetScrollMaxY())
+                    ImGui.SetScrollHereY(1f);
+            }
+        }
+
+        ImGui.EndChild();
     }
 
     /// <summary>Renders every current room member (host included) with icon badges - a crown for
@@ -206,7 +288,13 @@ public sealed class ShareWindow : Window, IDisposable
         {
             bool isSelf = member.ConnectionId == roomSession.ConnectionId;
             bool isStreaming = roomSession.ActiveStreamers.Any(s => s.ConnectionId == member.ConnectionId);
-            bool isWatchable = isStreaming && !isSelf;
+
+            // Your own stream is watchable too, as a self-preview: it loops out to the relay and
+            // back exactly like anyone else's, so it's the only way to see what you're actually
+            // sending - and the only way to exercise the whole viewer path (decode, popout,
+            // in-world panel) without a second game client. The relay never restricted this; it
+            // was only ever this line.
+            bool isWatchable = isStreaming;
 
             string? watchingDisplayName = null;
             if (roomSession.Watchers.FirstOrDefault(w => w.WatcherConnectionId == member.ConnectionId) is { } watching)
@@ -228,7 +316,14 @@ public sealed class ShareWindow : Window, IDisposable
                 }
 
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip(isWatchingThis ? "Click to stop watching" : "Click to watch");
+                {
+                    ImGui.SetTooltip(
+                        isWatchingThis ? "Click to stop watching"
+                        : isSelf ? "Click to preview your own stream.\n" +
+                                   "Turn audio capture off first - system loopback would record " +
+                                   "this preview's own playback and feed it back into the stream."
+                        : "Click to watch");
+                }
             }
             else
             {
@@ -405,6 +500,11 @@ public sealed class ShareWindow : Window, IDisposable
             lastHandledViewerMediaException = viewerMediaEx;
             TryRecoverFromDeviceRemoved(viewerMediaEx);
         }
+
+        // Last, so it sees this frame's texture rather than the previous one's - and
+        // unconditionally, because it also owns resetting the audio mix back to plain stereo on
+        // every frame the panel ISN'T drawn.
+        worldScreen.Update(device, previewTexture, roomSession, mediaSession);
     }
 
     private void StartWatching(string streamerConnectionId)
@@ -476,6 +576,7 @@ public sealed class ShareWindow : Window, IDisposable
         previewTexture = null;
         lastOpenedViewerVideoHandle = null;
         DisposeStreamCapture();
+        StopAutoStartedAudioCapture();
         roomSession.LeaveRoom();
     }
 
@@ -483,17 +584,39 @@ public sealed class ShareWindow : Window, IDisposable
     {
         if (audioCapture is not null)
         {
-            audioCapture.Dispose();
-            audioCapture = null;
-            mediaSession.UpdateAudioSource(null);
+            StopAudioCapture();
             return;
         }
 
+        // Started by hand, so a later "stop streaming" leaves it running.
+        autoStartedAudioCapture = false;
+        StartAudioCapture();
+    }
+
+    private void StartAudioCapture()
+    {
         audioError = null;
         if (Settings.AudioSourceProcessId is { } targetProcessId)
             _ = StartProcessAudioCaptureAsync(targetProcessId);
         else
             StartSystemAudioCapture();
+    }
+
+    private void StopAudioCapture()
+    {
+        audioCapture?.Dispose();
+        audioCapture = null;
+        autoStartedAudioCapture = false;
+        mediaSession.UpdateAudioSource(null);
+    }
+
+    /// <summary>Undoes an auto-start when streaming ends, and does nothing at all otherwise -
+    /// including when auto-start is enabled but the user had already turned audio on themselves
+    /// before hitting stream.</summary>
+    private void StopAutoStartedAudioCapture()
+    {
+        if (autoStartedAudioCapture)
+            StopAudioCapture();
     }
 
     private void StartSystemAudioCapture()
@@ -558,6 +681,7 @@ public sealed class ShareWindow : Window, IDisposable
         {
             mediaSession.StopHosting();
             DisposeStreamCapture();
+            StopAutoStartedAudioCapture();
             return;
         }
 
@@ -592,6 +716,18 @@ public sealed class ShareWindow : Window, IDisposable
         mediaSession.StartHosting(
             roomSession.RelayUrl ?? relayUrlInput, roomId, connectionId, device, screenCapture, audioCapture, ffmpegPath,
             Settings.TargetHeight, Settings.VideoBitrateKbps, Settings.VideoFpsTarget, Settings.Codec, Settings.AudioBitrateKbps * 1000);
+
+        // Deliberately AFTER StartHosting. Starting audio first would hand StartHosting a snapshot
+        // of the source taken moments earlier, and per-process capture activates asynchronously -
+        // so whether the stream ended up with audio would come down to which of the two happened
+        // to finish first. Coming in through UpdateAudioSource instead has no such ordering:
+        // MediaSessionService records the source under a lock and wires it in as soon as the
+        // stream's socket is up, whichever order the two arrive in.
+        if (Settings.AutoStartAudioWithStream && audioCapture is null)
+        {
+            autoStartedAudioCapture = true;
+            StartAudioCapture();
+        }
     }
 
     /// <summary>DXGI_ERROR_DEVICE_REMOVED (and Reset/Hung) mean the GPU device is permanently
@@ -627,6 +763,10 @@ public sealed class ShareWindow : Window, IDisposable
         previewTexture = null;
         lastOpenedViewerVideoHandle = null;
         DisposeStreamCapture();
+
+        // The panel renderer holds shaders and a constant buffer on the dead device; leaving them
+        // behind would have the next frame draw against it and fail identically forever.
+        worldScreen.ReleaseDevice();
         device?.Dispose();
         device = null;
         return true;
@@ -638,17 +778,56 @@ public sealed class ShareWindow : Window, IDisposable
         screenCapture = null;
     }
 
+    /// <summary>Every step is isolated deliberately. This used to be a bare sequence, so one
+    /// throwing teardown (a network session tearing down mid-unload is the realistic one) skipped
+    /// everything after it - and DisposeStreamCapture being one of those made the cost permanent
+    /// rather than cosmetic: a stranded OutputDuplication blocks every future capture of that
+    /// monitor for the whole game session, with no way back short of a restart. See
+    /// DesktopDuplicationCapture's class doc comment.</summary>
     public void Dispose()
     {
-        roomSession.Dispose();
-        mediaSession.Dispose();
-        Settings.Dispose();
-        previewTexture?.Dispose();
-        previewTexture = null;
-        DisposeStreamCapture();
-        audioCapture?.Dispose();
-        audioCapture = null;
-        device?.Dispose();
-        device = null;
+        DisposeStep(roomSession.Dispose, nameof(roomSession));
+        DisposeStep(mediaSession.Dispose, nameof(mediaSession));
+        DisposeStep(Settings.Dispose, nameof(Settings));
+
+        DisposeStep(
+            () =>
+            {
+                previewTexture?.Dispose();
+                previewTexture = null;
+            },
+            nameof(previewTexture));
+
+        DisposeStep(DisposeStreamCapture, nameof(screenCapture));
+
+        DisposeStep(
+            () =>
+            {
+                audioCapture?.Dispose();
+                audioCapture = null;
+            },
+            nameof(audioCapture));
+
+        DisposeStep(worldScreen.Dispose, nameof(worldScreen));
+
+        DisposeStep(
+            () =>
+            {
+                device?.Dispose();
+                device = null;
+            },
+            nameof(device));
+    }
+
+    private static void DisposeStep(Action dispose, string what)
+    {
+        try
+        {
+            dispose();
+        }
+        catch (Exception ex)
+        {
+            ServiceCollector.PluginLog.Error(ex, $"ScreenShare failed to dispose {what} during unload - continuing with the rest");
+        }
     }
 }

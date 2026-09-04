@@ -32,6 +32,10 @@ public sealed class Plugin : IDalamudPlugin
             new Dalamud.Game.Command.CommandInfo((_, _) => shareWindow.IsOpen = true)
             { HelpMessage = "Open the ScreenShare window" });
 
+        // Before the window system: TickFrame refreshes the decoded texture and submits the
+        // in-world panel, and both have to happen regardless of which windows are open (see
+        // ShareWindow.TickFrame), with the texture current before anything draws it.
+        ServiceCollector.PI.UiBuilder.Draw += shareWindow.TickFrame;
         ServiceCollector.PI.UiBuilder.Draw += windowSystem.Draw;
         ServiceCollector.PI.UiBuilder.OpenMainUi += () => shareWindow.IsOpen = true;
 
@@ -48,6 +52,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public void Dispose()
     {
+        ServiceCollector.PI.UiBuilder.Draw -= shareWindow.TickFrame;
         ServiceCollector.PI.UiBuilder.Draw -= windowSystem.Draw;
         ServiceCollector.Commands.RemoveHandler("/screenshare");
         windowSystem.RemoveAllWindows();

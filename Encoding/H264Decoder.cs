@@ -28,8 +28,13 @@ public sealed class H264Decoder : IDisposable
     /// bursty: bounded drop-oldest queues at multiple hops, WebSocket message boundaries, etc.),
     /// playback visibly sped up through arrival bursts and slowed down through gaps, rather than
     /// running at a steady pace. 200ms is enough margin for typical jitter without adding much
-    /// perceptible extra latency on top of it.</summary>
-    private const int PresentationBufferMilliseconds = 200;
+    /// perceptible extra latency on top of it.
+    ///
+    /// Internal rather than private because it is also AudioPlaybackDecoder's latency budget: this
+    /// queue is bounded drop-oldest, so frames older than this are gone, and an audio clock that
+    /// sits further back than this reach asks for frames that no longer exist. The two constants
+    /// have to move together.</summary>
+    internal const int PresentationBufferMilliseconds = 200;
 
     // How far video's PTS can drift from audio's estimated current PTS before DisplayLoop stops
     // treating it as "close enough" and starts actively correcting - small drift is imperceptible

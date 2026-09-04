@@ -31,6 +31,14 @@ public sealed class MediaSessionService : IDisposable
     private OpusFrameEncoder? audioEncoder;
     private IAudioSource? hostAudioCapture;
 
+    /// <summary>The audio source the host stream should be using, which is NOT always the one it
+    /// is currently wired to: a source can finish becoming ready while StartHostingCoreAsync is
+    /// still connecting its socket. Held under <see cref="audioWiringLock"/> together with
+    /// <see cref="IsHosting"/>'s transition to true, so those two can never interleave.</summary>
+    private readonly Lock audioWiringLock = new();
+    private IAudioSource? pendingAudioCapture;
+    private int pendingAudioBitrateBps = 32000;
+
     /// <summary>Single clock shared by the video encoder and every audio sample batch for the
     /// whole hosting session, so their PTS values are directly comparable on the viewer's side -
     /// two independently-started clocks (even started moments apart) would make "video chunk PTS
@@ -79,6 +87,13 @@ public sealed class MediaSessionService : IDisposable
 
     public int ViewerHeight => videoDecoder?.Height ?? 0;
 
+    /// <summary>Points the viewer's audio at the in-world screen's virtual speakers. No-ops before
+    /// audio metadata has arrived (the decoder doesn't exist yet), which is normal for the first
+    /// second or so of a session rather than an error worth reporting. Callers pass
+    /// <see cref="SpeakerGains.Identity"/> whenever the screen isn't being projected, so audio
+    /// never depends on the in-world feature being on.</summary>
+    public void SetViewerSpeakerGains(SpeakerGains gains) => audioDecoder?.SetSpeakerGains(gains);
+
     public long ViewerFramesDecoded => videoDecoder?.FramesDecoded ?? 0;
 
     /// <summary>See H264Decoder.AverageFps - directly comparable to HostAverageFps to see
@@ -88,6 +103,21 @@ public sealed class MediaSessionService : IDisposable
     public long ViewerAudioPackets => audioDecoder?.DecodedPackets ?? 0;
 
     public float ViewerAudioPeak => audioDecoder?.DecodedPeak ?? 0f;
+
+    /// <summary>How much audio is queued ahead of the output device. Together with the two counters
+    /// below this is what makes an A/V sync complaint diagnosable instead of guesswork: audio is
+    /// the master clock video reconciles against, so if playback is starved or is dropping to hold
+    /// its latency cap, video follows it into the same trouble.</summary>
+    public int ViewerAudioBufferedMs => audioDecoder?.BufferedMilliseconds ?? 0;
+
+    /// <summary>Silence played because audio hadn't arrived in time - climbing means the jitter
+    /// buffer is too small for this connection.</summary>
+    public long ViewerAudioUnderrunMs => audioDecoder?.UnderrunMilliseconds ?? 0;
+
+    /// <summary>Audio discarded to hold the latency cap. A few hundred ms at stream start is
+    /// expected (it is the backlog that built up while playback waited for video); climbing
+    /// steadily after that means the sender's clock is running faster than this machine's.</summary>
+    public long ViewerAudioDroppedMs => audioDecoder?.DroppedMilliseconds ?? 0;
 
     /// <summary>See H264Decoder.DroppedChunks - non-zero here means the decoder itself can't keep
     /// up with the incoming stream in real time (distinct from network drops, which would show up
@@ -151,7 +181,14 @@ public sealed class MediaSessionService : IDisposable
         StopHosting();
         HostLastError = null;
         HostLastException = null;
-        _ = StartHostingCoreAsync(relayUrl, roomId, connectionId, gameAdapterDevice, screenCapture, audioCapture, ffmpegExePath, targetHeight, bitrateKbps, fps, codec, audioBitrateBps);
+
+        lock (audioWiringLock)
+        {
+            pendingAudioCapture = audioCapture;
+            pendingAudioBitrateBps = audioBitrateBps;
+        }
+
+        _ = StartHostingCoreAsync(relayUrl, roomId, connectionId, gameAdapterDevice, screenCapture, ffmpegExePath, targetHeight, bitrateKbps, fps, codec);
     }
 
     private async Task StartHostingCoreAsync(
@@ -160,13 +197,11 @@ public sealed class MediaSessionService : IDisposable
         string connectionId,
         GameAdapterDevice gameAdapterDevice,
         ICaptureSource screenCapture,
-        IAudioSource? audioCapture,
         string ffmpegExePath,
         int targetHeight,
         int bitrateKbps,
         int fps,
-        VideoCodec codec,
-        int audioBitrateBps)
+        VideoCodec codec)
     {
         try
         {
@@ -182,26 +217,17 @@ public sealed class MediaSessionService : IDisposable
             videoEncoder = encoder;
             newSocket.SendVideoMetadata(encoder.Width, encoder.Height, codec, fps);
 
-            // A broken audio source (unsupported format, device gone, etc.) shouldn't take the
-            // whole stream down with it - video is already live at this point, and killing it
-            // over an audio-only failure would be a strictly worse outcome than just streaming
-            // without audio. Caught locally rather than letting it propagate to the outer catch
-            // below, which calls StopHosting() and would tear down the video encoder too.
-            if (audioCapture is not null)
+            // Read here rather than taken as a parameter, and under the same lock that publishes
+            // IsHosting: the connect above takes long enough that an audio source started in the
+            // same frame (auto-start does exactly that, and process-loopback activation typically
+            // finishes FIRST) would otherwise land in UpdateAudioSource while IsHosting was still
+            // false, be dropped, and leave the stream silent for its whole run.
+            lock (audioWiringLock)
             {
-                try
-                {
-                    WireAudio(newSocket, audioCapture, audioBitrateBps);
-                }
-                catch (Exception ex)
-                {
-                    HostLastError = $"Audio disabled: {ex.Message}";
-                    HostLastException = ex;
-                    ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to wire audio into the media stream - continuing video-only");
-                }
+                IsHosting = true;
+                if (pendingAudioCapture is { } readyAudioCapture)
+                    TryWireAudio(newSocket, readyAudioCapture, pendingAudioBitrateBps);
             }
-
-            IsHosting = true;
         }
         catch (Exception ex)
         {
@@ -216,6 +242,27 @@ public sealed class MediaSessionService : IDisposable
     {
         if (hostSessionClock is { } clock)
             audioEncoder?.Feed(clock.ElapsedMilliseconds, samples);
+    }
+
+    /// <summary>A broken audio source (unsupported format, device gone, etc.) shouldn't take the
+    /// whole stream down with it - video is live by this point, and killing it over an audio-only
+    /// failure would be a strictly worse outcome than just streaming without audio. Swallowed here
+    /// rather than propagating to StartHostingCoreAsync's outer catch, which calls StopHosting()
+    /// and would tear down the video encoder too. UpdateAudioSource shares this for the same
+    /// reason: a mid-stream source swap that throws shouldn't escape onto whichever thread
+    /// happened to be doing the swapping.</summary>
+    private void TryWireAudio(MediaSocketClient targetSocket, IAudioSource audioCapture, int bitrateBps)
+    {
+        try
+        {
+            WireAudio(targetSocket, audioCapture, bitrateBps);
+        }
+        catch (Exception ex)
+        {
+            HostLastError = $"Audio disabled: {ex.Message}";
+            HostLastException = ex;
+            ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to wire audio into the media stream - continuing video-only");
+        }
     }
 
     private void WireAudio(MediaSocketClient targetSocket, IAudioSource audioCapture, int bitrateBps)
@@ -245,12 +292,19 @@ public sealed class MediaSessionService : IDisposable
     /// until the whole stream was stopped and restarted.</summary>
     public void UpdateAudioSource(IAudioSource? audioCapture, int audioBitrateBps = 32000)
     {
-        if (!IsHosting || hostSocket is not { } activeSocket)
-            return;
+        lock (audioWiringLock)
+        {
+            // Recorded even when there's nothing to wire it into yet - see pendingAudioCapture.
+            pendingAudioCapture = audioCapture;
+            pendingAudioBitrateBps = audioBitrateBps;
 
-        UnwireAudio();
-        if (audioCapture is not null)
-            WireAudio(activeSocket, audioCapture, audioBitrateBps);
+            if (!IsHosting || hostSocket is not { } activeSocket)
+                return;
+
+            UnwireAudio();
+            if (audioCapture is not null)
+                TryWireAudio(activeSocket, audioCapture, audioBitrateBps);
+        }
     }
 
     /// <summary>Watches one specific streamer's feed - <paramref name="streamerConnectionId"/>
@@ -403,7 +457,15 @@ public sealed class MediaSessionService : IDisposable
     /// forget pattern below.</summary>
     public void StopHosting()
     {
-        UnwireAudio();
+        lock (audioWiringLock)
+        {
+            UnwireAudio();
+
+            // Dropped rather than kept: the caller owns this source and is free to dispose it once
+            // the stream is stopped, so holding it would leave a disposed source to be wired into
+            // the next stream.
+            pendingAudioCapture = null;
+        }
 
         H264Encoder? oldEncoder = videoEncoder;
         videoEncoder = null;

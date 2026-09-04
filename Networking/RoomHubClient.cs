@@ -58,6 +58,13 @@ public sealed class RoomHubClient : IAsyncDisposable
 
     public event Action<string, bool>? ViewerStreamPermissionChanged;
 
+    /// <summary>The room's shared in-world screen was placed, moved, or (null payload) cleared.
+    /// Also sent to this client alone right after a successful join with whatever is currently
+    /// placed - same "snapshot on join, then deltas" shape as
+    /// <see cref="ActiveStreamersChanged"/>, and for the same reason: a change-only event would
+    /// leave a joiner with no screen until someone next happened to move it.</summary>
+    public event Action<ScreenPlacementInfo?>? ScreenPlacementChanged;
+
     /// <summary>Fired when the underlying transport drops and SignalR's automatic reconnect is
     /// actively trying to re-establish it - purely informational (e.g. for a "Reconnecting..."
     /// status label), nothing to act on here.</summary>
@@ -91,6 +98,7 @@ public sealed class RoomHubClient : IAsyncDisposable
         newConnection.On<IReadOnlyCollection<ActiveStreamerInfo>>("ActiveStreamersChanged", streamers => ActiveStreamersChanged?.Invoke(streamers));
         newConnection.On<IReadOnlyCollection<WatcherInfo>>("WatchersChanged", watchers => WatchersChanged?.Invoke(watchers));
         newConnection.On<string, bool>("ViewerStreamPermissionChanged", (id, granted) => ViewerStreamPermissionChanged?.Invoke(id, granted));
+        newConnection.On<ScreenPlacementInfo?>("ScreenPlacementChanged", placement => ScreenPlacementChanged?.Invoke(placement));
 
         newConnection.Reconnecting += _ =>
         {
@@ -156,6 +164,11 @@ public sealed class RoomHubClient : IAsyncDisposable
 
     public Task UpdateShareModeAsync(string roomId, string mode)
         => RequireConnection().InvokeAsync("UpdateShareMode", roomId, mode);
+
+    /// <summary>Null <paramref name="placement"/> clears the room's screen. The relay authorizes
+    /// this against CanStream, not host-only, so any permitted streamer can arrange it.</summary>
+    public Task UpdateScreenPlacementAsync(string roomId, ScreenPlacementInfo? placement)
+        => RequireConnection().InvokeAsync("UpdateScreenPlacement", roomId, placement);
 
     private HubConnection RequireConnection()
         => connection ?? throw new InvalidOperationException("Not connected to the relay.");

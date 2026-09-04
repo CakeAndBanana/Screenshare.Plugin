@@ -3,6 +3,11 @@ using ScreenShare.Plugin.Networking;
 
 namespace ScreenShare.Plugin.Services;
 
+/// <summary>One entry in a room's event history - see <see cref="RoomSessionService.Events"/>.
+/// Timestamped in local time because its only consumer is the UI, which shows it to a human
+/// sitting at this machine.</summary>
+public readonly record struct RoomEvent(DateTime TimestampLocal, string Message);
+
 /// <summary>
 /// Owns the relay connection and room state for the UI. Every public action method here fires
 /// its async work and returns immediately - safe to call directly from Draw(). Status is
@@ -21,12 +26,20 @@ public sealed class RoomSessionService : IDisposable
     private readonly Lock watchersLock = new();
     private List<WatcherInfo> watchers = [];
 
+    private const int MaxLoggedEvents = 200;
+    private readonly Lock eventsLock = new();
+    private readonly List<RoomEvent> events = [];
+
     // Cached so a silent SignalR reconnect (see the Reconnected handler below) can replay the
     // exact same JoinRoom call - the relay's own reconnect-detection path (RoomState.
     // TryReconnectParticipant) skips the password check for a genuine reconnect, but the RPC
     // signature still requires passing something, and there's no other place this client keeps
     // the password around long enough to survive past the initial Create/Join button click.
     private string? lastRoomPassword;
+
+    /// <summary>False until the first active-streamer list of this room has been seen - see
+    /// <see cref="RecordStreamerChanges"/>. Reset when leaving so a later room starts fresh.</summary>
+    private bool hasStreamerBaseline;
 
     public string ConnectionStatus { get; private set; } = "Disconnected";
 
@@ -58,9 +71,86 @@ public sealed class RoomSessionService : IDisposable
 
     public bool CanStartStreaming => IsHost || CanStream;
 
+    /// <summary>Where the room's shared in-world screen is placed, or null if nobody has placed
+    /// one. Read every frame by the render path, written from a SignalR callback thread, so it's a
+    /// plain reference field holding an immutable record - a torn read is impossible and a frame of
+    /// staleness is invisible, matching how the rest of this class exposes state.</summary>
+    public ScreenPlacementInfo? ScreenPlacement { get; private set; }
+
+    /// <summary>Whether this client may place or move the shared screen. Deliberately the same
+    /// permission as streaming (the relay authorizes UpdateScreenPlacement against CanStream, not
+    /// host-only) - arranging the screen is part of running a viewing session.</summary>
+    public bool CanPlaceScreen => CanStartStreaming;
+
     public string? LastError { get; private set; }
 
+    /// <summary>The most recent entry of <see cref="Events"/>, kept as its own property for the
+    /// connect/lobby screens, which have no room for a history and only ever wanted the latest
+    /// line.</summary>
     public string? LastEvent { get; private set; }
+
+    /// <summary>The room's event history, oldest first, capped at <see cref="MaxLoggedEvents"/>.
+    /// Snapshotted under a lock on every read for the same reason Members/Watchers are: entries
+    /// are appended from SignalR callbacks on background threads and read from the render thread.</summary>
+    public IReadOnlyList<RoomEvent> Events
+    {
+        get
+        {
+            lock (eventsLock)
+                return [.. events];
+        }
+    }
+
+    public void ClearEvents()
+    {
+        lock (eventsLock)
+            events.Clear();
+    }
+
+    /// <summary>Single funnel for everything that reaches the event log, so a new event source
+    /// can't update the latest line without also landing in the history.</summary>
+    /// <summary>Turns the relay's full active-streamer list into "started"/"stopped" events.
+    ///
+    /// The relay broadcasts the whole list rather than a delta - and re-sends it on join and on
+    /// reconnect - so who actually changed has to be worked out here. The first list after joining
+    /// is treated as a baseline rather than a set of transitions: those people were already live
+    /// before we arrived, and announcing them as having just started would be wrong.</summary>
+    private void RecordStreamerChanges(List<ActiveStreamerInfo> previous, IReadOnlyCollection<ActiveStreamerInfo> current)
+    {
+        foreach (ActiveStreamerInfo streamer in current)
+        {
+            if (previous.Any(p => p.ConnectionId == streamer.ConnectionId))
+                continue;
+
+            RecordEvent(hasStreamerBaseline
+                ? $"{streamer.DisplayName} started streaming"
+                : $"{streamer.DisplayName} is already streaming");
+        }
+
+        foreach (ActiveStreamerInfo streamer in previous)
+        {
+            if (!current.Any(c => c.ConnectionId == streamer.ConnectionId))
+                RecordEvent($"{streamer.DisplayName} stopped streaming");
+        }
+
+        hasStreamerBaseline = true;
+    }
+
+    private void RecordEvent(string message)
+    {
+        LastEvent = message;
+
+        lock (eventsLock)
+        {
+            events.Add(new RoomEvent(DateTime.Now, message));
+
+            // Trimmed from the front rather than left to grow: a long session in a busy room would
+            // otherwise hold every join/leave it ever saw, for no benefit - the UI only scrolls
+            // back so far anyway.
+            if (events.Count > MaxLoggedEvents)
+                events.RemoveRange(0, events.Count - MaxLoggedEvents);
+        }
+    }
 
     /// <summary>Every current room member, host included - <see cref="RoomMemberInfo.IsHost"/>
     /// and <see cref="RoomMemberInfo.CanStream"/> tell the UI which icon(s)/actions apply to
@@ -113,7 +203,7 @@ public sealed class RoomSessionService : IDisposable
         {
             lock (membersLock)
                 members.Add(member);
-            LastEvent = $"{member.DisplayName} joined";
+            RecordEvent($"{member.DisplayName} joined");
         };
 
         client.MemberLeft += id =>
@@ -124,25 +214,31 @@ public sealed class RoomSessionService : IDisposable
                 displayName = members.FirstOrDefault(m => m.ConnectionId == id)?.DisplayName;
                 members.RemoveAll(m => m.ConnectionId == id);
             }
-            LastEvent = displayName is not null ? $"{displayName} left" : "A member left";
+            RecordEvent(displayName is not null ? $"{displayName} left" : "A member left");
         };
 
         client.Kicked += () =>
         {
-            LastEvent = "You were removed from the room by the host.";
+            RecordEvent("You were removed from the room by the host.");
             ResetRoomState();
         };
 
         client.RoomClosed += () =>
         {
-            LastEvent = "Room closed (host disconnected).";
+            RecordEvent("Room closed (host disconnected).");
             ResetRoomState();
         };
 
         client.ActiveStreamersChanged += streamers =>
         {
+            List<ActiveStreamerInfo> previous;
             lock (activeStreamersLock)
+            {
+                previous = activeStreamers;
                 activeStreamers = [.. streamers];
+            }
+
+            RecordStreamerChanges(previous, streamers);
         };
 
         client.WatchersChanged += newWatchers =>
@@ -162,6 +258,19 @@ public sealed class RoomSessionService : IDisposable
                 if (index >= 0)
                     members[index] = members[index] with { CanStream = granted };
             }
+        };
+
+        client.ScreenPlacementChanged += placement =>
+        {
+            // Drop a broadcast that lost a race against a newer local edit - two people dragging
+            // the same slider at once would otherwise fight, each echo yanking the screen back to
+            // the other's stale position. Equal versions still apply: that's the relay confirming
+            // our own write, and taking it keeps us aligned with what the server actually stored.
+            if (placement is not null && ScreenPlacement is { } current && placement.Version < current.Version)
+                return;
+
+            ScreenPlacement = placement;
+            RecordEvent(placement is null ? "The in-world screen was cleared." : "The in-world screen was moved.");
         };
 
         client.Reconnecting += () => ConnectionStatus = "Reconnecting...";
@@ -193,7 +302,7 @@ public sealed class RoomSessionService : IDisposable
 
             if (result.Success)
             {
-                LastEvent = "Reconnected to the relay.";
+                RecordEvent("Reconnected to the relay.");
             }
             else
             {
@@ -252,7 +361,7 @@ public sealed class RoomSessionService : IDisposable
                     members.Clear();
                     members.Add(new RoomMemberInfo(ConnectionId!, ServiceCollector.Config.DisplayName, IsHost: true, CanStream: true));
                 }
-                LastEvent = $"Room created: {result.RoomId}";
+                RecordEvent($"Room created: {result.RoomId}");
             }
             else
             {
@@ -282,7 +391,7 @@ public sealed class RoomSessionService : IDisposable
             {
                 RoomId = roomId;
                 IsHost = false;
-                LastEvent = $"Joined room {roomId}";
+                RecordEvent($"Joined room {roomId}");
             }
             else
             {
@@ -376,12 +485,41 @@ public sealed class RoomSessionService : IDisposable
         }
     }
 
+    /// <summary>Places, moves, or (with null) clears the room's shared screen. No-ops rather than
+    /// erroring when this client isn't permitted - the UI already disables the controls, and the
+    /// relay re-checks anyway, so this is just the third layer of the same guard.</summary>
+    public void UpdateScreenPlacement(ScreenPlacementInfo? placement)
+    {
+        if (RoomId is not { } roomId || !CanPlaceScreen)
+            return;
+
+        // Applied locally straight away rather than waiting for the relay's echo: this is driven
+        // by a slider drag, and a round trip's worth of lag between moving the slider and the
+        // screen moving would feel broken.
+        ScreenPlacement = placement;
+        _ = UpdateScreenPlacementCoreAsync(roomId, placement);
+    }
+
+    private async Task UpdateScreenPlacementCoreAsync(string roomId, ScreenPlacementInfo? placement)
+    {
+        try
+        {
+            await client.UpdateScreenPlacementAsync(roomId, placement).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+        }
+    }
+
     private void ResetRoomState()
     {
         RoomId = null;
         IsHost = false;
         CanStream = false;
         lastRoomPassword = null;
+        ScreenPlacement = null;
+        hasStreamerBaseline = false;
         lock (membersLock)
             members.Clear();
         lock (activeStreamersLock)

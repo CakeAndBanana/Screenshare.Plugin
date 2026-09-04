@@ -51,6 +51,7 @@ public sealed class SettingsWindow : Window, IDisposable
     private DateTime lastWindowListRefresh = DateTime.MinValue;
 
     private int audioBitrateKbps = ServiceCollector.Config.AudioBitrateKbps;
+    private bool autoStartAudioWithStream = ServiceCollector.Config.AutoStartAudioWithStream;
     private int? audioSourceProcessId;
     private List<(int Pid, string Label)> audioSourceCandidates = [];
     private DateTime lastAudioSourceRefresh = DateTime.MinValue;
@@ -80,6 +81,8 @@ public sealed class SettingsWindow : Window, IDisposable
     public int AudioBitrateKbps => audioBitrateKbps;
 
     public int? AudioSourceProcessId => audioSourceProcessId;
+
+    public bool AutoStartAudioWithStream => autoStartAudioWithStream;
 
     public SettingsWindow(Func<bool> isStreaming, Func<bool> isAudioCapturing, Action<int> applyLiveAudioBitrate)
         : base("Screen Share Settings###ScreenShareSettingsWindow")
@@ -132,6 +135,12 @@ public sealed class SettingsWindow : Window, IDisposable
             SaveStreamingSettings();
 
         DrawAudioSourcePicker();
+
+        // Deliberately NOT disabled while streaming, unlike the pickers above: this only decides
+        // what the NEXT "start streaming" does, so there's nothing about an in-flight stream that
+        // toggling it could invalidate.
+        if (ImGui.Checkbox("Capture audio automatically when streaming starts", ref autoStartAudioWithStream))
+            SaveStreamingSettings();
 
         if (isStreaming())
             ImGui.TextUnformatted("(resolution/bitrate/fps/codec changes apply next time you start streaming)");
@@ -378,6 +387,7 @@ public sealed class SettingsWindow : Window, IDisposable
         ServiceCollector.Config.VideoFpsTarget = videoFpsTarget;
         ServiceCollector.Config.VideoCodecIndex = videoCodecIndex;
         ServiceCollector.Config.AudioBitrateKbps = audioBitrateKbps;
+        ServiceCollector.Config.AutoStartAudioWithStream = autoStartAudioWithStream;
         ServiceCollector.Config.MonitorIndex = monitorIndex;
         ServiceCollector.Config.CaptureWindowMode = captureWindowMode;
         ServiceCollector.PI.SavePluginConfig(ServiceCollector.Config);

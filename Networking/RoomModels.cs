@@ -23,3 +23,27 @@ public sealed record RoomMemberInfo(string ConnectionId, string DisplayName, boo
 /// the relay's own contract and as the pre-flight check a future optimization could use to avoid
 /// the extra round trip a reactive redirect costs.</summary>
 public sealed record RoomLocationResult(bool Found, string? InstanceId, string? RedirectUrl);
+
+/// <summary>Mirrors ScreenShare.Relay.Hubs.ScreenPlacementInfo - where the room's shared in-world
+/// screen sits, and how its virtual speakers fall off.
+///
+/// Height is deliberately absent: it's derived from <see cref="WidthMeters"/> and the decoded
+/// stream's own aspect ratio (see WorldScreenController), so the panel can never stretch the video
+/// when a streamer switches resolution mid-session.
+///
+/// <see cref="TerritoryType"/> scopes this to the zone it was placed in - and only to the zone:
+/// two houses of the same type share a territory id, so a placement made in one also renders in
+/// another of the same kind. <see cref="Version"/> is a unix-ms stamp used to drop a broadcast
+/// that lost a race against a newer local edit.</summary>
+public sealed record ScreenPlacementInfo(
+    uint TerritoryType,
+    float X,
+    float Y,
+    float Z,
+    float Yaw,
+    float Pitch,
+    float WidthMeters,
+    float SpeakerSpread,
+    float FalloffStart,
+    float FalloffEnd,
+    long Version);

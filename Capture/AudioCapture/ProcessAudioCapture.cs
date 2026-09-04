@@ -16,9 +16,12 @@ namespace ScreenShare.Plugin.Capture.AudioCapture;
 /// Threading/shutdown safety mirrors <see cref="SystemAudioCapture"/> deliberately: WASAPI code
 /// running on the game's render thread that blocks unboundedly is exactly what froze the game
 /// once already in this project (see SystemAudioCapture's own doc comment) - so capture happens
-/// on its own polling thread, samples cross to a separate processing thread via a bounded
+/// on its own dedicated thread, samples cross to a separate processing thread via a bounded
 /// drop-oldest channel before <see cref="SamplesAvailable"/> ever fires, and Dispose only ever
 /// waits on bounded (1s) Joins, never an unbounded one.
+///
+/// Unlike <see cref="SystemAudioCapture"/>, this one is EVENT-DRIVEN rather than polled - see
+/// <see cref="FrameWaitTimeoutMs"/> for the measurements that forced that difference.
 /// </summary>
 public sealed class ProcessAudioCapture : IAudioSource
 {
@@ -30,11 +33,42 @@ public sealed class ProcessAudioCapture : IAudioSource
     // invalid...") - and 48 kHz is Opus's own native internal rate besides.
     private const int SampleRate = 48000;
     private const int Channels = 2;
-    private const int PollIntervalMs = 50;
+
+    // Only a safety net, NOT the normal wake-up path: WASAPI signals frameEvent every device
+    // period (~10ms) and that is what actually drives CaptureLoop. This bounds how long a stalled
+    // event could go unnoticed, and keeps the loop responsive to cancellation.
+    //
+    // This class used to poll on a 50ms timer exactly like SystemAudioCapture does, and THAT was
+    // the real cause of the long-standing "robotic/glitchy audio, but only when targeting one
+    // process" bug (two earlier fix attempts - coalescing packets, then adding
+    // AutoConvertPcm|SrcDefaultQuality - both missed it). Measured against a known-good 440Hz sine
+    // rendered by the capture target itself:
+    //
+    //     50ms polling  -> 63.3% of real time captured, 51 waveform splices in 3s
+    //     10ms polling  -> 99.5% of real time captured,  1 splice (stream start)
+    //     event-driven  -> 99.8% of real time captured,  1 splice (stream start)
+    //
+    // The reason is that the process-loopback virtual device IGNORES the 100ms hnsBufferDuration
+    // requested below (a real render endpoint honors it, which is why system-wide capture was
+    // always fine on the same 50ms poll). Its buffer measured out at exactly 3 packets of 512
+    // frames - about 32ms - so a 50ms poll overruns it every single time and WASAPI silently
+    // discards the excess: 32ms of audio kept per 50ms of real time, spliced end to end, which is
+    // exactly 63%. Nothing downstream could detect it either - the discarded frames are not
+    // flagged AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY (measured: zero discontinuity flags across
+    // all three runs), so the samples arrive looking perfectly well-formed.
+    //
+    // Event-driven capture is also what Microsoft's own ApplicationLoopback sample does for this
+    // exact API, and it self-tunes to whatever period the device actually uses instead of hoping a
+    // hard-coded interval stays under an unqueryable buffer size.
+    private const int FrameWaitTimeoutMs = 100;
 
     private readonly IAudioClient audioClient;
     private readonly ProcessLoopbackInterop.IAudioCaptureClient captureClient;
     private readonly WaveFormat waveFormat;
+
+    /// <summary>Signalled by WASAPI once per device period. Its raw handle is held by the audio
+    /// engine for as long as the client is running, so it must outlive audioClient.Stop().</summary>
+    private readonly AutoResetEvent frameEvent;
     private readonly Channel<float[]> sampleQueue;
     private readonly Thread captureThread;
     private readonly Thread processingThread;
@@ -50,11 +84,16 @@ public sealed class ProcessAudioCapture : IAudioSource
     /// <summary>Raised on our own processing thread, same guarantee as SystemAudioCapture.</summary>
     public event Action<float[]>? SamplesAvailable;
 
-    private ProcessAudioCapture(IAudioClient audioClient, ProcessLoopbackInterop.IAudioCaptureClient captureClient, WaveFormat waveFormat)
+    private ProcessAudioCapture(
+        IAudioClient audioClient,
+        ProcessLoopbackInterop.IAudioCaptureClient captureClient,
+        WaveFormat waveFormat,
+        AutoResetEvent frameEvent)
     {
         this.audioClient = audioClient;
         this.captureClient = captureClient;
         this.waveFormat = waveFormat;
+        this.frameEvent = frameEvent;
 
         sampleQueue = Channel.CreateBounded<float[]>(new BoundedChannelOptions(64)
         {
@@ -79,15 +118,39 @@ public sealed class ProcessAudioCapture : IAudioSource
     public static async Task<ProcessAudioCapture> CreateAsync(uint targetProcessId, CancellationToken cancellationToken = default)
     {
         WaveFormat format = WaveFormat.CreateIeeeFloatWaveFormat(SampleRate, Channels);
-        IAudioClient client = await ActivateAsync(targetProcessId, format, cancellationToken).ConfigureAwait(false);
 
-        int hr = client.GetService(typeof(ProcessLoopbackInterop.IAudioCaptureClient).GUID, out object serviceObj);
-        Marshal.ThrowExceptionForHR(hr);
+        // Created before activation because Initialize/SetEventHandle happen inside the activation
+        // callback and need it already in hand. Owned by the returned instance on success; on any
+        // failure along the way it has to be disposed here, since nothing else ever gets a
+        // reference to it.
+        var frameEvent = new AutoResetEvent(false);
+        IAudioClient client;
+        try
+        {
+            client = await ActivateAsync(targetProcessId, format, frameEvent, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            frameEvent.Dispose();
+            throw;
+        }
 
-        return new ProcessAudioCapture(client, (ProcessLoopbackInterop.IAudioCaptureClient)serviceObj, format);
+        try
+        {
+            int hr = client.GetService(typeof(ProcessLoopbackInterop.IAudioCaptureClient).GUID, out object serviceObj);
+            Marshal.ThrowExceptionForHR(hr);
+
+            return new ProcessAudioCapture(client, (ProcessLoopbackInterop.IAudioCaptureClient)serviceObj, format, frameEvent);
+        }
+        catch
+        {
+            frameEvent.Dispose();
+            Marshal.ReleaseComObject(client);
+            throw;
+        }
     }
 
-    private static async Task<IAudioClient> ActivateAsync(uint targetProcessId, WaveFormat format, CancellationToken cancellationToken)
+    private static async Task<IAudioClient> ActivateAsync(uint targetProcessId, WaveFormat format, AutoResetEvent frameEvent, CancellationToken cancellationToken)
     {
         var tcs = new TaskCompletionSource<IAudioClient>(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -111,12 +174,24 @@ public sealed class ProcessAudioCapture : IAudioSource
                 // doesn't match what was requested, and this class was blindly copying those bytes
                 // into a float[] as if it did - exactly what a garbled/robotic artifact looks like,
                 // as opposed to the choppiness a timing/buffering issue would cause instead.
-                AudioClientStreamFlags.Loopback | AudioClientStreamFlags.AutoConvertPcm | AudioClientStreamFlags.SrcDefaultQuality,
+                // EventCallback is what makes the capture thread wake once per device period
+                // instead of on a fixed timer - see FrameWaitTimeoutMs for the measurements behind
+                // that, and why a fixed timer was destroying a third of the audio here.
+                AudioClientStreamFlags.Loopback | AudioClientStreamFlags.EventCallback
+                    | AudioClientStreamFlags.AutoConvertPcm | AudioClientStreamFlags.SrcDefaultQuality,
+                // Requested, but NOT honored by this virtual device (measured at ~32ms actual) -
+                // harmless now that nothing depends on the buffer being big enough to poll against.
                 1_000_000, // 100ms, matches SystemAudioCapture/NAudio's own WasapiCapture default
-                0,
+                0, // shared-mode event-driven streams require a zero periodicity
                 format,
                 ref sessionGuid);
             Marshal.ThrowExceptionForHR(hr);
+
+            // Must come after Initialize and before Start, and (like Initialize itself) inside the
+            // activation callback. DangerousGetHandle is safe here specifically because the handle
+            // is kept alive by the AutoResetEvent that CreateAsync hands to the instance, which
+            // outlives audioClient.Stop() - see Dispose.
+            Marshal.ThrowExceptionForHR(client.SetEventHandle(frameEvent.SafeWaitHandle.DangerousGetHandle()));
         });
 
         var activationParams = new ProcessLoopbackInterop.AudioClientActivationParams
@@ -164,11 +239,20 @@ public sealed class ProcessAudioCapture : IAudioSource
 
     private void CaptureLoop()
     {
+        // Waiting on the cancellation token's own handle alongside the frame event means Dispose
+        // interrupts the wait immediately rather than after FrameWaitTimeoutMs, which is what the
+        // old poll loop got from WaitOne(token.WaitHandle) and what keeps Dispose's bounded Join
+        // from ever actually needing its full second.
+        WaitHandle[] waits = [frameEvent, stopCts.Token.WaitHandle];
+
         try
         {
             while (!stopCts.IsCancellationRequested)
             {
-                if (stopCts.Token.WaitHandle.WaitOne(PollIntervalMs))
+                // WaitTimeout falls through to a read as well: draining on a missed event is
+                // strictly better than skipping one, and it degrades to (slow) polling rather than
+                // going silent if the event ever stops arriving.
+                if (WaitHandle.WaitAny(waits, FrameWaitTimeoutMs) == 1)
                     break;
 
                 ReadAvailablePackets();
@@ -180,15 +264,17 @@ public sealed class ProcessAudioCapture : IAudioSource
         }
     }
 
-    /// <summary>Coalesces every WASAPI packet available THIS poll into a single combined array
-    /// before queuing it, rather than queuing one entry per packet (which is what this used to
-    /// do). This isn't just tidiness - sampleQueue's capacity is measured in ITEMS, not audio
-    /// duration, so queuing many small per-packet entries instead of one larger one per poll
+    /// <summary>Coalesces every WASAPI packet available on THIS wake-up into a single combined
+    /// array before queuing it, rather than queuing one entry per packet (which is what this used
+    /// to do). This isn't just tidiness - sampleQueue's capacity is measured in ITEMS, not audio
+    /// duration, so queuing many small per-packet entries instead of one larger one per wake-up
     /// gives this capture path meaningfully LESS actual buffered-audio headroom for the same
     /// nominal queue size before DropOldest starts discarding audio. Matches what NAudio's own
-    /// WasapiCapture does internally for system-wide capture (confirmed by decompiling it) -
-    /// audio being jittery specifically when using per-process capture and not system-wide
-    /// capture traced back to exactly this difference.</summary>
+    /// WasapiCapture does internally for system-wide capture (confirmed by decompiling it).
+    ///
+    /// Note this was originally committed as the fix for the per-process jitter, and it wasn't -
+    /// see FrameWaitTimeoutMs for what actually was. It's kept because the queue-headroom
+    /// reasoning above holds on its own merits.</summary>
     private void ReadAvailablePackets()
     {
         List<float> pending = [];
@@ -265,6 +351,14 @@ public sealed class ProcessAudioCapture : IAudioSource
 
         Marshal.ReleaseComObject(captureClient);
         Marshal.ReleaseComObject(audioClient);
+
+        // Strictly last: the audio engine holds this event's raw handle for as long as the client
+        // is running, so it can only be closed once the client is stopped and released. If the
+        // bounded Join above timed out and the capture thread is somehow still inside WaitAny,
+        // this surfaces there as an ObjectDisposedException, which CaptureLoop already catches
+        // into LastError and exits on - noisy in a log, but not a hang and not a crash, which is
+        // the same trade the bounded Joins themselves are making.
+        frameEvent.Dispose();
     }
 
     private sealed class ActivationCompletionHandler(TaskCompletionSource<IAudioClient> tcs, Action<IAudioClient> initializeAction)

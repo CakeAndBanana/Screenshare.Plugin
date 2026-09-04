@@ -8,9 +8,12 @@ namespace ScreenShare.Plugin.Rendering;
 /// <summary>
 /// Exposes two devices: <see cref="Device"/> is our own D3D11 device created on the same
 /// adapter as the game, safe to use off the game's render thread for capture/encode work.
-/// <see cref="GameDevice"/> is a ref-counted handle to the game's actual device, needed only to
-/// open shared textures so their SRVs are valid for the game's own renderer to bind. We never
-/// issue draw calls against it ourselves.
+/// <see cref="GameDevice"/> is a ref-counted handle to the game's actual device, needed to open
+/// shared textures so their SRVs are valid for the game's own renderer to bind - and, since the
+/// in-world screen landed, to issue our own draw calls during ImGui's render pass (see
+/// WorldPanelRenderer). Those draws happen on the game's immediate context from the render thread
+/// only, which is why they need no equivalent of <see cref="ImmediateContextLock"/>: the render
+/// thread is already the only thread touching that context.
 /// </summary>
 public sealed class GameAdapterDevice : IDisposable
 {
