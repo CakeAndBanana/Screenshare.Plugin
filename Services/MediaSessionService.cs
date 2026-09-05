@@ -26,6 +26,15 @@ public sealed class MediaSessionService : IDisposable
     // desync results as strictly better than silence.
     private static readonly TimeSpan AudioVideoSyncTimeout = TimeSpan.FromSeconds(10);
 
+    // Bitrate adaptation. Down hard and immediately, up gently and only after a sustained clean
+    // spell - the classic asymmetry, because re-congesting a link costs more than under-using it.
+    private const int AdaptIntervalMs = 3000;
+    private const double BackoffFactor = 0.75;
+    private const double ProbeFactor = 1.15;
+    private const int CleanWindowsBeforeProbe = 5;
+    private const int MinBitrateKbps = 300;
+    private const int MinChangePercent = 10;
+
     private MediaSocketClient? hostSocket;
     private H264Encoder? videoEncoder;
     private OpusFrameEncoder? audioEncoder;
@@ -45,6 +54,33 @@ public sealed class MediaSessionService : IDisposable
     /// 5000ms" and "audio packet PTS 5000ms" refer to different real moments, defeating the whole
     /// point. Created once per StartHostingCoreAsync call, before either encoder exists.</summary>
     private Stopwatch? hostSessionClock;
+
+    /// <summary>Everything needed to rebuild the video encoder without re-running the whole
+    /// hosting setup, so the bitrate can be changed mid-stream - see
+    /// <see cref="AdaptBitrateLoopAsync"/>. ffmpeg takes its bitrate as a command-line argument at
+    /// spawn, so there is no way to change it on a running encoder; the process has to be replaced.</summary>
+    private sealed record HostEncodeSettings(
+        GameAdapterDevice Device,
+        ICaptureSource Capture,
+        string FfmpegExePath,
+        int TargetHeight,
+        int Fps,
+        VideoCodec Codec,
+        int ConfiguredBitrateKbps);
+
+    private HostEncodeSettings? hostEncodeSettings;
+    private CancellationTokenSource? adaptCts;
+    private int currentBitrateKbps;
+    private long lastSeenQueueDrops;
+    private int cleanAdaptWindows;
+
+    /// <summary>The bitrate actually being encoded at right now, which drops below the configured
+    /// value while the uplink cannot carry it. Surfaced so the host can see the stream has been
+    /// throttled rather than wondering why quality fell.</summary>
+    public int HostCurrentBitrateKbps => currentBitrateKbps;
+
+    /// <summary>True while congestion has forced the encoder below the configured bitrate.</summary>
+    public bool HostBitrateReduced => hostEncodeSettings is { } settings && currentBitrateKbps < settings.ConfiguredBitrateKbps;
 
     private MediaSocketClient? viewerSocket;
     private H264Decoder? videoDecoder;
@@ -86,6 +122,16 @@ public sealed class MediaSessionService : IDisposable
     public int ViewerWidth => videoDecoder?.Width ?? 0;
 
     public int ViewerHeight => videoDecoder?.Height ?? 0;
+
+    /// <summary>Adaptive buffer depth currently in use by the viewer's audio path.</summary>
+    public int ViewerAudioTargetMs => audioDecoder?.TargetBufferedMilliseconds ?? 0;
+
+    /// <summary>How far viewer playback sits behind the newest data received - see
+    /// AudioPlaybackDecoder.BehindLiveMs. Null before playback starts.</summary>
+    public long? ViewerBehindLiveMs => audioDecoder?.BehindLiveMs;
+
+    /// <summary>Measured audio/video drift for the stream being watched - see H264Decoder.</summary>
+    public long ViewerAvDriftMs => videoDecoder?.AvDriftMs ?? 0;
 
     /// <summary>Points the viewer's audio at the in-world screen's virtual speakers. No-ops before
     /// audio metadata has arrived (the decoder doesn't exist yet), which is normal for the first
@@ -216,10 +262,19 @@ public sealed class MediaSessionService : IDisposable
             var sessionClock = Stopwatch.StartNew();
             hostSessionClock = sessionClock;
 
+            hostEncodeSettings = new HostEncodeSettings(
+                gameAdapterDevice, screenCapture, ffmpegExePath, targetHeight, fps, codec, bitrateKbps);
+            currentBitrateKbps = bitrateKbps;
+            lastSeenQueueDrops = 0;
+            cleanAdaptWindows = 0;
+
             var encoder = new H264Encoder(gameAdapterDevice, screenCapture, ffmpegExePath, sessionClock, targetHeight, bitrateKbps, fps, codec);
             encoder.ChunkEncoded += (ptsMs, chunk) => hostSocket?.SendVideoChunk(ptsMs, chunk);
             videoEncoder = encoder;
             newSocket.SendVideoMetadata(encoder.Width, encoder.Height, codec, fps);
+
+            adaptCts = new CancellationTokenSource();
+            _ = AdaptBitrateLoopAsync(adaptCts.Token);
 
             // Read here rather than taken as a parameter, and under the same lock that publishes
             // IsHosting: the connect above takes long enough that an audio source started in the
@@ -267,6 +322,112 @@ public sealed class MediaSessionService : IDisposable
             HostLastException = ex;
             ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to wire audio into the media stream - continuing video-only");
         }
+    }
+
+    /// <summary>
+    /// Watches the send queue and moves the encode bitrate to fit what the uplink can actually
+    /// carry.
+    ///
+    /// The signal is the media socket's own dropped-message count. That queue is bounded and
+    /// drop-oldest, so anything discarded there is video the uplink could not carry at the
+    /// configured bitrate - a direct measurement of congestion, host-side, needing no feedback
+    /// from the viewer and no round trip to observe.
+    ///
+    /// Down fast and up slow, deliberately: congestion is already hurting when it is detected, so
+    /// backing off hard is cheap, whereas probing upward too eagerly just re-congests the link and
+    /// oscillates. Every change costs an encoder restart (see <see cref="RestartEncoderAsync"/>),
+    /// so the threshold below exists to make sure a change is worth the hitch it causes.
+    /// </summary>
+    private async Task AdaptBitrateLoopAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(AdaptIntervalMs, cancellationToken).ConfigureAwait(false);
+
+                if (hostEncodeSettings is not { } settings || hostSocket is null || !IsHosting)
+                    continue;
+
+                long drops = hostSocket.DroppedMessages;
+                long newDrops = drops - lastSeenQueueDrops;
+                lastSeenQueueDrops = drops;
+
+                int target = currentBitrateKbps;
+                if (newDrops > 0)
+                {
+                    cleanAdaptWindows = 0;
+                    target = Math.Max((int)(currentBitrateKbps * BackoffFactor), MinBitrateKbps);
+                }
+                else if (++cleanAdaptWindows >= CleanWindowsBeforeProbe)
+                {
+                    cleanAdaptWindows = 0;
+                    target = Math.Min((int)(currentBitrateKbps * ProbeFactor), settings.ConfiguredBitrateKbps);
+                }
+
+                // A restart costs a visible hitch, so it has to buy something. Small adjustments
+                // are not worth interrupting the stream for.
+                if (Math.Abs(target - currentBitrateKbps) * 100 / Math.Max(currentBitrateKbps, 1) < MinChangePercent)
+                    continue;
+
+                await RestartEncoderAsync(settings, target, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Hosting stopped - the ordinary way out of this loop.
+        }
+        catch (Exception ex)
+        {
+            ServiceCollector.PluginLog.Error(ex, "ScreenShare bitrate adaptation stopped after an error; the stream continues at its current bitrate.");
+        }
+    }
+
+    /// <summary>
+    /// Replaces the video encoder with one at a different bitrate, reusing the ORIGINAL session
+    /// clock.
+    ///
+    /// That clock is the whole reason this is safe to do mid-stream: video and audio PTS are only
+    /// comparable because they share it, so a fresh Stopwatch here would restart video timestamps
+    /// at zero and destroy synchronisation for the rest of the session. Everything else is rebuilt
+    /// through the same constructor the initial setup uses, rather than mutating a running encoder
+    /// - the encode pipeline's pacing and readback behaviour are subtle enough that a second code
+    /// path through them would be its own source of bugs.
+    ///
+    /// The socket is deliberately left alone. It stays connected, so the viewer sees a brief gap
+    /// followed by a fresh keyframe, which its decoder handles as a normal in-band parameter-set
+    /// change rather than as a new stream.
+    /// </summary>
+    private async Task RestartEncoderAsync(HostEncodeSettings settings, int bitrateKbps, CancellationToken cancellationToken)
+    {
+        if (hostSessionClock is not { } sessionClock)
+            return;
+
+        H264Encoder? oldEncoder = videoEncoder;
+
+        try
+        {
+            var encoder = new H264Encoder(
+                settings.Device, settings.Capture, settings.FfmpegExePath, sessionClock,
+                settings.TargetHeight, bitrateKbps, settings.Fps, settings.Codec);
+            encoder.ChunkEncoded += (ptsMs, chunk) => hostSocket?.SendVideoChunk(ptsMs, chunk);
+
+            videoEncoder = encoder;
+            currentBitrateKbps = bitrateKbps;
+
+            ServiceCollector.PluginLog.Information(
+                $"ScreenShare adapted video bitrate to {bitrateKbps}kbps (configured {settings.ConfiguredBitrateKbps}kbps).");
+        }
+        catch (Exception ex)
+        {
+            // Keep the old encoder running rather than leaving the stream with none at all.
+            HostLastError = ex.Message;
+            ServiceCollector.PluginLog.Error(ex, "ScreenShare could not restart the encoder at a new bitrate; continuing at the previous one.");
+            return;
+        }
+
+        if (oldEncoder is not null)
+            await Task.Run(() => DisposeSafely(oldEncoder, "H264Encoder (bitrate change)"), cancellationToken).ConfigureAwait(false);
     }
 
     private void WireAudio(MediaSocketClient targetSocket, IAudioSource audioCapture, int bitrateBps)
@@ -364,13 +525,15 @@ public sealed class MediaSessionService : IDisposable
 
         try
         {
-            // The clock video reconciles against, shifted by the user's A/V offset. Subtracting
-            // holds video BACK: DisplayLoop shows frames whose PTS has passed on this clock, so a
-            // clock reading earlier means frames wait longer. Read per call rather than captured so
-            // dragging the slider takes effect immediately instead of on the next stream.
+            // The raw audio clock plus the user's offset as a separate provider - the decoder needs
+            // the offset itself, not just a pre-shifted clock, because it also sizes the
+            // presentation queue and the frame-hold cap from it (see H264Decoder). Both read per
+            // call rather than captured, so the slider takes effect on the current stream.
             var decoder = new H264Decoder(
                 viewerDevice, viewerFfmpegExePath, width, height, fps, codec,
-                () => audioDecoder?.EstimatedCurrentPtsMs - ServiceCollector.Config.AvSyncOffsetMs);
+                () => audioDecoder?.EstimatedCurrentPtsMs,
+                () => ServiceCollector.Config.AvSyncOffsetMs,
+                ServiceCollector.Config.PlaybackLatencyMs);
             decoder.ReadyToDisplay += OnVideoReadyToDisplay;
             videoDecoder = decoder;
         }
@@ -389,7 +552,9 @@ public sealed class MediaSessionService : IDisposable
 
         try
         {
-            var decoder = new AudioPlaybackDecoder(sampleRate, channels);
+            // The user's latency budget, read at construction: it sets both the device buffer and
+            // the jitter buffer, neither of which can be resized on a live output device.
+            var decoder = new AudioPlaybackDecoder(sampleRate, channels, ServiceCollector.Config.PlaybackLatencyMs);
             decoder.ReadyToPlay += OnAudioReadyToPlay;
             audioDecoder = decoder;
         }
@@ -476,6 +641,11 @@ public sealed class MediaSessionService : IDisposable
             // the next stream.
             pendingAudioCapture = null;
         }
+
+        adaptCts?.Cancel();
+        adaptCts?.Dispose();
+        adaptCts = null;
+        hostEncodeSettings = null;
 
         H264Encoder? oldEncoder = videoEncoder;
         videoEncoder = null;

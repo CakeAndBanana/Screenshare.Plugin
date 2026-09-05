@@ -1,6 +1,7 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
+using ScreenShare.Plugin.Encoding;
 using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
@@ -40,6 +41,7 @@ public sealed class StreamViewWindow : Window
     private float opacity = ServiceCollector.Config.WorldScreenOpacity;
     private float volume = ServiceCollector.Config.ViewerVolume;
     private int avSyncOffsetMs = ServiceCollector.Config.AvSyncOffsetMs;
+    private int playbackLatencyMs = ServiceCollector.Config.PlaybackLatencyMs;
 
     // Placement slider state. These MUST persist across frames rather than being re-read from the
     // placement each time. ImGui hands a slider's live value back through the ref it was given, so
@@ -56,6 +58,16 @@ public sealed class StreamViewWindow : Window
     private float sliderSpread;
     private float sliderFalloffStart;
     private float sliderFalloffEnd;
+    private float nudgeStepMeters = 0.5f;
+
+    // Rolling rate for the audio health counters. The underlying numbers are cumulative totals, and
+    // over a long session those cannot distinguish "went badly wrong at startup and has been fine
+    // since" from "still going wrong every second" - the two need completely different responses.
+    private DateTime rateSampledAt;
+    private long rateUnderrunBaseMs;
+    private long rateDroppedBaseMs;
+    private long underrunPerMinute;
+    private long droppedPerMinute;
 
     public StreamViewWindow(
         RoomSessionService roomSession,
@@ -122,9 +134,41 @@ public sealed class StreamViewWindow : Window
         if (mediaSession.ViewerAudioPackets > 0)
         {
             ImGui.TextDisabled(
-                $"Audio buffer {mediaSession.ViewerAudioBufferedMs}ms, " +
+                $"Audio buffer {mediaSession.ViewerAudioBufferedMs}/{mediaSession.ViewerAudioTargetMs}ms, " +
                 $"{mediaSession.ViewerAudioUnderrunMs}ms silence played, " +
                 $"{mediaSession.ViewerAudioDroppedMs}ms dropped to hold latency");
+
+            UpdateAudioHealthRates(mediaSession.ViewerAudioUnderrunMs, mediaSession.ViewerAudioDroppedMs);
+            if (rateSampledAt != default)
+            {
+                bool unhealthy = underrunPerMinute > 200 || droppedPerMinute > 200;
+                string rateText = $"Recent rate: {underrunPerMinute}ms silence/min, {droppedPerMinute}ms dropped/min";
+                if (unhealthy)
+                    ImGui.TextColored(WarnColor, rateText + " - still happening, raise the playback buffer");
+                else
+                    ImGui.TextDisabled(rateText);
+            }
+
+            // The number that separates "out of sync" from "laggy but in sync" - two complaints
+            // that feel identical and have completely different fixes.
+            long drift = mediaSession.ViewerAvDriftMs;
+            string driftLabel = Math.Abs(drift) < 50
+                ? "in sync"
+                : drift > 0 ? "video ahead of audio" : "video behind audio";
+            string offsetNote = avSyncOffsetMs != 0 ? $", A/V sync offset {avSyncOffsetMs:+0;-0}ms applied" : string.Empty;
+            ImGui.TextDisabled($"A/V drift {drift:+0;-0;0}ms ({driftLabel}){offsetNote}");
+
+            // Total viewer-side latency, measured. A steady value is buffering working as
+            // configured; a climbing one is a clock-rate mismatch, which no buffer setting fixes.
+            if (mediaSession.ViewerBehindLiveMs is { } behind)
+            {
+                bool runaway = behind > playbackLatencyMs + 400;
+                string behindText = $"Behind live {behind}ms" + (runaway ? " - climbing, not just buffered" : string.Empty);
+                if (runaway)
+                    ImGui.TextColored(WarnColor, behindText);
+                else
+                    ImGui.TextDisabled(behindText);
+            }
         }
 
         if (mediaSession.ViewerDecodeDrops > 0)
@@ -146,6 +190,33 @@ public sealed class StreamViewWindow : Window
         DrawWorldScreenSection();
     }
 
+    /// <summary>Converts the cumulative underrun/drop totals into a per-minute rate over a rolling
+    /// window, so an ongoing problem is distinguishable from one that happened once at startup.
+    /// Resets when a counter goes backwards, which means a new watch session began.</summary>
+    private void UpdateAudioHealthRates(long underrunMs, long droppedMs)
+    {
+        DateTime now = DateTime.UtcNow;
+        bool restarted = underrunMs < rateUnderrunBaseMs || droppedMs < rateDroppedBaseMs;
+
+        if (rateSampledAt == default || restarted)
+        {
+            rateSampledAt = now;
+            rateUnderrunBaseMs = underrunMs;
+            rateDroppedBaseMs = droppedMs;
+            return;
+        }
+
+        double minutes = (now - rateSampledAt).TotalMinutes;
+        if (minutes < 0.25)
+            return;
+
+        underrunPerMinute = (long)((underrunMs - rateUnderrunBaseMs) / minutes);
+        droppedPerMinute = (long)((droppedMs - rateDroppedBaseMs) / minutes);
+        rateSampledAt = now;
+        rateUnderrunBaseMs = underrunMs;
+        rateDroppedBaseMs = droppedMs;
+    }
+
     /// <summary>Volume and A/V sync for the stream being watched. Deliberately outside the in-world
     /// section and above it: these apply to any way of watching, and burying playback volume inside
     /// a projection feature nobody has enabled would make it unfindable.</summary>
@@ -165,7 +236,23 @@ public sealed class StreamViewWindow : Window
             ServiceCollector.PI.SavePluginConfig(config);
 
         ImGui.SetNextItemWidth(200);
-        if (ImGui.SliderInt("A/V sync (ms)", ref avSyncOffsetMs, -500, 500))
+        if (ImGui.SliderInt("Playback buffer (ms)", ref playbackLatencyMs, AudioPlaybackDecoder.MinLatencyBudgetMs, AudioPlaybackDecoder.MaxLatencyBudgetMs))
+            config.PlaybackLatencyMs = playbackLatencyMs;
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            ServiceCollector.PI.SavePluginConfig(config);
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "How much audio is held before playing. This sets the delay for BOTH streams - " +
+                "video is synchronised to audio, so it can never be shown sooner than the audio it " +
+                "belongs with. Lower is more responsive but more likely to gap when the network " +
+                "stutters. Applied when a stream starts, so restart watching after changing it.");
+        }
+
+        ImGui.SetNextItemWidth(200);
+        if (ImGui.SliderInt("A/V sync (ms)", ref avSyncOffsetMs, -300, 300))
             config.AvSyncOffsetMs = avSyncOffsetMs;
 
         if (ImGui.IsItemDeactivatedAfterEdit())
@@ -176,7 +263,9 @@ public sealed class StreamViewWindow : Window
             ImGui.SetTooltip(
                 "Holds video back to line it up with audio. Raise it if the audio sounds late " +
                 "against the picture. How much is needed depends on your output device's own " +
-                "latency, so there is no single right value.");
+                "latency, so there is no single right value. " +
+                "Large values need a deeper frame buffer, which is sized when a stream starts - " +
+                "stop and restart watching after a big change.");
         }
     }
 
@@ -432,6 +521,23 @@ public sealed class StreamViewWindow : Window
             SeedSliders(placement);
 
         ImGui.BeginDisabled(!canPlace);
+
+        // Nudges are buttons rather than sliders: they move the panel along its OWN axes, so an
+        // absolute slider would need an anchor that shifts every time it's used, and would snap
+        // back to centre on release. Buttons just apply a step, which is what "it's not quite in
+        // the right place" actually wants.
+        ImGui.TextUnformatted("Nudge:");
+        ImGui.SameLine();
+        if (ImGui.Button("Left")) ApplyPlacement(WorldScreenController.Nudge(placement, -nudgeStepMeters, 0f));
+        ImGui.SameLine();
+        if (ImGui.Button("Right")) ApplyPlacement(WorldScreenController.Nudge(placement, nudgeStepMeters, 0f));
+        ImGui.SameLine();
+        if (ImGui.Button("Forward")) ApplyPlacement(WorldScreenController.Nudge(placement, 0f, nudgeStepMeters));
+        ImGui.SameLine();
+        if (ImGui.Button("Back")) ApplyPlacement(WorldScreenController.Nudge(placement, 0f, -nudgeStepMeters));
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(90);
+        ImGui.SliderFloat("step (m)", ref nudgeStepMeters, 0.1f, 2f);
 
         ImGui.SliderFloat("Width (m)", ref sliderWidth, 1f, 40f);
         bool changed = ImGui.IsItemDeactivatedAfterEdit();

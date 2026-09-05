@@ -47,9 +47,6 @@ public sealed class H264Decoder : IDisposable
     private const long MaxFrameHoldMs = 100;
 
     // Once video is behind audio by more than this, stop displaying every queued frame in
-    // sequence (which would never actually catch up while more keep arriving) and instead skip
-    // straight to the most recent one that's within reach.
-    private const long SeverelyBehindMs = 300;
 
     private readonly GameAdapterDevice gameAdapterDevice;
     private readonly Texture2D decodedTexture;
@@ -57,6 +54,7 @@ public sealed class H264Decoder : IDisposable
     private readonly Channel<(long PtsMs, byte[] Chunk)> feedChannel;
     private readonly Channel<(long PtsMs, byte[] Frame)> presentationQueue;
     private readonly Func<long?> getAudioPtsMs;
+    private readonly Func<int> getSyncOffsetMs;
     private readonly int presentationCapacity;
     private readonly int frameIntervalMs;
     private readonly Thread feedWriterThread;
@@ -119,15 +117,43 @@ public sealed class H264Decoder : IDisposable
 
     public Exception? LastError { get; private set; }
 
+    /// <summary>How far the frame being shown sits from the audio clock, in milliseconds, smoothed
+    /// over recent frames. Negative means video is behind audio, positive means ahead.
+    ///
+    /// Exposed because "the sync feels wrong" and "the whole stream feels laggy" are different
+    /// problems with the same description, and only a number separates them: a drift near zero with
+    /// everything still feeling late is end-to-end latency, not synchronisation, and no A/V offset
+    /// will help. DisplayLoop already computes this every frame to decide pacing - it was simply
+    /// being discarded.</summary>
+    public long AvDriftMs => Interlocked.Read(ref avDriftMs);
+    private long avDriftMs;
+
     /// <summary><paramref name="getAudioPtsMs"/> lets DisplayLoop ask, at any moment, "what PTS is
     /// audio currently playing" (null if there's no audio, or it hasn't started yet) - queried
     /// fresh every frame rather than captured once, so it stays correct even if audio gets wired
     /// in or torn down mid-session. See MediaSessionService, which supplies this as
-    /// <c>() =&gt; audioDecoder?.EstimatedCurrentPtsMs</c>.</summary>
-    public H264Decoder(GameAdapterDevice gameAdapterDevice, string ffmpegExePath, int width, int height, int fps, VideoCodec codec, Func<long?> getAudioPtsMs)
+    /// <c>() =&gt; audioDecoder?.EstimatedCurrentPtsMs</c>.
+    ///
+    /// <paramref name="getSyncOffsetMs"/> is the user's A/V offset in milliseconds - positive holds
+    /// video back. Passed as a provider rather than folded into the clock by the caller because it
+    /// has to influence three things that all have to agree: the clock comparison, the cap on how
+    /// long a frame may be held, and how deep the presentation queue is built. Shifting only the
+    /// clock (which is what an earlier attempt did) moves the comparison while leaving the other two
+    /// at their defaults, so the offset gets clamped away and appears to do almost nothing.</summary>
+    public H264Decoder(
+        GameAdapterDevice gameAdapterDevice,
+        string ffmpegExePath,
+        int width,
+        int height,
+        int fps,
+        VideoCodec codec,
+        Func<long?> getAudioPtsMs,
+        Func<int>? getSyncOffsetMs = null,
+        int audioLatencyBudgetMs = PresentationBufferMilliseconds)
     {
         this.gameAdapterDevice = gameAdapterDevice;
         this.getAudioPtsMs = getAudioPtsMs;
+        this.getSyncOffsetMs = getSyncOffsetMs ?? (static () => 0);
         Width = width;
         Height = height;
 
@@ -136,7 +162,20 @@ public sealed class H264Decoder : IDisposable
         SharedHandle = SharedTextureFactory.GetSharedHandle(decodedTexture);
 
         frameIntervalMs = Math.Max(1, 1000 / Math.Max(1, fps));
-        presentationCapacity = Math.Clamp(fps * PresentationBufferMilliseconds / 1000, 2, 15);
+
+        // Deep enough to cover the deliberate offset on top of the normal jitter budget. Delaying
+        // video by N ms means N ms of frames have to be held somewhere, and this queue is the only
+        // place they can be - at the default depth, anything past ~200ms was simply dropped as
+        // drop-oldest before it could ever be shown late.
+        // Capped at 45 frames because these are raw BGRA - roughly 8MB each at 1080p - so the
+        // queue's memory cost is the real limit on how far video can be held back, not the logic.
+                // Also tracks the AUDIO latency budget, because audio is the master clock: if the clock is
+        // allowed to sit 500ms behind live, this queue must still be holding frames that old, or
+        // the display loop asks for frames that were already discarded. The two genuinely have to
+        // move together, which is why the audio budget is passed in rather than assumed.
+        int bufferedMs = Math.Max(PresentationBufferMilliseconds, audioLatencyBudgetMs)
+                         + Math.Max(0, getSyncOffsetMs?.Invoke() ?? 0);
+        presentationCapacity = Math.Clamp(fps * bufferedMs / 1000, 2, 45);
         presentationQueue = Channel.CreateBounded<(long, byte[])>(new BoundedChannelOptions(presentationCapacity)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
@@ -319,7 +358,7 @@ public sealed class H264Decoder : IDisposable
                 }
 
                 long? audioPtsMs = getAudioPtsMs();
-                if (audioPtsMs is not { } currentAudioPts)
+                if (audioPtsMs is not { } rawAudioPts)
                 {
                     // No audio to reconcile against - fixed-interval pacing, same as before PTS sync.
                     WriteFrameToTexture(entry.Frame);
@@ -330,30 +369,70 @@ public sealed class H264Decoder : IDisposable
                     continue;
                 }
 
-                while (entry.PtsMs < currentAudioPts - SeverelyBehindMs
+                // The user's deliberate offset shifts the clock video is measured against, so a
+                // positive value makes every frame look "early" and get held back by that much.
+                long syncOffsetMs = getSyncOffsetMs();
+                long currentAudioPts = rawAudioPts - syncOffsetMs;
+
+                // Drain to the NEWEST frame that is already due, rather than showing the oldest.
+                //
+                // The queue is primed to full before playback starts and then stays full, because
+                // producer and consumer run at the same rate - and a permanently full FIFO is
+                // permanent latency: video sits the queue's whole depth behind audio, forever. The
+                // old rule only skipped ahead once a frame was more than SeverelyBehindMs stale, so
+                // it did not remove that backlog, it capped it - which is why measured drift sat
+                // pinned at exactly -300ms, the value of that constant.
+                //
+                // Draining every frame whose time has already passed keeps the standing offset near
+                // one frame interval instead. Frames that are NOT yet due are still left alone, so
+                // this cannot run ahead of the clock, and a positive A/V offset (which shifts the
+                // clock earlier) still holds frames back exactly as before.
+                while (presentationQueue.Reader.TryPeek(out (long PtsMs, byte[] Frame) next)
+                       && next.PtsMs <= currentAudioPts
                        && presentationQueue.Reader.TryRead(out (long PtsMs, byte[] Frame) fresher))
                 {
                     entry = fresher;
                 }
 
-                WriteFrameToTexture(entry.Frame);
-
                 long driftMs = entry.PtsMs - currentAudioPts;
+
+                // Reported against the RAW audio clock, deliberately not the offset-shifted one the
+                // pacing uses. Measuring against the shifted clock makes the offset invisible to the
+                // very readout meant to detect a desync: a leftover offset delays video for real
+                // while the number still reads zero, because both sides moved together.
+                //
+                // Smoothed, because the per-frame value swings by a frame interval or more as
+                // pacing corrects and an unsmoothed readout is unreadable at 30fps.
+                long reportedDriftMs = entry.PtsMs - rawAudioPts;
+                Interlocked.Exchange(ref avDriftMs, ((Interlocked.Read(ref avDriftMs) * 7) + reportedDriftMs) / 8);
+
                 if (driftMs > SyncToleranceMs)
                 {
-                    // Video ahead of audio - hold this frame a bit longer than normal.
-                    Thread.Sleep((int)Math.Min(driftMs, MaxFrameHoldMs));
+                    // Sleep BEFORE presenting, not after. Writing the frame first and then sleeping
+                    // (which is what this did) doesn't delay anything - the frame is already on
+                    // screen, and the sleep only postpones the NEXT one. That is why the offset
+                    // barely moved the picture however far it was pushed.
+                    //
+                    // The cap rises with the offset because the two are different things sharing
+                    // one branch: MaxFrameHoldMs bounds how bad a single wrong PTS estimate can
+                    // look, while the offset is a deliberate delay the user asked for and must not
+                    // be clamped to the error budget.
+                    long maxHoldMs = MaxFrameHoldMs + Math.Max(0, syncOffsetMs);
+                    Thread.Sleep((int)Math.Min(driftMs, maxHoldMs));
+                    WriteFrameToTexture(entry.Frame);
                     frameIndex = 0;
                     clock.Restart();
                 }
                 else if (driftMs < -SyncToleranceMs)
                 {
                     // Video behind audio - skip the normal pacing sleep entirely this iteration.
+                    WriteFrameToTexture(entry.Frame);
                     frameIndex = 0;
                     clock.Restart();
                 }
                 else
                 {
+                    WriteFrameToTexture(entry.Frame);
                     frameIndex++;
                     long sleepMs = frameIndex * frameIntervalMs - clock.ElapsedMilliseconds;
                     if (sleepMs > 0)

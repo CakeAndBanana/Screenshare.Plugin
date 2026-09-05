@@ -252,4 +252,131 @@ public class SyncedPlaybackBufferTests
         Assert.Equal(0, buffer.UnderrunMilliseconds);
         Assert.Equal(0, buffer.DroppedMilliseconds);
     }
+
+    // --- Adaptive depth ---
+
+    /// <summary>A packet of a constant known amplitude, so concealment output can be checked by
+    /// magnitude rather than merely by "not all zero".</summary>
+    private static byte[] TonePacket(float amplitude = 0.5f)
+    {
+        float[] samples = new float[PacketBytes / sizeof(float)];
+        Array.Fill(samples, amplitude);
+        byte[] pcm = new byte[PacketBytes];
+        Buffer.BlockCopy(samples, 0, pcm, 0, pcm.Length);
+        return pcm;
+    }
+
+    private static float[] AsSamples(byte[] pcm)
+    {
+        float[] samples = new float[pcm.Length / sizeof(float)];
+        Buffer.BlockCopy(pcm, 0, samples, 0, pcm.Length);
+        return samples;
+    }
+
+    [Fact]
+    public void TargetMilliseconds_StartsAtTheConfiguredBudget()
+    {
+        Assert.Equal(200, NewBuffer(maxBufferedMs: 200).TargetMilliseconds);
+    }
+
+    /// <summary>An underrun is direct evidence the depth is too shallow for this link, so the
+    /// target grows rather than the buffer simply gapping again at the same depth next time.</summary>
+    [Fact]
+    public void Underrun_GrowsTheTarget()
+    {
+        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 200);
+
+        Drain(buffer, 20); // nothing buffered - underruns
+
+        Assert.True(buffer.TargetMilliseconds > 200, $"expected growth, got {buffer.TargetMilliseconds}ms");
+    }
+
+    /// <summary>Growth is bounded, or one bad patch would inflate latency without limit.</summary>
+    [Fact]
+    public void RepeatedUnderruns_StopGrowingAtACeiling()
+    {
+        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 200);
+
+        for (int i = 0; i < 200; i++)
+            Drain(buffer, 20);
+
+        Assert.InRange(buffer.TargetMilliseconds, 201, 600);
+    }
+
+    /// <summary>Latency inflated by a bad patch must come back down once the link settles, or a
+    /// brief problem early in a session would cost latency for the rest of it.</summary>
+    [Fact]
+    public void SustainedCleanPlayback_NarrowsTheTargetBackDown()
+    {
+        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 200);
+        Drain(buffer, 20);
+        int inflated = buffer.TargetMilliseconds;
+
+        // 6 seconds of clean 20ms reads, past the narrowing interval.
+        for (int i = 0; i < 300; i++)
+        {
+            buffer.Add(1000 + (i * 20), TonePacket());
+            Drain(buffer, 20);
+        }
+
+        Assert.True(buffer.TargetMilliseconds < inflated,
+            $"expected narrowing from {inflated}ms, got {buffer.TargetMilliseconds}ms");
+    }
+
+    // --- Underrun concealment ---
+
+    /// <summary>Silence is close to the most audible thing that can be inserted into a gap, so a
+    /// gap after real audio is filled with a decaying repeat of it instead.</summary>
+    [Fact]
+    public void Underrun_AfterRealAudio_ConcealsWithSignalRatherThanSilence()
+    {
+        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 200);
+        buffer.Add(1000, TonePacket(0.5f));
+        Drain(buffer, 20);
+
+        float[] concealed = AsSamples(Drain(buffer, 5));
+
+        Assert.Contains(concealed, sample => MathF.Abs(sample) > 0.1f);
+    }
+
+    /// <summary>Repeating indefinitely turns a dropout into a stuck-record buzz, which is worse
+    /// than the gap it replaced - so a long outage still ends up quiet.</summary>
+    [Fact]
+    public void Underrun_SustainedGap_DecaysToSilence()
+    {
+        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 200);
+        buffer.Add(1000, TonePacket(0.5f));
+        Drain(buffer, 20);
+
+        Drain(buffer, 200); // well past the fade window
+        float[] late = AsSamples(Drain(buffer, 20));
+
+        Assert.All(late, sample => Assert.True(MathF.Abs(sample) < 0.001f, $"expected silence, got {sample}"));
+    }
+
+    /// <summary>Nothing has ever played, so there is nothing to repeat and silence is the only
+    /// honest answer - this is the very first read of a session.</summary>
+    [Fact]
+    public void Underrun_BeforeAnyAudio_IsSilent()
+    {
+        float[] samples = AsSamples(Drain(NewBuffer(maxBufferedMs: 200), 20));
+
+        Assert.All(samples, sample => Assert.Equal(0f, sample));
+    }
+
+    /// <summary>Concealed audio is not real content, so the clock must hold through it exactly as
+    /// it did through silence - otherwise video marches past audio that was never sent.</summary>
+    [Fact]
+    public void Concealment_DoesNotAdvanceTheClock()
+    {
+        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 200);
+        buffer.Add(1000, TonePacket());
+        Drain(buffer, 20);
+        long afterContent = 20 * BytesPerMs;
+        long? clockAtContentEnd = buffer.GetPtsAtPlayedBytes(afterContent);
+
+        Drain(buffer, 40);
+
+        Assert.Equal(clockAtContentEnd, buffer.GetPtsAtPlayedBytes(afterContent + (40 * BytesPerMs)));
+    }
 }

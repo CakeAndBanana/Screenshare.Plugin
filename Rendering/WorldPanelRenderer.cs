@@ -103,7 +103,14 @@ public sealed class WorldPanelRenderer : IDisposable
 
             // corner.y counts upward from the panel's bottom edge; texture v counts down from the
             // top row, so v is flipped or the stream renders upside down.
-            o.uv = float2(corner.x, 1.0f - corner.y);
+            //
+            // u is flipped for handedness: the panel's +X axis points to the viewer's LEFT when
+            // seen from the side it was placed to face, so an unflipped u put the picture's left
+            // edge on the viewer's right and text came out mirrored. Corrected here rather than by
+            // rotating the placement, because this fixes screens that are already placed - and it
+            // gives the physically expected result, where the back of the screen shows the mirror
+            // image, as the back of a real projection screen would.
+            o.uv = float2(1.0f - corner.x, 1.0f - corner.y);
             return o;
         }
 

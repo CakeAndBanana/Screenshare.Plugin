@@ -32,7 +32,7 @@ public sealed class AudioPlaybackDecoder : IDisposable
     // NAudio's own default device latency is 300ms, which blows the entire budget before the
     // jitter buffer holds anything at all. That default alone made this unfixable, and lowering it
     // is what buys room for a jitter buffer that still works.
-    private const int OutputDeviceLatencyMilliseconds = 100;
+    private const int DefaultOutputDeviceLatencyMilliseconds = 100;
 
     // 3 buffers of ~33ms rather than NAudio's default 2: same total latency, but the device is
     // refilled more often, so a late refill has somewhere to fall back to instead of underrunning.
@@ -40,12 +40,34 @@ public sealed class AudioPlaybackDecoder : IDisposable
 
     // What is left of the budget once the device has taken its share. Doubles as the prebuffer
     // threshold - there is no point starting playback with less in hand than steady state needs.
-    private const int MaxBufferedMilliseconds =
-        H264Decoder.PresentationBufferMilliseconds - OutputDeviceLatencyMilliseconds;
+    /// <summary>Split of the user's latency budget between the device and the jitter buffer. Half
+    /// each, with the device's share floored at 40ms - below that NAudio underruns regardless of
+    /// how much sits in the jitter buffer, because the device simply isn't refilled often enough.</summary>
+    private static (int DeviceMs, int BufferMs) SplitLatencyBudget(int totalMs)
+    {
+        int total = Math.Clamp(totalMs, MinLatencyBudgetMs, MaxLatencyBudgetMs);
+
+        // Everything above the device's share goes to the jitter buffer, not the device. A deeper
+        // DEVICE buffer adds latency without absorbing burstiness any better - the device drains at
+        // a fixed rate either way - whereas the jitter buffer is precisely the thing that soaks up
+        // uneven arrival. So the device stays at its default ceiling and the rest accumulates where
+        // it does some good.
+        int device = Math.Clamp(total / 2, 40, DefaultOutputDeviceLatencyMilliseconds);
+        return (device, Math.Max(total - device, 40));
+    }
+
+    /// <summary>Bounds of the user-facing playback latency budget. The ceiling is generous because
+    /// bursty delivery genuinely needs it - measured at over 2 seconds per minute of both underrun
+    /// AND overflow on a real session, which is a buffer oscillating between empty and full rather
+    /// than anything a smarter algorithm fixes.</summary>
+    internal const int MinLatencyBudgetMs = 80;
+    internal const int MaxLatencyBudgetMs = 600;
 
     private readonly Lock playbackLock = new();
     private readonly OpusFrameDecoder decoder;
     private readonly SyncedPlaybackBuffer playbackBuffer;
+    private readonly int maxBufferedMilliseconds;
+    private long newestFedPtsMs;
     private readonly SpeakerMixWaveProvider speakerMix;
     private readonly WaveOutEvent output;
     private bool isReady;
@@ -59,19 +81,45 @@ public sealed class AudioPlaybackDecoder : IDisposable
     public float DecodedPeak => Volatile.Read(ref decodedPeak);
 
     /// <summary>How much audio is queued ahead of the output device right now. Steady state should
-    /// hover near <see cref="MaxBufferedMilliseconds"/>; sitting near zero means playback is living
+    /// hover near <see cref="maxBufferedMilliseconds"/>; sitting near zero means playback is living
     /// hand to mouth and any hiccup will be audible.</summary>
     public int BufferedMilliseconds => playbackBuffer.BufferedMilliseconds;
 
     /// <summary>Total silence played because audio hadn't arrived in time.</summary>
     public long UnderrunMilliseconds => playbackBuffer.UnderrunMilliseconds;
 
+    /// <summary>The buffer depth currently being aimed at. Moves with measured conditions rather
+    /// than staying at the configured value - see SyncedPlaybackBuffer.</summary>
+    public int TargetBufferedMilliseconds => playbackBuffer.TargetMilliseconds;
+
     /// <summary>Total audio discarded to hold latency at the cap.</summary>
     public long DroppedMilliseconds => playbackBuffer.DroppedMilliseconds;
 
     public Exception? LastError { get; private set; }
 
-    /// <summary>Fires exactly once, when <see cref="MaxBufferedMilliseconds"/> worth of audio has
+    /// <summary>How far playback sits behind the newest audio actually received, in milliseconds -
+    /// the whole viewer-side latency, jitter buffer and device buffer together, measured rather
+    /// than assumed.
+    ///
+    /// This is the number that tells a STABLE delay apart from a GROWING one, which feel identical
+    /// but have unrelated causes. Steady means buffering is doing its job at whatever depth it is
+    /// set to. Climbing means content is arriving faster than it is being played - a clock-rate
+    /// mismatch between the sender's capture and this machine's output device - and no buffer
+    /// setting fixes that, because the gap grows without bound.
+    ///
+    /// Null until playback has started.</summary>
+    public long? BehindLiveMs
+    {
+        get
+        {
+            if (EstimatedCurrentPtsMs is not { } playing)
+                return null;
+
+            return Interlocked.Read(ref newestFedPtsMs) - playing;
+        }
+    }
+
+    /// <summary>Fires exactly once, when <see cref="maxBufferedMilliseconds"/> worth of audio has
     /// actually been buffered - NOT the same as playback starting (see <see cref="StartPlayback"/>),
     /// which the owner is expected to call once it decides this AND video are both ready, so the
     /// two start together rather than audio racing ahead just because its own buffer filled first.</summary>
@@ -110,16 +158,19 @@ public sealed class AudioPlaybackDecoder : IDisposable
         }
     }
 
-    public AudioPlaybackDecoder(int sampleRate, int channels)
+    public AudioPlaybackDecoder(int sampleRate, int channels, int latencyBudgetMs = H264Decoder.PresentationBufferMilliseconds)
     {
         decoder = new OpusFrameDecoder(sampleRate, channels);
 
+        (int deviceMs, int bufferMs) = SplitLatencyBudget(latencyBudgetMs);
+        maxBufferedMilliseconds = bufferMs;
+
         WaveFormat waveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, channels);
-        playbackBuffer = new SyncedPlaybackBuffer(waveFormat, MaxBufferedMilliseconds);
+        playbackBuffer = new SyncedPlaybackBuffer(waveFormat, bufferMs);
 
         output = new WaveOutEvent
         {
-            DesiredLatency = OutputDeviceLatencyMilliseconds,
+            DesiredLatency = deviceMs,
             NumberOfBuffers = OutputDeviceBuffers,
         };
         // Sits between the jitter buffer and the device so the in-world screen's virtual speakers
@@ -174,6 +225,12 @@ public sealed class AudioPlaybackDecoder : IDisposable
     {
         try
         {
+            // Monotonic: a late-arriving out-of-order packet must not drag the "newest received"
+            // mark backwards and make the measurement briefly report negative latency.
+            long previousNewest = Interlocked.Read(ref newestFedPtsMs);
+            if (ptsMs > previousNewest)
+                Interlocked.Exchange(ref newestFedPtsMs, ptsMs);
+
             float[] samples = decoder.Decode(opusPacket);
             byte[] bytes = new byte[samples.Length * sizeof(float)];
             Buffer.BlockCopy(samples, 0, bytes, 0, bytes.Length);
@@ -183,7 +240,7 @@ public sealed class AudioPlaybackDecoder : IDisposable
             // however long the wait turns out to be.
             playbackBuffer.Add(ptsMs, bytes);
 
-            if (!isReady && playbackBuffer.BufferedMilliseconds >= MaxBufferedMilliseconds)
+            if (!isReady && playbackBuffer.BufferedMilliseconds >= maxBufferedMilliseconds)
             {
                 isReady = true;
                 ReadyToPlay?.Invoke();

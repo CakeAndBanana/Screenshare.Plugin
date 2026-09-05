@@ -171,11 +171,94 @@ public sealed class ShareWindow : Window, IDisposable
         if (ImGui.Button("Join Room"))
             roomSession.JoinRoom(joinRoomIdInput, joinPasswordInput);
 
+        DrawRecentRooms();
+
         if (roomSession.LastEvent is not null)
             ImGui.TextUnformatted($"Last event: {roomSession.LastEvent}");
         if (roomSession.LastError is not null)
             ImGui.TextColored(ErrorColor, $"Relay error: {roomSession.LastError}");
     }
+
+    /// <summary>Shortcut list of rooms recently joined or created, so coming back after a restart
+    /// doesn't mean retyping a code from memory. Only rooms on the relay currently connected to are
+    /// offered: a code issued by one relay means nothing on another, so a shortcut across relays
+    /// would just be a join that fails.</summary>
+    private void DrawRecentRooms()
+    {
+        Configuration config = ServiceCollector.Config;
+        List<RecentRoom> onThisRelay = config.RecentRooms
+            .Where(r => string.Equals(r.RelayUrl, roomSession.RelayUrl ?? relayUrlInput, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        ImGui.Spacing();
+        if (!ImGui.CollapsingHeader($"Recent rooms ({onThisRelay.Count})"))
+            return;
+
+        bool remember = config.RememberRoomPasswords;
+        if (ImGui.Checkbox("Remember room passwords", ref remember))
+        {
+            config.RememberRoomPasswords = remember;
+
+            if (!remember)
+            {
+                foreach (RecentRoom room in config.RecentRooms)
+                    room.Password = null;
+            }
+
+            ServiceCollector.PI.SavePluginConfig(config);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Stores room passwords in the plugin's config file");
+        }
+
+        if (onThisRelay.Count == 0)
+        {
+            ImGui.TextDisabled("No rooms joined on this relay yet.");
+            return;
+        }
+
+        foreach (RecentRoom room in onThisRelay)
+        {
+            string age = DescribeAge(DateTime.UtcNow - room.LastJoinedUtc);
+            string role = room.WasHost ? "hosted" : "joined";
+
+            if (ImGui.Button($"Rejoin##recent_{room.RoomId}"))
+            {
+                joinRoomIdInput = room.RoomId;
+                if (!string.IsNullOrEmpty(room.Password))
+                {
+                    joinPasswordInput = room.Password;
+                    roomSession.JoinRoom(room.RoomId, room.Password);
+                }
+            }
+
+            ImGui.SameLine();
+            ImGui.TextUnformatted($"{room.RoomId}");
+            ImGui.SameLine();
+            ImGui.TextDisabled($"- {role} {age}{(string.IsNullOrEmpty(room.Password) ? ", password needed" : string.Empty)}");
+
+            ImGui.SameLine();
+            if (ImGui.SmallButton($"Forget##recent_{room.RoomId}"))
+            {
+                config.RecentRooms.RemoveAll(r =>
+                    string.Equals(r.RoomId, room.RoomId, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(r.RelayUrl, room.RelayUrl, StringComparison.OrdinalIgnoreCase));
+                ServiceCollector.PI.SavePluginConfig(config);
+                break;
+            }
+        }
+    }
+
+    private static string DescribeAge(TimeSpan age) => age switch
+    {
+        { TotalMinutes: < 1 } => "just now",
+        { TotalHours: < 1 } => $"{(int)age.TotalMinutes}m ago",
+        { TotalDays: < 1 } => $"{(int)age.TotalHours}h ago",
+        _ => $"{(int)age.TotalDays}d ago",
+    };
 
     private void DrawRoomScreen()
     {
@@ -353,6 +436,12 @@ public sealed class ShareWindow : Window, IDisposable
     private static void DrawMemberIcons(RoomMemberInfo member, bool isStreaming, string? watchingDisplayName)
     {
         bool any = false;
+
+        // Whether the eye icon is hovered is noted here but acted on AFTER the icon font is popped.
+        // A tooltip shown inside that scope is drawn in FontAwesome, which has no Latin glyphs, so
+        // "Watching: Ashley" came out as blanks and boxes.
+        bool watchingHovered = false;
+
         using (ServiceCollector.PI.UiBuilder.IconFontHandle.Push())
         {
             if (member.IsHost)
@@ -382,11 +471,12 @@ public sealed class ShareWindow : Window, IDisposable
                     ImGui.SameLine(0, 4);
                 ImGui.TextColored(WatchingColor, FontAwesomeIcon.Eye.ToIconString());
                 any = true;
-
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip($"Watching: {watchingDisplayName}");
+                watchingHovered = ImGui.IsItemHovered();
             }
         }
+
+        if (watchingHovered)
+            ImGui.SetTooltip($"Watching: {watchingDisplayName}");
 
         if (any)
             ImGui.SameLine(0, 6);
@@ -577,6 +667,14 @@ public sealed class ShareWindow : Window, IDisposable
                 $"Streaming: {mediaSession.HostFramesEncoded} encoded / {mediaSession.HostFramesSkipped} skipped " +
                 $"({mediaSession.HostAverageFps:F1} fps avg), {mediaSession.HostEncodedBytes} bytes sent " +
                 $"({mediaSession.HostVendor}, {mediaSession.HostCodec})");
+
+            // Shown only when adaptation has actually pulled the bitrate down, so quality dropping
+            // reads as a deliberate response to the uplink rather than as something going wrong.
+            if (mediaSession.HostBitrateReduced)
+            {
+                ImGui.TextColored(WarnColor,
+                    $"Bitrate reduced to {mediaSession.HostCurrentBitrateKbps}kbps - the upload can't carry the configured rate.");
+            }
 
             if (mediaSession.HostQueueDrops > 0)
             {

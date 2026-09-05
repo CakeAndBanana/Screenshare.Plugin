@@ -24,17 +24,27 @@ namespace ScreenShare.Plugin.Rendering;
 ///
 /// Depth was bumped from 2 to 3 after real network streaming testing (game + relay + audio
 /// encode + WS I/O all running at once) showed a ~47% skip rate, well above the ~10-30% seen in
-/// the earlier local-only round-trip test - the extra tick of margin trades a bit more latency
-/// for headroom against that additional system-wide contention. The real fix (downscaling on the
-/// GPU before readback, so the transfer size matches the chosen output resolution instead of the
-/// full native screen) is still the documented follow-up if this isn't enough on its own.
+/// the earlier local-only round-trip test - the extra tick of margin traded latency for headroom
+/// against that contention. It is back to 2 now that the documented "real fix" from that same
+/// note is actually in place: H264Encoder downscales on the GPU first, so this only ever transfers
+/// the encode resolution rather than the full native screen, and the contention that justified the
+/// third slot is gone. Each slot costs one frame interval of latency (~33ms at 30fps) on the host,
+/// paid by every viewer. If the host's "skipped" counter climbs again, this is the number to raise.
+///
+/// Each queued copy carries the timestamp of the moment it was made, and that timestamp comes back
+/// out with the frame it belongs to. Stamping at READ time instead - which is what the caller used
+/// to do - labels every frame with a moment BufferDepth-1 ticks after the content actually
+/// happened, so video is presented that much later than the audio it belongs with. That desync is
+/// invisible to any PTS-based check, because the timestamps are wrong together and stay internally
+/// consistent.
 /// </summary>
 public sealed class AsyncTextureReadback : IDisposable
 {
-    private const int BufferDepth = 3;
+    private const int BufferDepth = 2;
 
     private readonly Device device;
     private readonly Texture2D[] stagingTextures;
+    private readonly long[] stagingTimestamps;
     private int writeIndex;
     private int framesQueued;
 
@@ -48,6 +58,7 @@ public sealed class AsyncTextureReadback : IDisposable
         Width = width;
         Height = height;
         stagingTextures = new Texture2D[BufferDepth];
+        stagingTimestamps = new long[BufferDepth];
         for (int i = 0; i < BufferDepth; i++)
             stagingTextures[i] = CreateStaging(device, width, height);
     }
@@ -74,15 +85,22 @@ public sealed class AsyncTextureReadback : IDisposable
     /// <summary>Queues a copy of <paramref name="source"/> for this tick, and - if a copy queued
     /// BufferDepth-1 ticks ago is ready - fills destination with it and returns true. Never
     /// blocks; a false return just means try again next tick. Caller must ensure no other thread
-    /// touches this device's ImmediateContext concurrently.</summary>
-    public bool TryReadPrevious(Texture2D source, byte[] destination)
+    /// touches this device's ImmediateContext concurrently.
+    ///
+    /// <paramref name="sourceTimestampMs"/> is when the frame being COPIED was captured;
+    /// <paramref name="frameTimestampMs"/> comes back as when the frame being RETURNED was
+    /// captured, which is several ticks earlier. Keeping those distinct is what stops video from
+    /// being timestamped later than it happened - see the class summary.</summary>
+    public bool TryReadPrevious(Texture2D source, long sourceTimestampMs, byte[] destination, out long frameTimestampMs)
     {
         device.ImmediateContext.CopyResource(source, stagingTextures[writeIndex]);
+        stagingTimestamps[writeIndex] = sourceTimestampMs;
 
         // The slot BufferDepth-1 ticks older than the one just written is exactly the slot that
         // will be overwritten NEXT tick - i.e. the next index forward in the ring.
         int readIndex = (writeIndex + 1) % stagingTextures.Length;
         bool gotFrame = framesQueued >= stagingTextures.Length && TryMapAndCopy(stagingTextures[readIndex], destination);
+        frameTimestampMs = gotFrame ? stagingTimestamps[readIndex] : sourceTimestampMs;
 
         if (framesQueued < stagingTextures.Length)
             framesQueued++;

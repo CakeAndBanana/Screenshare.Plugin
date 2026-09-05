@@ -8,7 +8,7 @@ namespace ScreenShare.Plugin.Services;
 /// <summary>The panel's world-space frame: centre plus half-extent axes, which is exactly the form
 /// <see cref="WorldPanelRenderer"/>'s vertex shader wants, and also what the speaker positions are
 /// derived from.</summary>
-public readonly record struct PanelFrame(Vector3 Center, Vector3 RightHalf, Vector3 UpHalf, Vector3 Right);
+public readonly record struct PanelFrame(Vector3 Center, Vector3 RightHalf, Vector3 UpHalf, Vector3 Right, Vector3 Forward);
 
 /// <summary>
 /// Per-frame glue for the in-world screen: turns a <see cref="ScreenPlacementInfo"/> plus the
@@ -113,21 +113,29 @@ public sealed class WorldScreenController : IDisposable
         Matrix4x4 orientation = Matrix4x4.CreateFromYawPitchRoll(placement.Yaw, placement.Pitch, 0f);
         Vector3 right = Vector3.TransformNormal(Vector3.UnitX, orientation);
         Vector3 up = Vector3.TransformNormal(Vector3.UnitY, orientation);
+        Vector3 forward = Vector3.TransformNormal(Vector3.UnitZ, orientation);
 
         return new PanelFrame(
             new Vector3(placement.X, placement.Y, placement.Z),
             right * halfWidth,
             up * halfHeight,
-            right);
+            right,
+            forward);
     }
 
     /// <summary>Speakers flank the panel's edges, pushed out by the spread setting - derived from
     /// the placement every frame rather than stored, so they can never drift out of sync with the
-    /// screen they belong to.</summary>
+    /// screen they belong to.
+    ///
+    /// The LEFT channel sits on the panel's +X side. That looks backwards written down, and is the
+    /// same handedness that made the picture come out mirrored: the panel's +X axis points to the
+    /// viewer's left when seen from the side it faces. Assigning by the axis name instead would put
+    /// the left channel on the listener's right - the stereo image mirrored exactly as the video
+    /// was.</summary>
     public static (Vector3 Left, Vector3 Right) SpeakerPositions(ScreenPlacementInfo placement, in PanelFrame frame)
     {
         Vector3 offset = frame.Right * (frame.RightHalf.Length() + MathF.Max(placement.SpeakerSpread, 0f));
-        return (frame.Center - offset, frame.Center + offset);
+        return (frame.Center + offset, frame.Center - offset);
     }
 
     private static void UpdateAudio(
@@ -320,6 +328,25 @@ public sealed class WorldScreenController : IDisposable
             FalloffStart: existing?.FalloffStart ?? 8f,
             FalloffEnd: existing?.FalloffEnd ?? 25f,
             Version: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+    }
+
+    /// <summary>Shifts a placement along the panel's OWN axes rather than world X/Z, so "left" and
+    /// "forward" mean what they look like from in front of the screen however it happens to be
+    /// rotated. Sideways is negated for the same handedness reason as the speakers and the picture:
+    /// the panel's +X points to the viewer's left.</summary>
+    public static ScreenPlacementInfo Nudge(ScreenPlacementInfo placement, float sidewaysMeters, float forwardMeters)
+    {
+        PanelFrame frame = BuildFrame(placement, 16, 9);
+        Vector3 moved = new Vector3(placement.X, placement.Y, placement.Z)
+                        + (frame.Right * -sidewaysMeters)
+                        + (frame.Forward * forwardMeters);
+
+        return placement with
+        {
+            X = moved.X,
+            Z = moved.Z,
+            Version = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        };
     }
 
     public void Dispose() => ReleaseDevice();

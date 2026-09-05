@@ -355,18 +355,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         }
     }
 
-    /// <summary>Reads the latest captured frame into <paramref name="readback"/>'s CPU buffer,
-    /// without blocking (see AsyncTextureReadback) - returns false if no new frame was ready
-    /// yet. Safe to call concurrently with the capture loop - shares the same device
-    /// ImmediateContext, so both sides take <see cref="contextLock"/>.</summary>
-    public bool ReadLatestFrameInto(AsyncTextureReadback readback, byte[] destination)
-    {
-        lock (contextLock)
-        {
-            return readback.TryReadPrevious(targetTexture, destination);
-        }
-    }
-
     /// <summary>Rebuilds the duplication after AccessLost, which DXGI raises routinely rather than
     /// exceptionally - any resolution change, fullscreen transition or secure-desktop prompt does
     /// it. This used to just break out of the capture loop, which left the stream frozen on its

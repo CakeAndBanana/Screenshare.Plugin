@@ -177,6 +177,37 @@ public sealed class RoomSessionService : IDisposable
             return members.FirstOrDefault(m => m.ConnectionId == connectionId)?.DisplayName ?? "someone";
     }
 
+    /// <summary>Adds a room to the recent list, newest first. Recorded only on SUCCESS - a code
+    /// that was rejected or a password that was wrong is not worth offering back as a shortcut.
+    ///
+    /// Keyed on relay URL AND code together, because a code only means anything on the relay that
+    /// issued it. Re-recording an existing entry moves it to the front rather than duplicating it.</summary>
+    private static void RememberRoom(string roomId, string password, bool wasHost)
+    {
+        const int maxRemembered = 8;
+
+        Configuration config = ServiceCollector.Config;
+        string relayUrl = ServiceCollector.Config.RelayUrl;
+
+        config.RecentRooms.RemoveAll(r =>
+            string.Equals(r.RoomId, roomId, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(r.RelayUrl, relayUrl, StringComparison.OrdinalIgnoreCase));
+
+        config.RecentRooms.Insert(0, new RecentRoom
+        {
+            RelayUrl = relayUrl,
+            RoomId = roomId,
+            Password = config.RememberRoomPasswords ? password : null,
+            WasHost = wasHost,
+            LastJoinedUtc = DateTime.UtcNow,
+        });
+
+        if (config.RecentRooms.Count > maxRemembered)
+            config.RecentRooms.RemoveRange(maxRemembered, config.RecentRooms.Count - maxRemembered);
+
+        ServiceCollector.PI.SavePluginConfig(config);
+    }
+
     private void RecordEvent(string message)
     {
         LastEvent = message;
@@ -409,6 +440,7 @@ public sealed class RoomSessionService : IDisposable
                     members.Add(new RoomMemberInfo(ConnectionId!, ServiceCollector.Config.DisplayName, IsHost: true, CanStream: true));
                 }
                 RecordEvent($"Room created: {result.RoomId}");
+                RememberRoom(result.RoomId!, password, wasHost: true);
             }
             else
             {
@@ -439,6 +471,7 @@ public sealed class RoomSessionService : IDisposable
                 RoomId = roomId;
                 IsHost = false;
                 RecordEvent($"Joined room {roomId}");
+                RememberRoom(roomId, password, wasHost: false);
             }
             else
             {

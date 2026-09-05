@@ -71,6 +71,36 @@ public sealed class Configuration : IPluginConfiguration
     /// and whether it shares a scale with our own fragment depth.</summary>
     public int WorldScreenDiagnostic { get; set; }
 
+    /// <summary>Rooms recently joined or created, newest first, so rejoining after a game restart
+    /// doesn't mean retyping a code from memory. Capped at a handful - this is a shortcut list, not
+    /// an archive.</summary>
+    public List<RecentRoom> RecentRooms { get; set; } = [];
+
+    /// <summary>Whether room passwords are kept alongside the codes, making rejoin a single click.
+    /// Off by default and deliberately opt-in: this file is plain JSON in the Dalamud config folder,
+    /// so a stored password is readable by anything that can read the disk. Convenient for a
+    /// long-running room among friends, a bad idea on a shared machine - which is the user's call
+    /// to make knowingly rather than one to make quietly on their behalf.</summary>
+    public bool RememberRoomPasswords { get; set; }
+
+    /// <summary>Total viewer-side audio latency budget in milliseconds - the jitter buffer plus
+    /// the output device's own buffering, split between them by AudioPlaybackDecoder, with
+    /// everything above the device's share going to the jitter buffer where it actually absorbs
+    /// uneven arrival.
+    ///
+    /// This sets end-to-end latency for BOTH streams, not just audio: audio is the master clock and
+    /// video is synchronised to it, so video can never be shown sooner than the audio it belongs
+    /// with. H264Decoder sizes its presentation queue from this same number, because a clock that
+    /// may sit this far behind live needs frames that old to still exist.
+    ///
+    /// Defaults high deliberately. Measured on a real cross-country session (UK to NL), 200ms
+    /// produced over two seconds per minute of BOTH underrun and overflow - a buffer oscillating
+    /// between empty and full, heard as constant dropouts, and because audio is the master clock
+    /// every dropout stalls video too. Long-haul internet jitter simply needs the depth. The cost
+    /// is being about half a second behind live, which is irrelevant for watching something
+    /// together and can be lowered by anyone on a LAN.</summary>
+    public int PlaybackLatencyMs { get; set; } = 500;
+
     /// <summary>Playback volume for a stream you're watching, 0-1. Per-viewer and local: it is
     /// nobody else's business how loud you have someone's stream.</summary>
     public float ViewerVolume { get; set; } = 1f;
@@ -115,4 +145,25 @@ public sealed class Configuration : IPluginConfiguration
     /// room, or in a room where nobody has placed the screen yet. The room's placement always wins
     /// when it exists, so this can't fight it.</summary>
     public ScreenPlacementInfo? LocalScreenPlacement { get; set; }
+}
+
+/// <summary>One entry in the recent-rooms shortcut list. <see cref="RelayUrl"/> is part of the
+/// identity, not decoration: a room code only means anything on the relay that issued it, so the
+/// same code on a different relay is a different room.</summary>
+public sealed class RecentRoom
+{
+    public string RelayUrl { get; set; } = string.Empty;
+
+    public string RoomId { get; set; } = string.Empty;
+
+    /// <summary>Null unless the user opted into remembering passwords - see
+    /// <see cref="Configuration.RememberRoomPasswords"/>.</summary>
+    public string? Password { get; set; }
+
+    /// <summary>True if this client created the room rather than joining it. Only used to label
+    /// the entry, since a host rejoining their own old room is a different thing from joining
+    /// someone else's.</summary>
+    public bool WasHost { get; set; }
+
+    public DateTime LastJoinedUtc { get; set; }
 }

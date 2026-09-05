@@ -113,6 +113,10 @@ public class WorldScreenGeometryTests
         AssertClose(8f, (right - left).Length(), "separation is width plus twice the spread");
     }
 
+    /// <summary>The left channel sits on the panel's +X edge, which reads backwards but is correct:
+    /// the panel's +X axis points to the VIEWER's left when seen from the side it faces. That same
+    /// handedness is what made the picture render mirrored until the shader's u coordinate was
+    /// flipped; assigning speakers by axis name instead mirrors the stereo image the same way.</summary>
     [Fact]
     public void SpeakerPositions_ZeroSpread_SitsOnThePanelEdges()
     {
@@ -121,8 +125,55 @@ public class WorldScreenGeometryTests
 
         (Vector3 left, Vector3 right) = WorldScreenController.SpeakerPositions(placement, frame);
 
-        AssertClose(0f, (left - (frame.Center - frame.RightHalf)).Length(), "left speaker on the left edge");
-        AssertClose(0f, (right - (frame.Center + frame.RightHalf)).Length(), "right speaker on the right edge");
+        AssertClose(0f, (left - (frame.Center + frame.RightHalf)).Length(), "left channel on the +X edge");
+        AssertClose(0f, (right - (frame.Center - frame.RightHalf)).Length(), "right channel on the -X edge");
+    }
+
+    // --- Nudging ---
+
+    [Theory]
+    [InlineData(0f)]
+    [InlineData(1.2f)]
+    [InlineData(-2.5f)]
+    public void Nudge_MovesAlongThePanelsOwnAxes_AtAnyRotation(float yaw)
+    {
+        ScreenPlacementInfo placement = Placement(yaw: yaw);
+        PanelFrame frame = WorldScreenController.BuildFrame(placement, 1920, 1080);
+
+        ScreenPlacementInfo moved = WorldScreenController.Nudge(placement, sidewaysMeters: 2f, forwardMeters: 0f);
+        var delta = new Vector3(moved.X - placement.X, 0f, moved.Z - placement.Z);
+
+        AssertClose(2f, delta.Length(), "moves by the requested distance");
+
+        // Negated against the panel's +X for the same handedness reason as the speakers: "right"
+        // from the viewer's seat is the panel's -X.
+        AssertClose(-1f, Vector3.Dot(Vector3.Normalize(delta), Vector3.Normalize(frame.Right)), "'right' moves along -X");
+    }
+
+    [Fact]
+    public void Nudge_ForwardMovesAlongTheFacingAxisAndLeavesHeightAlone()
+    {
+        ScreenPlacementInfo placement = Placement(yaw: 0.8f);
+        PanelFrame frame = WorldScreenController.BuildFrame(placement, 1920, 1080);
+
+        ScreenPlacementInfo moved = WorldScreenController.Nudge(placement, 0f, forwardMeters: 3f);
+        var delta = new Vector3(moved.X - placement.X, 0f, moved.Z - placement.Z);
+
+        AssertClose(3f, delta.Length(), "moves by the requested distance");
+        AssertClose(1f, Vector3.Dot(Vector3.Normalize(delta), Vector3.Normalize(frame.Forward)), "along the facing axis");
+        Assert.Equal(placement.Y, moved.Y);
+    }
+
+    /// <summary>Nudging has to restamp the version, or the relay's echo is treated as stale by
+    /// RoomSessionService's staleness check and the move is silently reverted.</summary>
+    [Fact]
+    public void Nudge_AdvancesTheVersion()
+    {
+        ScreenPlacementInfo placement = Placement();
+
+        ScreenPlacementInfo moved = WorldScreenController.Nudge(placement, 1f, 0f);
+
+        Assert.True(moved.Version > placement.Version, "version must advance");
     }
 
     /// <summary>Speakers are derived from the placement every frame rather than stored, so rotating

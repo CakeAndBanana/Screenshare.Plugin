@@ -152,15 +152,27 @@ public sealed class H264Encoder : IDisposable
             while (running)
             {
                 bool gotFrame;
+                long capturedAtMs;
                 lock (gameAdapterDevice.ImmediateContextLock)
                 {
                     downscaler.Blit(gameAdapterDevice.Device.ImmediateContext, sourceSrv, downscaledRtv, Width, Height);
-                    gotFrame = readback.TryReadPrevious(downscaledTexture, frame);
+
+                    // The clock is read here, at the moment the frame is COPIED, and handed to the
+                    // readback so it can be carried alongside that frame through the ring. What
+                    // comes back is the timestamp of the frame actually returned, which was queued
+                    // a couple of ticks ago.
+                    gotFrame = readback.TryReadPrevious(
+                        downscaledTexture, sessionClock.ElapsedMilliseconds, frame, out capturedAtMs);
                 }
 
                 if (gotFrame)
                 {
-                    Interlocked.Exchange(ref lastCaptureTimestampMs, sessionClock.ElapsedMilliseconds);
+                    // Deliberately the frame's own capture time rather than "now". Stamping "now"
+                    // labelled every frame a couple of ticks newer than the content it held, while
+                    // audio was stamped accurately at capture - so video was presented that much
+                    // later than the audio it belonged with, and no viewer-side clock could correct
+                    // it because the timestamps were self-consistently wrong.
+                    Interlocked.Exchange(ref lastCaptureTimestampMs, capturedAtMs);
                     encoderProcess.StandardInput.Write(frame, 0, frame.Length);
                     Interlocked.Increment(ref framesEncoded);
                 }
