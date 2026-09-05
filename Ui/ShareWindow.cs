@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
@@ -666,7 +666,7 @@ public sealed class ShareWindow : Window, IDisposable
             ImGui.TextUnformatted(
                 $"Streaming: {mediaSession.HostFramesEncoded} encoded / {mediaSession.HostFramesSkipped} skipped " +
                 $"({mediaSession.HostAverageFps:F1} fps avg), {mediaSession.HostEncodedBytes} bytes sent " +
-                $"({mediaSession.HostVendor}, {mediaSession.HostCodec})");
+                $"({mediaSession.HostEncoderName}, {mediaSession.HostCodec})");
 
             // Shown only when adaptation has actually pulled the bitrate down, so quality dropping
             // reads as a deliberate response to the uplink rather than as something going wrong.

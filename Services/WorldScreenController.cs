@@ -37,6 +37,13 @@ public sealed class WorldScreenController : IDisposable
     /// one the in-scene draw attaches to. Zero when the hook isn't running.</summary>
     public int LastFrameBackBufferSwitches => sceneHook?.LastFrameBackBufferSwitches ?? 0;
 
+    /// <summary>Whether the hook has fallen back to drawing in every render pass, because the
+    /// configured one kept failing to occur on this machine.</summary>
+    public bool IsDrawingEveryPass => sceneHook?.IsDrawingEveryPass == true;
+
+    /// <summary>Frames where a panel was queued but never drawn - see ScenePanelHook.</summary>
+    public int MissedPanelFrames => sceneHook?.MissedFrames ?? 0;
+
     /// <summary>Whether the panel is currently being drawn underneath the game's UI.</summary>
     public bool IsDrawingUnderUi => sceneHook?.IsActive == true;
 

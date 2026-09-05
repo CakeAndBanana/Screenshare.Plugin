@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using ScreenShare.Plugin.Capture.AudioCapture;
 using ScreenShare.Plugin.Capture.ScreenCapture;
 using ScreenShare.Plugin.Encoding;
@@ -26,17 +26,12 @@ public sealed class MediaSessionService : IDisposable
     // desync results as strictly better than silence.
     private static readonly TimeSpan AudioVideoSyncTimeout = TimeSpan.FromSeconds(10);
 
-    // Bitrate adaptation. Down hard and immediately, up gently and only after a sustained clean
-    // spell - the classic asymmetry, because re-congesting a link costs more than under-using it.
+    // How often the send queue is sampled. The rule applied to each sample lives in
+    // BitrateAdaptation, where it can be tested without a socket or an encoder.
     private const int AdaptIntervalMs = 3000;
-    private const double BackoffFactor = 0.75;
-    private const double ProbeFactor = 1.15;
-    private const int CleanWindowsBeforeProbe = 5;
-    private const int MinBitrateKbps = 300;
-    private const int MinChangePercent = 10;
 
     private MediaSocketClient? hostSocket;
-    private H264Encoder? videoEncoder;
+    private IVideoEncoder? videoEncoder;
     private OpusFrameEncoder? audioEncoder;
     private IAudioSource? hostAudioCapture;
 
@@ -58,7 +53,9 @@ public sealed class MediaSessionService : IDisposable
     /// <summary>Everything needed to rebuild the video encoder without re-running the whole
     /// hosting setup, so the bitrate can be changed mid-stream - see
     /// <see cref="AdaptBitrateLoopAsync"/>. ffmpeg takes its bitrate as a command-line argument at
-    /// spawn, so there is no way to change it on a running encoder; the process has to be replaced.</summary>
+    /// spawn, so there is no way to change it on a running encoder; the process has to be replaced.
+    /// Kept for that fallback path only - a Media Foundation encoder is retuned in place and never
+    /// rebuilt, so none of this is touched when one is in use.</summary>
     private sealed record HostEncodeSettings(
         GameAdapterDevice Device,
         ICaptureSource Capture,
@@ -202,7 +199,11 @@ public sealed class MediaSessionService : IDisposable
     /// even the small audio stream), not just competing with video for the same queue.</summary>
     public long HostQueueAudioDrops => hostSocket?.DroppedAudioMessages ?? 0;
 
-    public GpuVendor? HostVendor => videoEncoder?.Vendor;
+    /// <summary>Which encoder is actually running - the MFT's own name ("NVIDIA H.264 Encoder
+    /// MFT") on the Media Foundation path, or the GPU vendor on the ffmpeg one, which is as
+    /// specific as that path can be. Worth showing because the two paths are chosen automatically:
+    /// this line is how the host can tell which one they got.</summary>
+    public string? HostEncoderName => videoEncoder?.EncoderName;
 
     public VideoCodec? HostCodec => videoEncoder?.Codec;
 
@@ -268,7 +269,8 @@ public sealed class MediaSessionService : IDisposable
             lastSeenQueueDrops = 0;
             cleanAdaptWindows = 0;
 
-            var encoder = new H264Encoder(gameAdapterDevice, screenCapture, ffmpegExePath, sessionClock, targetHeight, bitrateKbps, fps, codec);
+            IVideoEncoder encoder = VideoEncoderFactory.Create(
+                gameAdapterDevice, screenCapture, ffmpegExePath, sessionClock, targetHeight, bitrateKbps, fps, codec);
             encoder.ChunkEncoded += (ptsMs, chunk) => hostSocket?.SendVideoChunk(ptsMs, chunk);
             videoEncoder = encoder;
             newSocket.SendVideoMetadata(encoder.Width, encoder.Height, codec, fps);
@@ -335,8 +337,12 @@ public sealed class MediaSessionService : IDisposable
     ///
     /// Down fast and up slow, deliberately: congestion is already hurting when it is detected, so
     /// backing off hard is cheap, whereas probing upward too eagerly just re-congests the link and
-    /// oscillates. Every change costs an encoder restart (see <see cref="RestartEncoderAsync"/>),
-    /// so the threshold below exists to make sure a change is worth the hitch it causes.
+    /// oscillates. See <see cref="BitrateAdaptation"/> for the rule itself.
+    ///
+    /// What a change COSTS depends on the encoder. Media Foundation retunes in place, so
+    /// adaptation is invisible and can move in small steps; ffmpeg has to be restarted (see
+    /// <see cref="RestartEncoderAsync"/>), so its changes have to clear a much larger threshold to
+    /// be worth the hitch they cause.
     /// </summary>
     private async Task AdaptBitrateLoopAsync(CancellationToken cancellationToken)
     {
@@ -353,24 +359,28 @@ public sealed class MediaSessionService : IDisposable
                 long newDrops = drops - lastSeenQueueDrops;
                 lastSeenQueueDrops = drops;
 
-                int target = currentBitrateKbps;
-                if (newDrops > 0)
-                {
-                    cleanAdaptWindows = 0;
-                    target = Math.Max((int)(currentBitrateKbps * BackoffFactor), MinBitrateKbps);
-                }
-                else if (++cleanAdaptWindows >= CleanWindowsBeforeProbe)
-                {
-                    cleanAdaptWindows = 0;
-                    target = Math.Min((int)(currentBitrateKbps * ProbeFactor), settings.ConfiguredBitrateKbps);
-                }
+                bool live = videoEncoder is { SupportsLiveBitrate: true };
+                BitrateDecision decision = BitrateAdaptation.Next(
+                    currentBitrateKbps, settings.ConfiguredBitrateKbps, newDrops, cleanAdaptWindows, live);
 
-                // A restart costs a visible hitch, so it has to buy something. Small adjustments
-                // are not worth interrupting the stream for.
-                if (Math.Abs(target - currentBitrateKbps) * 100 / Math.Max(currentBitrateKbps, 1) < MinChangePercent)
+                cleanAdaptWindows = decision.CleanWindows;
+                if (!decision.ShouldApply)
                     continue;
 
-                await RestartEncoderAsync(settings, target, cancellationToken).ConfigureAwait(false);
+                if (live)
+                {
+                    // The whole point of the Media Foundation encoder: the running encoder is
+                    // retuned, so adaptation costs nothing visible and can happen in small steps
+                    // instead of the coarse, hitchy jumps a rebuild forces.
+                    videoEncoder!.SetBitrate(decision.TargetKbps);
+                    currentBitrateKbps = decision.TargetKbps;
+                    ServiceCollector.PluginLog.Information(
+                        $"ScreenShare retuned video bitrate to {decision.TargetKbps}kbps " +
+                        $"(configured {settings.ConfiguredBitrateKbps}kbps).");
+                    continue;
+                }
+
+                await RestartEncoderAsync(settings, decision.TargetKbps, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -403,10 +413,13 @@ public sealed class MediaSessionService : IDisposable
         if (hostSessionClock is not { } sessionClock)
             return;
 
-        H264Encoder? oldEncoder = videoEncoder;
+        IVideoEncoder? oldEncoder = videoEncoder;
 
         try
         {
+            // Deliberately the ffmpeg encoder rather than the factory: this path only runs when the
+            // encoder in use cannot retune, which means Media Foundation was already unavailable or
+            // declined. Going back through the factory would retry it on every adaptation step.
             var encoder = new H264Encoder(
                 settings.Device, settings.Capture, settings.FfmpegExePath, sessionClock,
                 settings.TargetHeight, bitrateKbps, settings.Fps, settings.Codec);
@@ -647,7 +660,7 @@ public sealed class MediaSessionService : IDisposable
         adaptCts = null;
         hostEncodeSettings = null;
 
-        H264Encoder? oldEncoder = videoEncoder;
+        IVideoEncoder? oldEncoder = videoEncoder;
         videoEncoder = null;
         if (oldEncoder is not null)
             _ = Task.Run(() => DisposeSafely(oldEncoder, "H264Encoder"));

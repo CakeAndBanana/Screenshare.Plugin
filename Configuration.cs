@@ -119,11 +119,18 @@ public sealed class Configuration : IPluginConfiguration
     /// toggle.</summary>
     public bool WorldScreenDrawUnderUi { get; set; } = true;
 
-    /// <summary>Which back-buffer target switch the in-scene draw happens after. Depends on the
-    /// game's pass structure, so it was found by trying them against a running game rather than
-    /// derived: 4 is the first one that lands after the scene is composited and before the UI is
-    /// drawn. A game patch that reshapes the render passes would change it - the symptom would be
-    /// the panel vanishing or drawing over the HUD again, not a crash.</summary>
+    /// <summary>Which back-buffer target switch the in-scene draw happens after, or -1 to draw in
+    /// every pass.
+    ///
+    /// Defaults to 4, the pass measured on an NVIDIA machine without FSR, because one draw per
+    /// frame is the cheaper and more precise behaviour where it works. It does not work everywhere:
+    /// on an AMD machine with FSR the panel appeared in an irregular subset of frames, which is the
+    /// signature of a pass count that varies frame to frame, so no single index can be right there.
+    ///
+    /// That case does not need this setting changed. ScenePanelHook notices when the chosen pass
+    /// keeps failing to come up and switches itself to every-pass for the rest of the session - see
+    /// its escalation logic. This value is the starting point and the manual override, not the only
+    /// line of defence.</summary>
     public int WorldScreenHookOccurrence { get; set; } = 4;
 
     /// <summary>Escape hatch for the scene's depth convention, which decides BOTH how our own

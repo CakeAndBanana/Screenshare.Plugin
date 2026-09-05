@@ -94,6 +94,17 @@
           "SharpDX": "4.2.0"
         }
       },
+      "SharpDX.MediaFoundation": {
+        "type": "Direct",
+        "requested": "[4.2.0, )",
+        "resolved": "4.2.0",
+        "contentHash": "HRf6EU+LyqZN7pETlVhxKkpz2E2p9oGPgFcCZ0t7+S6gnrE9qw49Po69t2YeWo6/MT3APh2Fja7hLNB6Yq36cg==",
+        "dependencies": {
+          "NETStandard.Library": "1.6.1",
+          "SharpDX": "4.2.0",
+          "SharpDX.DXGI": "4.2.0"
+        }
+      },
       "Microsoft.AspNetCore.Connections.Abstractions": {
         "type": "Transitive",
         "resolved": "10.0.7",

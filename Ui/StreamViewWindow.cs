@@ -374,21 +374,54 @@ public sealed class StreamViewWindow : Window
         if (drawUnderUi && !worldScreen().IsDrawingUnderUi)
             ImGui.TextColored(WarnColor, "The render hook isn't running - drawing over the game UI instead.");
 
-#if DEBUG
+        // Deliberately NOT compiled out of Release, unlike the depth diagnostics below. Which
+        // render pass to draw in depends on the machine - FSR adds an upscale pass, and vendors
+        // differ - so this is a setting a user may genuinely need, not a developer tool. Hiding it
+        // would leave anyone hitting a flickering view with no way out but turning the feature off.
         if (drawUnderUi)
         {
-            // Which back-buffer switch to attach to depends on the game's pass structure, so it's
-            // dialled in against a live frame count rather than hardcoded.
-            ImGui.SetNextItemWidth(120);
-            if (ImGui.InputInt("Hook occurrence", ref hookOccurrence))
+            bool auto = hookOccurrence < 0;
+            if (ImGui.Checkbox("Auto-detect render pass", ref auto))
             {
-                hookOccurrence = Math.Max(hookOccurrence, 0);
+                // Unticking lands on 4, the value measured on an NVIDIA machine without FSR -
+                // a starting point to tune from, not a claim that it is right anywhere else.
+                hookOccurrence = auto ? -1 : 4;
                 config.WorldScreenHookOccurrence = hookOccurrence;
                 ServiceCollector.PI.SavePluginConfig(config);
             }
 
-            ImGui.TextDisabled($"Back-buffer switches last frame: {worldScreen().LastFrameBackBufferSwitches}");
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(
+                    "Draws in every render pass instead of one fixed pass. Fixes a flickering panel: " +
+                    "the number of passes varies between frames, so a fixed pass only matches some of " +
+                    "them. Costs a few wasted draws per frame, which is not noticeable.");
+            }
+
+            if (!auto)
+            {
+                ImGui.SetNextItemWidth(120);
+                if (ImGui.InputInt("Render pass", ref hookOccurrence))
+                {
+                    hookOccurrence = Math.Max(hookOccurrence, 0);
+                    config.WorldScreenHookOccurrence = hookOccurrence;
+                    ServiceCollector.PI.SavePluginConfig(config);
+                }
+            }
+
+            ImGui.TextDisabled($"Render passes last frame: {worldScreen().LastFrameBackBufferSwitches}");
+
+            // Shown when the hook has corrected itself, so a user who never touched this setting
+            // still learns why - silent self-healing is fine until someone wonders what changed.
+            if (!auto && worldScreen().IsDrawingEveryPass)
+            {
+                ImGui.TextDisabled(
+                    $"Switched to every pass automatically after {worldScreen().MissedPanelFrames} missed frames - " +
+                    "this machine's pass count varies.");
+            }
         }
+
+#if DEBUG
 
         // Development-only. These exist to diagnose the depth pipeline (they're what identified a
         // view matrix arriving with a zeroed w column), and none of it means anything to someone

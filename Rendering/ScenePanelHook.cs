@@ -35,6 +35,12 @@ namespace ScreenShare.Plugin.Rendering;
 /// </summary>
 public sealed unsafe class ScenePanelHook : IDisposable
 {
+    /// <summary>Misses tolerated before giving up on the configured pass. High enough that a
+    /// loading screen or a cutscene transition - where the game may not touch the back buffer the
+    /// usual way - cannot trigger it, low enough that a genuinely wrong pass is corrected within a
+    /// second or two of streaming rather than after a visibly flickering minute.</summary>
+    private const int MissedFramesBeforeEscalating = 30;
+
     private delegate void DoSetTargetCommandDelegate(ImmediateContext* context, RenderCommandSetTarget* command);
 
     private readonly WorldPanelRenderer renderer;
@@ -46,6 +52,11 @@ public sealed unsafe class ScenePanelHook : IDisposable
     private int backBufferSwitches;
     private bool loggedFailure;
 
+    // Automatic escalation to every-pass drawing. A correctly chosen pass essentially never misses,
+    // so repeated misses are evidence the choice is wrong on this machine rather than a transient.
+    private int missedFrames;
+    private bool escalatedToEveryPass;
+
     /// <summary>True once the hook is installed and drawing can actually happen here. False means
     /// the caller should fall back to the ImGui path rather than silently not drawing.</summary>
     public bool IsActive => hook is { IsEnabled: true };
@@ -55,7 +66,30 @@ public sealed unsafe class ScenePanelHook : IDisposable
     /// it reads 2, then only 0 and 1 are meaningful choices.</summary>
     public int LastFrameBackBufferSwitches { get; private set; }
 
-    /// <summary>Which back-buffer switch to draw after, zero-based.</summary>
+    /// <summary>Whether the panel is currently being drawn in every pass rather than one - either
+    /// because it was configured that way, or because the configured pass kept missing and the hook
+    /// escalated on its own.</summary>
+    public bool IsDrawingEveryPass => escalatedToEveryPass || DrawAtOccurrence < 0;
+
+    /// <summary>How many frames had a panel queued that never got drawn. Non-zero means the chosen
+    /// pass is not reliably occurring; it is what drives escalation, and is worth surfacing because
+    /// it is the difference between "this machine needs every-pass" and "something else is wrong".</summary>
+    public int MissedFrames => missedFrames;
+
+    /// <summary>Which back-buffer switch to draw after, zero-based. Negative means AUTO: draw in
+    /// EVERY back-buffer pass of the frame.
+    ///
+    /// A fixed index is only correct for the pass structure it was measured against, and that
+    /// structure is not universal - FSR inserts an upscale pass, and vendors differ. Worse, it is
+    /// not even stable frame to frame: measured on an AMD+FSR machine, the panel appeared in an
+    /// irregular subset of frames, which is what a varying pass count looks like from the outside.
+    ///
+    /// That irregularity is also why auto does not simply target the last pass using the previous
+    /// frame's count - a stale count is wrong on exactly the frames where the count changed, which
+    /// are the frames that were already failing. Drawing in every pass cannot miss: earlier draws
+    /// are harmlessly overwritten by whatever the game composites afterwards, and the final one
+    /// lands in the last pass before the UI, which is the window we want. The cost is a handful of
+    /// wasted quad draws per frame, which is nothing next to a flickering screen.</summary>
     public int DrawAtOccurrence { get; set; }
 
     public ScenePanelHook(Device gameDevice)
@@ -91,6 +125,17 @@ public sealed unsafe class ScenePanelHook : IDisposable
     /// a frame late if the game's pass structure changes (a cutscene, a loading screen).</summary>
     public void EndFrame()
     {
+        // A panel still queued at the frame boundary was never drawn: the pass it was waiting for
+        // did not come up. That is the measurable form of the flicker - the panel is simply absent
+        // from those frames - so it is counted rather than inferred from what it looks like.
+        if (hasPending && !escalatedToEveryPass && DrawAtOccurrence >= 0 && ++missedFrames >= MissedFramesBeforeEscalating)
+        {
+            escalatedToEveryPass = true;
+            ServiceCollector.PluginLog.Information(
+                $"ScreenShare in-world screen: render pass {DrawAtOccurrence} missed {missedFrames} frames, " +
+                "switching to drawing in every pass. The game's pass count varies on this machine.");
+        }
+
         LastFrameBackBufferSwitches = backBufferSwitches;
         backBufferSwitches = 0;
         hasPending = false;
@@ -111,11 +156,24 @@ public sealed unsafe class ScenePanelHook : IDisposable
             // occurrence setting is dialled against, and it would be useless if it only advanced
             // on frames that happened to have a panel queued.
             int occurrence = backBufferSwitches++;
-            if (!hasPending || occurrence != DrawAtOccurrence)
+            if (!hasPending)
                 return;
 
+            if (!IsDrawingEveryPass)
+            {
+                if (occurrence != DrawAtOccurrence)
+                    return;
+
+                DrawWithStateRestored();
+
+                // Fixed mode draws exactly once per frame, so the panel is consumed here.
+                hasPending = false;
+                return;
+            }
+
+            // Every-pass: draw in this one and every later one this frame. Deliberately does NOT
+            // clear hasPending - EndFrame does that at the frame boundary.
             DrawWithStateRestored();
-            hasPending = false;
         }
         catch (Exception ex)
         {

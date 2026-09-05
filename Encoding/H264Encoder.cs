@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using ScreenShare.Plugin.Capture.ScreenCapture;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
@@ -21,7 +21,7 @@ namespace ScreenShare.Plugin.Encoding;
 /// behind a severe skip-rate cliff once a 30fps target was requested. Reading back only the
 /// already-downscaled frame is the actual fix.
 /// </summary>
-public sealed class H264Encoder : IDisposable
+public sealed class H264Encoder : IVideoEncoder
 {
     private readonly GameAdapterDevice gameAdapterDevice;
     private readonly GpuDownscaler downscaler;
@@ -48,6 +48,22 @@ public sealed class H264Encoder : IDisposable
     public int Height { get; }
 
     public GpuVendor Vendor { get; }
+
+    /// <summary>The GPU vendor, which is as specific as this path can be: ffmpeg picks its encoder
+    /// from the vendor-specific argument set we build, and never tells us which one it chose. The
+    /// Media Foundation path reports the actual MFT's name.</summary>
+    public string EncoderName => $"ffmpeg ({Vendor})";
+
+    /// <summary>False: bitrate is a spawn argument here, so changing it means respawning ffmpeg -
+    /// which is what MediaSessionService.RestartEncoderAsync exists to do, and why adaptation on
+    /// this path costs a visible hitch.</summary>
+    public bool SupportsLiveBitrate => false;
+
+    /// <summary>No-op, so the adaptation loop can call it unconditionally. Callers that need the
+    /// bitrate to actually change check <see cref="SupportsLiveBitrate"/> and rebuild instead.</summary>
+    public void SetBitrate(int bitrateKbps)
+    {
+    }
 
     public long FramesEncoded => Interlocked.Read(ref framesEncoded);
 

@@ -1,4 +1,5 @@
 using ScreenShare.Plugin.Rendering;
+using ScreenShare.Plugin.Services;
 using SharpDX;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
@@ -60,11 +61,32 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
     public long FramesCaptured => Interlocked.Read(ref framesCaptured);
     private long framesCaptured;
 
+    // Cross-reload stop flag. See DuplicationRegistry: a capture stranded by a plugin reload holds
+    // its monitor for the rest of the game session, and polling this is how it learns to let go.
+    private readonly Guid registrationId;
+    private readonly System.Runtime.CompilerServices.StrongBox<bool> stopRequested;
+
     public DesktopDuplicationCapture(GameAdapterDevice gameAdapterDevice, int outputIndex = 0)
     {
         device = gameAdapterDevice.Device;
         contextLock = gameAdapterDevice.ImmediateContextLock;
         this.outputIndex = outputIndex;
+
+        // Before duplicating anything, ask any capture stranded by a previous plugin load to let
+        // go of its monitor. Without this, one reload that skipped Dispose blocks monitor capture
+        // until the game restarts - and the failure names the monitor, not the cause.
+        int stranded = DuplicationRegistry.RequestStopAll();
+        if (stranded > 0)
+        {
+            ServiceCollector.PluginLog.Information(
+                $"ScreenShare asked {stranded} capture(s) left by a previous plugin load to stop before duplicating.");
+
+            // Their loops poll at frame cadence and release on the way out; a short wait here is
+            // the difference between this attempt succeeding and failing for the same old reason.
+            Thread.Sleep(250);
+        }
+
+        (registrationId, stopRequested) = DuplicationRegistry.Register();
 
         using DxgiDevice dxgiDevice = device.QueryInterface<DxgiDevice>();
         using SharpDX.DXGI.Adapter adapter = dxgiDevice.Adapter;
@@ -299,7 +321,7 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
 
     private void CaptureLoop()
     {
-        while (running)
+        while (running && !stopRequested.Value)
         {
             SharpDX.DXGI.Resource? desktopResource = null;
             try
@@ -389,6 +411,7 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
 
     public void Dispose()
     {
+        DuplicationRegistry.Unregister(registrationId);
         running = false;
         captureThread.Join(1000);
         targetTexture.Dispose();
