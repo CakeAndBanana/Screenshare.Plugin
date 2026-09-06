@@ -150,6 +150,11 @@ internal sealed class PresentationScheduler<TFrame> : IDisposable
     /// </summary>
     private void DisplayLoop()
     {
+        // Owned by this thread - see PrecisionSleep, which is not shareable. Every pacing wait below
+        // goes through it, because plain Thread.Sleep rounds to the system timer and turns steady
+        // 33ms frames into an alternating 30/47ms stutter that still averages out to 30fps.
+        using var pacer = new PrecisionSleep();
+
         try
         {
             while (running && queue.Reader.Count < capacity)
@@ -180,9 +185,7 @@ internal sealed class PresentationScheduler<TFrame> : IDisposable
                     // No audio to reconcile against - fixed-interval pacing, same as before PTS sync.
                     Show(entry.Frame);
                     frameIndex++;
-                    long noAudioSleepMs = frameIndex * frameIntervalMs - clock.ElapsedMilliseconds;
-                    if (noAudioSleepMs > 0)
-                        Thread.Sleep((int)noAudioSleepMs);
+                    pacer.Wait(frameIndex * frameIntervalMs - clock.ElapsedMilliseconds);
                     continue;
                 }
 
@@ -230,10 +233,7 @@ internal sealed class PresentationScheduler<TFrame> : IDisposable
                     // doesn't delay anything - the frame is already on screen, and the sleep only
                     // postpones the NEXT one. That is why the offset barely moved the picture
                     // however far it was pushed.
-                    long holdMs = MaxHoldFor(driftMs, syncOffsetMs);
-                    if (holdMs > 0)
-                        Thread.Sleep((int)holdMs);
-
+                    pacer.Wait(MaxHoldFor(driftMs, syncOffsetMs));
                     Show(entry.Frame);
                     frameIndex = 0;
                     clock.Restart();
@@ -249,10 +249,10 @@ internal sealed class PresentationScheduler<TFrame> : IDisposable
                 {
                     Show(entry.Frame);
                     frameIndex++;
-                    long sleepMs = frameIndex * frameIntervalMs - clock.ElapsedMilliseconds;
-                    if (sleepMs > 0)
-                        Thread.Sleep((int)sleepMs);
-                    // else already behind schedule - loop again immediately rather than sleeping.
+
+                    // A non-positive wait means already behind schedule, and Wait returns straight
+                    // away - the loop catches up rather than sleeping.
+                    pacer.Wait(frameIndex * frameIntervalMs - clock.ElapsedMilliseconds);
                 }
             }
         }

@@ -163,6 +163,10 @@ public sealed class H264Encoder : IVideoEncoder
         byte[] frame = new byte[Width * Height * 4];
         var clock = Stopwatch.StartNew();
         long frameIndex = 0;
+
+        // See PrecisionSleep: plain Thread.Sleep paces to the system timer, which grabs frames at
+        // uneven intervals even when the average rate is right.
+        using var pacer = new PrecisionSleep();
         try
         {
             while (running)
@@ -198,11 +202,10 @@ public sealed class H264Encoder : IVideoEncoder
                 }
 
                 frameIndex++;
-                long sleepMs = frameIndex * frameIntervalMs - clock.ElapsedMilliseconds;
-                if (sleepMs > 0)
-                    Thread.Sleep((int)sleepMs);
-                // else already behind schedule - loop again immediately rather than sleeping, so
-                // a burst of slow iterations catches back up instead of the shortfall compounding.
+
+                // A non-positive wait returns immediately, so a burst of slow iterations catches
+                // back up rather than the shortfall compounding.
+                pacer.Wait(frameIndex * frameIntervalMs - clock.ElapsedMilliseconds);
             }
         }
         catch (Exception ex) when (running)

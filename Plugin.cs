@@ -1,4 +1,4 @@
-using Dalamud.Interface.Windowing;
+﻿using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using ScreenShare.Plugin.Services;
 using ScreenShare.Plugin.Ui;
@@ -32,11 +32,21 @@ public sealed class Plugin : IDalamudPlugin
             new Dalamud.Game.Command.CommandInfo((_, _) => shareWindow.IsOpen = true)
             { HelpMessage = "Open the ScreenShare window" });
 
+        // The in-world screen is a 3D object in the world, not part of the interface, so hiding
+        // the HUD should no more remove it than it removes a piece of furniture. Dalamud disagrees
+        // by default: it stops calling Draw entirely while the user has the game UI hidden, which
+        // took the panel with it - and, because Draw is also where the render hook's per-frame
+        // bookkeeping happens, left that hook drawing one frozen frame until the UI came back.
+        //
+        // Opting out means Dalamud no longer hides anything for us, so the windows below now have
+        // to hide themselves. That is DrawWindows.
+        ServiceCollector.PI.UiBuilder.DisableUserUiHide = true;
+
         // Before the window system: TickFrame refreshes the decoded texture and submits the
         // in-world panel, and both have to happen regardless of which windows are open (see
         // ShareWindow.TickFrame), with the texture current before anything draws it.
         ServiceCollector.PI.UiBuilder.Draw += shareWindow.TickFrame;
-        ServiceCollector.PI.UiBuilder.Draw += windowSystem.Draw;
+        ServiceCollector.PI.UiBuilder.Draw += DrawWindows;
         ServiceCollector.PI.UiBuilder.OpenMainUi += () => shareWindow.IsOpen = true;
 
         // Without this, Dalamud's plugin installer flags the plugin ("does not register a config
@@ -50,10 +60,28 @@ public sealed class Plugin : IDalamudPlugin
         ServiceCollector.PluginLog.Information("ScreenShare plugin loaded.");
     }
 
+    /// <summary>
+    /// Draws the plugin's windows, unless the player has the game UI hidden.
+    ///
+    /// This is the half of <see cref="IUiBuilder.DisableUserUiHide"/> that has to be paid for. That
+    /// flag keeps Draw running so the in-world screen survives a HUD toggle, but it applies to the
+    /// whole plugin - without this check, hiding the UI would leave the room window and the stream
+    /// popout sitting on screen, which is the opposite of what the player asked for.
+    ///
+    /// A method rather than a lambda so Dispose can unsubscribe the same delegate.
+    /// </summary>
+    private void DrawWindows()
+    {
+        if (ServiceCollector.GameGui.GameUiHidden)
+            return;
+
+        windowSystem.Draw();
+    }
+
     public void Dispose()
     {
         ServiceCollector.PI.UiBuilder.Draw -= shareWindow.TickFrame;
-        ServiceCollector.PI.UiBuilder.Draw -= windowSystem.Draw;
+        ServiceCollector.PI.UiBuilder.Draw -= DrawWindows;
         ServiceCollector.Commands.RemoveHandler("/screenshare");
         windowSystem.RemoveAllWindows();
         shareWindow.Dispose();

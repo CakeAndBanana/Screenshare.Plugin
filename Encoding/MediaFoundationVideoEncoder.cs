@@ -335,6 +335,11 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
     {
         var clock = Stopwatch.StartNew();
 
+        // Capture pacing has the same problem display pacing does: Thread.Sleep rounds to the system
+        // timer, so frames get grabbed at uneven intervals and that unevenness is baked into their
+        // timestamps, where no amount of viewer-side pacing can take it back out.
+        using var pacer = new PrecisionSleep();
+
         try
         {
             while (true)
@@ -360,7 +365,7 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
                 switch (type)
                 {
                     case MediaEventTypes.TransformNeedInput:
-                        FeedFrame(clock);
+                        FeedFrame(clock, pacer);
                         break;
 
                     case MediaEventTypes.TransformHaveOutput:
@@ -383,7 +388,7 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
     }
 
-    private void FeedFrame(Stopwatch clock)
+    private void FeedFrame(Stopwatch clock, PrecisionSleep pacer)
     {
         // Paced against elapsed time rather than sleeping a fixed interval each iteration, for the
         // same reason H264Encoder's WriteLoop is: conversion and submission take real time, and
@@ -400,9 +405,9 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
             nextFrameIndex += missed;
             Interlocked.Add(ref framesSkipped, missed);
         }
-        else if (dueMs > nowMs)
+        else
         {
-            Thread.Sleep((int)(dueMs - nowMs));
+            pacer.Wait(dueMs - nowMs);
         }
 
         nextFrameIndex++;

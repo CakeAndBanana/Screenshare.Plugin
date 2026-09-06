@@ -1,4 +1,4 @@
-using Dalamud.IoC;
+﻿using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 
@@ -23,6 +23,11 @@ internal class ServiceCollector
     /// <summary>Needed only by ScenePanelHook, which hooks the game's render pipeline so the
     /// in-world screen can be drawn underneath the game's own UI.</summary>
     [PluginService] internal static IGameInteropProvider GameInterop { get; private set; } = null!;
+
+    /// <summary>Only for <see cref="IGameGui.GameUiHidden"/>. The plugin opts out of Dalamud's
+    /// automatic UI hiding so the in-world screen keeps being drawn with the HUD hidden, which
+    /// means it has to hide its own windows instead - see Plugin.DrawWindows.</summary>
+    [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
 
     internal static Configuration Config { get; set; } = null!;
 }

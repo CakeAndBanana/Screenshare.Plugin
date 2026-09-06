@@ -41,6 +41,22 @@ public sealed unsafe class ScenePanelHook : IDisposable
     /// second or two of streaming rather than after a visibly flickering minute.</summary>
     private const int MissedFramesBeforeEscalating = 30;
 
+    /// <summary>
+    /// How long a queued panel stays valid without being refreshed.
+    ///
+    /// This hook has two clocks and only one of them is ours. The detour runs on the game's render
+    /// loop, which never stops; Submit and EndFrame run from Dalamud's Draw callback, which STOPS
+    /// ENTIRELY when the player hides the game UI. Nothing in the original design survived that
+    /// gap - the queued panel was never cleared, so the render loop kept drawing the last frame's
+    /// geometry, with its frozen view-projection matrix, for as long as the UI stayed hidden. The
+    /// panel stopped tracking the camera and sat on the screen like a decal.
+    ///
+    /// Generous on purpose: a panel is normally resubmitted every rendered frame, so anything past
+    /// a handful of frames means the submitting side has stopped rather than merely stuttered
+    /// through a hitch or a loading screen.
+    /// </summary>
+    private const long StaleAfterMs = 200;
+
     private delegate void DoSetTargetCommandDelegate(ImmediateContext* context, RenderCommandSetTarget* command);
 
     private readonly WorldPanelRenderer renderer;
@@ -50,6 +66,10 @@ public sealed unsafe class ScenePanelHook : IDisposable
     private WorldPanelDraw pending;
     private bool hasPending;
     private bool submittedThisFrame;
+
+    /// <summary>When <see cref="pending"/> was submitted, against a clock the detour can read
+    /// without needing the submitting side to still be running.</summary>
+    private long pendingAtMs;
     private int backBufferSwitches;
     private bool loggedFailure;
 
@@ -136,13 +156,32 @@ public sealed unsafe class ScenePanelHook : IDisposable
         pending = draw;
         hasPending = true;
         submittedThisFrame = true;
+        pendingAtMs = Environment.TickCount64;
     }
+
+    /// <summary>Whether the queued panel is too old to draw - see <see cref="StaleAfterMs"/>.
+    /// Checked in the detour rather than only at the frame boundary, because the thing that owns
+    /// the frame boundary is exactly what stops.</summary>
+    private bool PendingIsStale => Environment.TickCount64 - pendingAtMs > StaleAfterMs;
 
     /// <summary>Call once per frame from the render thread. Rolls the per-frame counter over and
     /// clears any panel that was queued but never drawn, so a stale frame's geometry can't appear
     /// a frame late if the game's pass structure changes (a cutscene, a loading screen).</summary>
     public void EndFrame()
     {
+        // Resuming after the submitting side stopped - the player un-hid the game UI, most likely.
+        // Everything accumulated in between is meaningless: the back-buffer count has been adding
+        // up across however many frames went by, and comparing it to anything would read as a wild
+        // change in the game's pass structure and escalate for no reason. Start clean instead.
+        if (PendingIsStale)
+        {
+            backBufferSwitches = 0;
+            previousSwitches = -1;
+            hasPending = false;
+            submittedThisFrame = false;
+            return;
+        }
+
         // A panel still queued at the frame boundary was never drawn: the pass it was waiting for
         // did not come up. That is the measurable form of the flicker - the panel is simply absent
         // from those frames - so it is counted rather than inferred from what it looks like.
@@ -221,6 +260,12 @@ public sealed unsafe class ScenePanelHook : IDisposable
             // on frames that happened to have a panel queued.
             int occurrence = backBufferSwitches++;
             if (!hasPending)
+                return;
+
+            // The submitting side has stopped and this geometry is from whenever it stopped. Drawing
+            // it would pin a stale view-projection to the screen; EndFrame clears the rest of the
+            // state when it next runs.
+            if (PendingIsStale)
                 return;
 
             if (!IsDrawingEveryPass)
