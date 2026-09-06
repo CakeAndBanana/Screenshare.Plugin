@@ -1,4 +1,4 @@
-# ScreenShare.Plugin
+﻿# ScreenShare.Plugin
 
 A [Dalamud](https://github.com/goatcorp/Dalamud) plugin for FFXIV that lets you share your screen (or just one window) and audio with other players, rendered directly inside their game client - no external stream, no separate app to alt-tab to.
 
@@ -37,7 +37,25 @@ Everything except one binary restores from NuGet (SharpDX, NAudio, Concentus for
 2. Place `ffmpeg.exe` from that archive at `ffmpeg/ffmpeg.exe` in this repo.
 3. `dotnet build ScreenShare.Plugin.slnx -c Release`
 
-`ffmpeg.exe` is used both for hardware-accelerated encoding (it's what NVENC/AMF/QSV actually get invoked through) and for decoding on the viewer side.
+`ffmpeg.exe` is still bundled as the fallback encoder and decoder. Video normally goes through Media Foundation instead, which keeps frames on the GPU; ffmpeg takes over automatically per codec when the machine has no suitable hardware transform - most often for HEVC decode, which ships in the Microsoft Store's "HEVC Video Extensions" rather than in Windows.
+
+## MediaProbe
+
+`tools/MediaProbe` is a console app for diagnosing the Media Foundation paths outside the game, where a media pipeline's failures all look the same from the outside - no picture, or frames going missing.
+
+```
+dotnet run --project tools/MediaProbe -- mft
+```
+
+Lists the encoder and decoder transforms this machine has, and whether each decoder can decode into D3D11 textures. A codec showing `none` will fall back to ffmpeg, which is expected rather than broken.
+
+```
+dotnet run --project tools/MediaProbe -- soak [frames] [WxH] [slots]
+```
+
+Decodes for a long time as fast as the hardware allows - 250,000 frames is about two and a half hours of 30fps video in around three minutes of wall clock - and watches the things that only go wrong slowly: the frame slot pool, handle count, private bytes against the managed heap, and the decode rate. Exits non-zero if any of them trend, so it can gate a release.
+
+It generates its own test stream with the bundled ffmpeg, and calls the plugin's own Media Foundation interop rather than a copy of it, so a change to that code shows up here. The decode loop around it is necessarily reimplemented, since the real decoder is built around a device that only exists inside the game - keep the two in step, or the soak is exercising something the plugin no longer does.
 
 ## Using it
 

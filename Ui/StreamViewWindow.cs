@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using ScreenShare.Plugin.Encoding;
@@ -91,7 +91,27 @@ public sealed class StreamViewWindow : Window
     /// the underlying Dalamud Window only ever calls this once per open-to-close transition
     /// regardless of which triggered it. Closing this window is the only thing that stops the
     /// watch session; there's no separate "Stop watching" button duplicating that.</summary>
-    public override void OnClose() => onClosed();
+    /// <summary>
+    /// Closing this window stops watching - unless the panel is currently in the world, in which
+    /// case it just goes away and the stream keeps running.
+    ///
+    /// It was the only way to stop watching before there was anywhere else to see the stream, so
+    /// closing it meant stopping. With the panel projected, the stream is still right there in
+    /// front of the player, and tearing it down because they tidied a window away would be a
+    /// surprise. ShareWindow keeps "Show" and "Stop watching" next to each other for whichever was
+    /// actually meant.
+    ///
+    /// Worth being clear about what this does NOT buy: nothing about decoding. The decoder runs off
+    /// network arrival and writes to a shared texture whether or not anything draws it - closing
+    /// this window removes one textured quad from ImGui, which costs nothing worth measuring.
+    /// </summary>
+    public override void OnClose()
+    {
+        if (worldScreen().IsProjecting)
+            return;
+
+        onClosed();
+    }
 
     /// <summary>Set here rather than in Draw() so it's current before ImGui.Begin uses it, not a
     /// frame behind.</summary>
@@ -125,6 +145,9 @@ public sealed class StreamViewWindow : Window
         ImGui.TextUnformatted(
             $"{mediaSession.ViewerFramesDecoded} frames decoded ({mediaSession.ViewerAverageFps:F1} fps avg), " +
             $"{mediaSession.ViewerAudioPackets} audio packets");
+
+        if (mediaSession.ViewerDecoderName is { } decoderName)
+            ImGui.TextDisabled($"Decoding with {decoderName}.");
         ImGui.TextUnformatted("Audio level:");
         ImGui.SameLine();
         ImGui.ProgressBar(Math.Clamp(mediaSession.ViewerAudioPeak, 0f, 1f), new Vector2(200, 0), "");
@@ -180,7 +203,8 @@ public sealed class StreamViewWindow : Window
         if (mediaSession.ViewerDisplayDrops > 0)
         {
             ImGui.TextColored(WarnColor,
-                $"{mediaSession.ViewerDisplayDrops} decoded frames dropped before display - decode is bursting ahead of playback.");
+                $"{mediaSession.ViewerDisplayDrops} decoded frames dropped before display - " +
+                "playback isn't draining the buffer as fast as frames arrive.");
         }
 
         if (mediaSession.ViewerVideoError is { } viewerVideoError)
@@ -413,12 +437,8 @@ public sealed class StreamViewWindow : Window
 
             // Shown when the hook has corrected itself, so a user who never touched this setting
             // still learns why - silent self-healing is fine until someone wonders what changed.
-            if (!auto && worldScreen().IsDrawingEveryPass)
-            {
-                ImGui.TextDisabled(
-                    $"Switched to every pass automatically after {worldScreen().MissedPanelFrames} missed frames - " +
-                    "this machine's pass count varies.");
-            }
+            if (!auto && worldScreen().EveryPassReason is { } everyPassReason)
+                ImGui.TextDisabled($"Switched to drawing in every pass automatically: {everyPassReason}.");
         }
 
 #if DEBUG

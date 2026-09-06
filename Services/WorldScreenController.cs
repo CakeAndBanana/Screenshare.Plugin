@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Rendering;
@@ -44,8 +44,17 @@ public sealed class WorldScreenController : IDisposable
     /// <summary>Frames where a panel was queued but never drawn - see ScenePanelHook.</summary>
     public int MissedPanelFrames => sceneHook?.MissedFrames ?? 0;
 
+    /// <summary>Why the hook fell back to every-pass drawing, or null if it hasn't.</summary>
+    public string? EveryPassReason => sceneHook?.EscalationReason;
+
     /// <summary>Whether the panel is currently being drawn underneath the game's UI.</summary>
     public bool IsDrawingUnderUi => sceneHook?.IsActive == true;
+
+    /// <summary>Whether the last frame actually put a panel in the world - not merely whether the
+    /// setting is on. The difference is everything the setting cannot tell you: no stream, no
+    /// placement, a placement belonging to another zone, or no camera. Callers use this to decide
+    /// whether the stream is still visible to the player somewhere other than the popout window.</summary>
+    public bool IsProjecting { get; private set; }
 
     /// <summary>Draws the panel for this frame if it should be drawn, and sets the audio mix to
     /// match either way. Call once per frame from the render thread.</summary>
@@ -56,6 +65,7 @@ public sealed class WorldScreenController : IDisposable
         MediaSessionService mediaSession)
     {
         Configuration config = ServiceCollector.Config;
+        IsProjecting = false;
 
         // Unconditional: the hook counts back-buffer switches every frame regardless of whether a
         // panel was queued, and that counter has to roll over even on frames that draw nothing.
@@ -87,6 +97,7 @@ public sealed class WorldScreenController : IDisposable
 
         UpdateAudio(config, placement!, frame, scene, mediaSession);
         SubmitDraw(config, frame, scene, videoTexture, device);
+        IsProjecting = true;
     }
 
     /// <summary>Whether a panel should be drawn this frame, and which placement it uses. The

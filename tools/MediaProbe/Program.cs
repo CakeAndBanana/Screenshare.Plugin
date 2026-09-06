@@ -1,0 +1,185 @@
+﻿using System.Runtime.InteropServices;
+using MediaProbe;
+using ScreenShare.Plugin.Encoding;
+using ScreenShare.Plugin.Encoding.Interop;
+using SharpDX.Direct3D11;
+using static ScreenShare.Plugin.Encoding.Interop.MediaFoundationInterop;
+using Device = SharpDX.Direct3D11.Device;
+
+// Diagnostics for the plugin's Media Foundation paths, outside the game.
+//
+// Everything here exists because a media pipeline's failures look identical from the outside - no
+// picture, or frames going missing - and each of these separates a different cause. Every finding
+// they have produced so far was invisible to reading the code: encoder MFT flags that were silently
+// wrong, decoder output textures that are padded and array-backed, an ffmpeg stdin write that never
+// left its buffer.
+
+string command = args.Length > 0 ? args[0].ToLowerInvariant() : "help";
+
+if (command is "help" or "-h" or "--help")
+{
+    Console.WriteLine("""
+        MediaProbe - Media Foundation diagnostics for ScreenShare.Plugin
+
+          mft                              What encoder and decoder MFTs this machine has.
+          soak [frames] [WxH] [slots]      Decode for a long time; watch slots, handles, memory.
+                                           Default 54000 frames (30 min of video), 1280x720, 17 slots.
+
+        Examples:
+          dotnet run --project ScreenShare.Plugin/tools/MediaProbe -- mft
+          dotnet run --project ScreenShare.Plugin/tools/MediaProbe -- soak
+          dotnet run --project ScreenShare.Plugin/tools/MediaProbe -- soak 200000 1920x1080
+
+        Exits non-zero when a soak finds something, so it can gate a release.
+        """);
+    return 0;
+}
+
+MediaFoundationInterop.EnsureStarted();
+
+if (command == "mft")
+{
+    ReportMfts();
+    return 0;
+}
+
+if (command != "soak")
+{
+    Console.Error.WriteLine($"Unknown command '{command}'. Try 'help'.");
+    return 2;
+}
+
+int frames = args.Length > 1 && int.TryParse(args[1], out int parsedFrames) ? parsedFrames : 54000;
+(int width, int height) = args.Length > 2 ? ParseSize(args[2]) : (1280, 720);
+int slots = args.Length > 3 && int.TryParse(args[3], out int parsedSlots) ? parsedSlots : 17;
+
+string ffmpegExePath = FindFfmpeg();
+string workDirectory = Path.Combine(Path.GetTempPath(), "ScreenShareMediaProbe");
+Directory.CreateDirectory(workDirectory);
+
+// VideoSupport and multithread protection both matter: the plugin's device carries them, and a
+// decoder bound to a device without them behaves differently enough that soaking one would not be
+// soaking the other.
+using var device = new Device(
+    SharpDX.Direct3D.DriverType.Hardware,
+    DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport);
+
+using (var multithread = device.QueryInterface<Multithread>())
+    multithread.SetMultithreadProtected(true);
+
+return Soak.Run(device, ffmpegExePath, workDirectory, width, height, frames, slots);
+
+static (int Width, int Height) ParseSize(string value)
+{
+    string[] parts = value.ToLowerInvariant().Split('x');
+    if (parts.Length == 2 && int.TryParse(parts[0], out int w) && int.TryParse(parts[1], out int h))
+        return (w, h);
+
+    throw new ArgumentException($"Could not read '{value}' as a size; expected something like 1280x720.");
+}
+
+/// <summary>The bundled binary the plugin ships, so the harness generates its test stream with the
+/// same encoder the plugin would use rather than whatever is on PATH.</summary>
+static string FindFfmpeg()
+{
+    for (DirectoryInfo? directory = new(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+    {
+        string candidate = Path.Combine(directory.FullName, "ffmpeg", "ffmpeg.exe");
+        if (File.Exists(candidate))
+            return candidate;
+    }
+
+    throw new FileNotFoundException(
+        "Could not find the bundled ffmpeg\\ffmpeg.exe. See the README for where to download it.");
+}
+
+static void ReportMfts()
+{
+    Console.WriteLine("Encoders (NV12 in):");
+    ReportCategory(isEncoder: true, "H.264", VideoFormatH264);
+    ReportCategory(isEncoder: true, "HEVC ", VideoFormatHevc);
+
+    Console.WriteLine();
+    Console.WriteLine("Decoders (NV12 out):");
+    ReportCategory(isEncoder: false, "H.264", VideoFormatH264);
+    ReportCategory(isEncoder: false, "HEVC ", VideoFormatHevc);
+
+    Console.WriteLine();
+    Console.WriteLine("""
+        A codec with no decoder falls back to the ffmpeg decoder, which is correct rather than
+        broken - HEVC decode ships in the Microsoft Store's "HEVC Video Extensions", not in Windows,
+        so a machine without it will list nothing here and still play HEVC through ffmpeg.
+        """);
+}
+
+static void ReportCategory(bool isEncoder, string label, Guid codecSubtype)
+{
+    // Encoders are async and hardware-registered; decoders are synchronous, and Microsoft's own
+    // H.264 decoder is registered as software even though it decodes on the GPU through DXVA once
+    // it has a D3D manager. Asking either for the other's flags returns nothing at all - which is
+    // exactly the bug this report was written to make visible.
+    MftEnumFlags flags = isEncoder
+        ? MftEnumFlags.Hardware | MftEnumFlags.AsyncMft | MftEnumFlags.SortAndFilter
+        : MftEnumFlags.Hardware | MftEnumFlags.SyncMft | MftEnumFlags.SortAndFilter;
+
+    List<nint> found = isEncoder
+        ? EnumerateEncoders(codecSubtype, flags)
+        : EnumerateDecoders(codecSubtype, flags);
+
+    if (found.Count == 0)
+    {
+        Console.WriteLine($"  {label}: none");
+        return;
+    }
+
+    var names = new List<string>();
+    foreach (nint pointer in found)
+    {
+        using var activate = new SharpDX.MediaFoundation.Activate(pointer);
+        string name;
+        try
+        {
+            name = activate.Get<string>(MftFriendlyName);
+        }
+        catch (Exception)
+        {
+            name = "(unnamed)";
+        }
+
+        names.Add(isEncoder ? name : name + (IsD3D11Aware(activate) ? " [D3D11]" : " [system memory only]"));
+    }
+
+    Console.WriteLine($"  {label}: {string.Join(", ", names)}");
+}
+
+/// <summary>
+/// Whether the MFT will decode into D3D11 textures. Without it a decoder still works but hands back
+/// system-memory frames, leaving the CPU round trip exactly where it is - so the plugin refuses one
+/// and falls back to ffmpeg instead, and this report would be misleading without saying so.
+///
+/// The MFT has to be instantiated to find out. MF_SA_D3D11_AWARE lives on the transform's own
+/// attributes, not on the activation object, so reading it from the latter silently returns nothing
+/// and every decoder looks unaccelerated.
+/// </summary>
+static bool IsD3D11Aware(SharpDX.MediaFoundation.Activate activate)
+{
+    SharpDX.MediaFoundation.Transform? transform = null;
+    try
+    {
+        transform = activate.ActivateObject<SharpDX.MediaFoundation.Transform>(
+            typeof(SharpDX.MediaFoundation.Transform).GUID);
+
+        using SharpDX.MediaFoundation.MediaAttributes attributes = transform.Attributes;
+        return attributes.Get<int>(MfSaD3D11Aware) != 0;
+    }
+    catch (Exception)
+    {
+        // Missing attribute, or an MFT that will not instantiate here - both mean "not usable for
+        // GPU decode", which is what the caller is asking.
+        return false;
+    }
+    finally
+    {
+        transform?.Dispose();
+    }
+}

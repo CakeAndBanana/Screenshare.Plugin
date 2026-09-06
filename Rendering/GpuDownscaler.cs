@@ -1,4 +1,4 @@
-using SharpDX.D3DCompiler;
+﻿using SharpDX.D3DCompiler;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
 using Device = SharpDX.Direct3D11.Device;
@@ -66,10 +66,19 @@ public sealed class GpuDownscaler : IDisposable
     /// <summary>Draws <paramref name="source"/> into <paramref name="destination"/> at the
     /// destination's own size. Caller must hold the device's ImmediateContextLock - this issues
     /// ordinary draw calls against the shared ImmediateContext just like any other GPU work here.</summary>
-    public void Blit(DeviceContext context, ShaderResourceView source, RenderTargetView destination, int destWidth, int destHeight)
+    public void Blit(DeviceContext context, ShaderResourceView source, RenderTargetView destination, int destWidth, int destHeight) =>
+        BlitToViewport(context, source, destination, 0, 0, destWidth, destHeight);
+
+    /// <summary>Scales the whole source into a sub-rectangle of the destination, leaving the rest
+    /// of it untouched - so a source whose shape no longer matches can be fitted inside instead of
+    /// stretched to fill. Whatever the caller left outside the rectangle stays (clear it first for
+    /// letterbox bars).</summary>
+    public void BlitToViewport(
+        DeviceContext context, ShaderResourceView source, RenderTargetView destination,
+        int x, int y, int width, int height)
     {
         context.OutputMerger.SetRenderTargets(destination);
-        context.Rasterizer.SetViewport(0, 0, destWidth, destHeight);
+        context.Rasterizer.SetViewport(x, y, width, height);
         context.InputAssembler.PrimitiveTopology = PrimitiveTopology.TriangleList;
         context.VertexShader.Set(vertexShader);
         context.PixelShader.Set(pixelShader);

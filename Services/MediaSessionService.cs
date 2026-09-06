@@ -80,7 +80,7 @@ public sealed class MediaSessionService : IDisposable
     public bool HostBitrateReduced => hostEncodeSettings is { } settings && currentBitrateKbps < settings.ConfiguredBitrateKbps;
 
     private MediaSocketClient? viewerSocket;
-    private H264Decoder? videoDecoder;
+    private IVideoDecoder? videoDecoder;
     private AudioPlaybackDecoder? audioDecoder;
     private GameAdapterDevice? viewerDevice;
     private string? viewerFfmpegExePath;
@@ -187,6 +187,16 @@ public sealed class MediaSessionService : IDisposable
 
     public long HostEncodedBytes => videoEncoder?.EncodedBytes ?? 0;
 
+    /// <summary>What the encoder is ACTUALLY producing, averaged over the session - not what it was
+    /// asked for. The two diverge when an encoder ignores the bitrate it was configured with, which
+    /// congests the uplink and then shows up as the network or the viewer's decoder struggling,
+    /// nowhere near the encoder that caused it. Cheap to show, and the only way to tell those apart
+    /// from the host's side.</summary>
+    public double HostAverageBitrateKbps =>
+        hostSessionClock is { } clock && videoEncoder is { } encoder
+            ? encoder.EncodedBytes * 8 / 1000.0 / Math.Max(clock.Elapsed.TotalSeconds, 0.001)
+            : 0;
+
     /// <summary>See MediaSocketClient.DroppedMessages - non-zero here means this connection's
     /// upload can't keep up with the configured VIDEO bitrate, distinct from HostFramesSkipped
     /// (which only measures whether GPU capture/readback is keeping up, not whether the network
@@ -214,6 +224,11 @@ public sealed class MediaSessionService : IDisposable
     public Exception? HostVideoError => videoEncoder?.LastError;
 
     public Exception? ViewerVideoError => videoDecoder?.LastError;
+
+    /// <summary>Which decoder is actually running - the MFT's own name when frames are staying on
+    /// the GPU, or ffmpeg when they are not. Worth showing because the two are chosen automatically
+    /// and per codec: an HEVC stream can fall back on a machine where H.264 would not.</summary>
+    public string? ViewerDecoderName => videoDecoder?.DecoderName;
 
     public void StartHosting(
         string relayUrl,
@@ -542,7 +557,7 @@ public sealed class MediaSessionService : IDisposable
             // the offset itself, not just a pre-shifted clock, because it also sizes the
             // presentation queue and the frame-hold cap from it (see H264Decoder). Both read per
             // call rather than captured, so the slider takes effect on the current stream.
-            var decoder = new H264Decoder(
+            IVideoDecoder decoder = VideoDecoderFactory.Create(
                 viewerDevice, viewerFfmpegExePath, width, height, fps, codec,
                 () => audioDecoder?.EstimatedCurrentPtsMs,
                 () => ServiceCollector.Config.AvSyncOffsetMs,
@@ -554,7 +569,7 @@ public sealed class MediaSessionService : IDisposable
         {
             ViewerLastError = ex.Message;
             ViewerLastException = ex;
-            ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to create the viewer's H264Decoder");
+            ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to create the viewer's video decoder");
         }
     }
 
@@ -596,7 +611,7 @@ public sealed class MediaSessionService : IDisposable
         // Captured locally (not read back through the videoDecoder field later) so a stale
         // timeout firing after a newer session has already replaced it can't accidentally
         // force-start the WRONG session's video; StartDisplay is idempotent regardless.
-        H264Decoder? decoderAtTimeoutStart = videoDecoder;
+        IVideoDecoder? decoderAtTimeoutStart = videoDecoder;
         _ = Task.Delay(AudioVideoSyncTimeout).ContinueWith(
             _ => decoderAtTimeoutStart?.StartDisplay(),
             TaskScheduler.Default);
@@ -680,7 +695,7 @@ public sealed class MediaSessionService : IDisposable
     /// shape of bounded-but-blocking thread joins.</summary>
     public void StopViewing()
     {
-        H264Decoder? oldVideoDecoder = videoDecoder;
+        IVideoDecoder? oldVideoDecoder = videoDecoder;
         videoDecoder = null;
         if (oldVideoDecoder is not null)
             _ = Task.Run(() => DisposeSafely(oldVideoDecoder, "H264Decoder"));

@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows7.0</TargetFramework>
+    <Platforms>x64</Platforms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+
+    <!-- In the solution so CI compile-checks the harness against every plugin change, which is the
+         whole reason it is here rather than outside it. Stated explicitly so `dotnet test` on the
+         solution skips it rather than trying to load a console app as a test assembly. -->
+    <IsTestProject>false</IsTestProject>
+    <AssemblyName>MediaProbe</AssemblyName>
+    <RootNamespace>MediaProbe</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- References the plugin so the harness exercises the actual MediaFoundationInterop and
+         Nv12ToBgraConverter, not a transcription of them. Only types that touch neither Dalamud nor
+         the game's device can be used from here - the decoder class itself needs both, which is why
+         this reimplements its LOOP while sharing its interop. -->
+    <ProjectReference Include="..\..\ScreenShare.Plugin.csproj" />
+  </ItemGroup>
+
+</Project>

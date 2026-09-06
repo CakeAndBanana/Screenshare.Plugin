@@ -1,7 +1,9 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using ScreenShare.Plugin.Capture.ScreenCapture.Interop;
 using ScreenShare.Plugin.Rendering;
+using ScreenShare.Plugin.Services;
 using SharpDX.Direct3D11;
+using SharpDX.Mathematics.Interop;
 using Device = SharpDX.Direct3D11.Device;
 using DxgiDevice = SharpDX.DXGI.Device;
 using SizeInt32 = ScreenShare.Plugin.Capture.ScreenCapture.Interop.WindowsGraphicsCaptureInterop.SizeInt32;
@@ -14,11 +16,21 @@ namespace ScreenShare.Plugin.Capture.ScreenCapture;
 /// counterpart to <see cref="DesktopDuplicationCapture"/> (which only ever captures a whole
 /// monitor). See <see cref="WindowsGraphicsCaptureInterop"/> for the raw interop this is built on.
 ///
-/// Known, accepted limitation: if the captured window is resized mid-stream, frames at the new
-/// size are skipped (not crashed on) rather than dynamically resizing the whole downstream
-/// pipeline (H264Encoder's ffmpeg args are fixed at construction time) - restarting the stream
-/// picks up the new size. DesktopDuplicationCapture has the same practical limitation for a
-/// monitor resolution change, so this isn't a new gap relative to what already ships.
+/// Resizing the window mid-stream is handled rather than skipped, which is what makes a browser
+/// going fullscreen work: Windows.Graphics.Capture hands back frames at the frame pool's size, so
+/// the pool is recreated at the window's new size and the frame is then scaled into the SAME
+/// fixed-size texture this capture has always exposed.
+///
+/// Keeping that texture fixed is the point. Everything downstream is built around the size this
+/// reported at construction - the encoder holds a ShaderResourceView over this exact texture, its
+/// encode resolution was derived from it, and the viewer was told that resolution once when the
+/// stream started. Recreating the texture would dangle that view; renegotiating the resolution
+/// would mean restarting the stream, which is precisely the interruption being avoided. Scaling
+/// into a fixed target costs one GPU blit and nothing downstream notices.
+///
+/// The scale preserves aspect ratio and centres, so a window that changes shape gets bars rather
+/// than a stretched picture. DesktopDuplicationCapture still has the older limitation for a
+/// monitor resolution change.
 /// </summary>
 public sealed class WindowCapture : ICaptureSource
 {
@@ -27,9 +39,18 @@ public sealed class WindowCapture : ICaptureSource
     private readonly WindowsGraphicsCaptureInterop.IDirect3D11CaptureFramePool framePool;
     private readonly WindowsGraphicsCaptureInterop.IGraphicsCaptureSession session;
     private readonly Texture2D targetTexture;
+    private readonly RenderTargetView targetView;
+    private readonly GpuDownscaler downscaler;
+    private readonly nint direct3DDevicePtr;
     private readonly Thread captureThread;
     private volatile bool running;
     private long framesCaptured;
+
+    /// <summary>The frame pool's current size, which tracks the WINDOW - unlike <see cref="Width"/>
+    /// and <see cref="Height"/>, which stay fixed for the life of this capture. Touched only by the
+    /// capture thread.</summary>
+    private int poolWidth;
+    private int poolHeight;
 
     public int Width { get; }
 
@@ -61,16 +82,10 @@ public sealed class WindowCapture : ICaptureSource
                 Marshal.ReleaseComObject(item);
             }
 
-            nint direct3DDevicePtr = CreateDirect3DDeviceFromSharpDXDevice(device);
-            nint framePoolPtr;
-            try
-            {
-                framePoolPtr = CreateFreeThreadedFramePool(direct3DDevicePtr, Width, Height);
-            }
-            finally
-            {
-                Marshal.Release(direct3DDevicePtr);
-            }
+            // Retained for the life of the capture rather than released here: recreating the frame
+            // pool on a window resize needs this same device.
+            direct3DDevicePtr = CreateDirect3DDeviceFromSharpDXDevice(device);
+            nint framePoolPtr = CreateFreeThreadedFramePool(direct3DDevicePtr, Width, Height);
 
             framePool = (WindowsGraphicsCaptureInterop.IDirect3D11CaptureFramePool)Marshal.GetObjectForIUnknown(framePoolPtr);
             Marshal.Release(framePoolPtr);
@@ -86,7 +101,12 @@ public sealed class WindowCapture : ICaptureSource
             Marshal.Release(itemPtr);
         }
 
-        targetTexture = SharedTextureFactory.CreateEmpty(device, Width, Height);
+        poolWidth = Width;
+        poolHeight = Height;
+
+        targetTexture = SharedTextureFactory.CreateEmpty(device, Width, Height, renderTarget: true);
+        targetView = new RenderTargetView(device, targetTexture);
+        downscaler = new GpuDownscaler(device);
 
         running = true;
         captureThread = new Thread(CaptureLoop)
@@ -208,11 +228,14 @@ public sealed class WindowCapture : ICaptureSource
         try
         {
             Marshal.ThrowExceptionForHR(frame.GetContentSize(out SizeInt32 contentSize));
-            if (contentSize.Width != Width || contentSize.Height != Height)
+            int contentWidth = Math.Max(2, contentSize.Width);
+            int contentHeight = Math.Max(2, contentSize.Height);
+
+            if (contentWidth != poolWidth || contentHeight != poolHeight)
             {
-                // See class doc comment - resize mid-stream is a known, accepted limitation.
-                LastError = new InvalidOperationException(
-                    $"Captured window resized ({contentSize.Width}x{contentSize.Height} vs {Width}x{Height}) - restart the stream to pick up the new size.");
+                // This frame still came out of the old pool, so it is dropped and the next one
+                // arrives at the new size - one or two frames at a resize, not a dead stream.
+                RecreateFramePool(contentWidth, contentHeight);
                 return;
             }
 
@@ -226,9 +249,19 @@ public sealed class WindowCapture : ICaptureSource
                     nint texturePtr = access.GetInterface(ref textureIid);
                     using var frameTexture = new Texture2D(texturePtr);
 
-                    lock (contextLock)
+                    // The texture's own description rather than the size the pool was asked for -
+                    // this is what is actually being sampled, and CopyResource is only legal when
+                    // it matches the destination exactly.
+                    Texture2DDescription description = frameTexture.Description;
+
+                    if (description.Width == Width && description.Height == Height)
                     {
-                        device.ImmediateContext.CopyResource(frameTexture, targetTexture);
+                        lock (contextLock)
+                            device.ImmediateContext.CopyResource(frameTexture, targetTexture);
+                    }
+                    else
+                    {
+                        BlitFitted(frameTexture, description.Width, description.Height);
                     }
                 }
                 finally
@@ -250,6 +283,45 @@ public sealed class WindowCapture : ICaptureSource
             // Returns the frame's buffer to the pool for reuse; must happen before releasing frame.
             ((WindowsGraphicsCaptureInterop.IWinRTClosable)frame).Close();
             Marshal.ReleaseComObject(frame);
+        }
+    }
+
+    private void RecreateFramePool(int width, int height)
+    {
+        var size = new SizeInt32 { Width = width, Height = height };
+        Marshal.ThrowExceptionForHR(framePool.Recreate(
+            direct3DDevicePtr, WindowsGraphicsCaptureInterop.PixelFormatB8G8R8A8UIntNormalized, 2, size));
+
+        poolWidth = width;
+        poolHeight = height;
+
+        // A resize used to be reported as a failure and is no longer one, so an older one must not
+        // be left standing in the UI.
+        LastError = null;
+        ServiceCollector.PluginLog.Information(
+            $"ScreenShare's captured window resized to {width}x{height}; scaling it into the {Width}x{Height} stream.");
+    }
+
+    /// <summary>Scales a differently-sized frame into the fixed target, preserving aspect ratio and
+    /// centring it - a window that changes shape gets bars rather than a stretched picture.</summary>
+    private void BlitFitted(Texture2D frameTexture, int sourceWidth, int sourceHeight)
+    {
+        using var sourceView = new ShaderResourceView(device, frameTexture);
+
+        double scale = Math.Min(Width / (double)sourceWidth, Height / (double)sourceHeight);
+        int fittedWidth = Math.Clamp((int)Math.Round(sourceWidth * scale), 1, Width);
+        int fittedHeight = Math.Clamp((int)Math.Round(sourceHeight * scale), 1, Height);
+
+        lock (contextLock)
+        {
+            DeviceContext context = device.ImmediateContext;
+
+            // Cleared every frame, not just the first after a resize: the bars fall outside the
+            // blit's viewport, so nothing else ever writes them.
+            context.ClearRenderTargetView(targetView, new RawColor4(0f, 0f, 0f, 1f));
+            downscaler.BlitToViewport(
+                context, sourceView, targetView,
+                (Width - fittedWidth) / 2, (Height - fittedHeight) / 2, fittedWidth, fittedHeight);
         }
     }
 
@@ -280,6 +352,12 @@ public sealed class WindowCapture : ICaptureSource
 
         Marshal.ReleaseComObject(session);
         Marshal.ReleaseComObject(framePool);
+
+        if (direct3DDevicePtr != nint.Zero)
+            Marshal.Release(direct3DDevicePtr);
+
+        downscaler.Dispose();
+        targetView.Dispose();
         targetTexture.Dispose();
     }
 }

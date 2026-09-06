@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using ScreenShare.Plugin.Rendering;
@@ -17,7 +17,7 @@ namespace ScreenShare.Plugin.Encoding;
 /// (a direct pipe between them caused a real multi-stage deadlock during this pipeline's
 /// original development).
 /// </summary>
-public sealed class H264Decoder : IDisposable
+public sealed class H264Decoder : IVideoDecoder
 {
     private const int FeedChannelCapacity = 256;
 
@@ -36,39 +36,25 @@ public sealed class H264Decoder : IDisposable
     /// have to move together.</summary>
     internal const int PresentationBufferMilliseconds = 200;
 
-    // How far video's PTS can drift from audio's estimated current PTS before DisplayLoop stops
-    // treating it as "close enough" and starts actively correcting - small drift is imperceptible
-    // and not worth the jitter a correction itself would introduce.
-    private const long SyncToleranceMs = 40;
-
-    // Cap on how much EXTRA time a single frame gets held when video is running ahead of audio -
-    // bounds how bad a single bad PTS estimate can make one frame look, since the next frame will
-    // just get corrected again anyway.
-    private const long MaxFrameHoldMs = 100;
-
-    // Once video is behind audio by more than this, stop displaying every queued frame in
-
     private readonly GameAdapterDevice gameAdapterDevice;
     private readonly Texture2D decodedTexture;
     private readonly FfmpegProcessRunner decoderProcess;
     private readonly Channel<(long PtsMs, byte[] Chunk)> feedChannel;
-    private readonly Channel<(long PtsMs, byte[] Frame)> presentationQueue;
-    private readonly Func<long?> getAudioPtsMs;
-    private readonly Func<int> getSyncOffsetMs;
-    private readonly int presentationCapacity;
-    private readonly int frameIntervalMs;
+
+    /// <summary>Owns the jitter buffer and the audio-clock pacing; this class only decodes into it.
+    /// Shared with the Media Foundation decoder rather than duplicated - see the type's own
+    /// comment for why that logic exists exactly once.</summary>
+    private readonly PresentationScheduler<byte[]> scheduler;
+
     private readonly Thread feedWriterThread;
     private readonly Thread readerThread;
-    private readonly Thread displayThread;
     private volatile bool running;
-    private volatile bool displayStarted;
     private int errorRecorded;
 
     private readonly Stopwatch sessionStopwatch = Stopwatch.StartNew();
 
     private long framesDecoded;
     private long droppedChunks;
-    private long displayQueueDrops;
     private long lastFedPtsMs;
 
     public int Width { get; }
@@ -76,6 +62,11 @@ public sealed class H264Decoder : IDisposable
     public int Height { get; }
 
     public nint SharedHandle { get; }
+
+    /// <summary>Names the codec ffmpeg was asked for, which is as specific as this path can be -
+    /// ffmpeg picks its own decoder internally and never says which. The Media Foundation path
+    /// reports the actual MFT's name.</summary>
+    public string DecoderName { get; }
 
     public long FramesDecoded => Interlocked.Read(ref framesDecoded);
 
@@ -88,17 +79,12 @@ public sealed class H264Decoder : IDisposable
     /// decode of a CPU-expensive codec, though -hwaccel d3d11va should mostly rule that out.</summary>
     public double AverageFps => FramesDecoded / Math.Max(sessionStopwatch.Elapsed.TotalSeconds, 0.001);
 
-    /// <summary>Fires exactly once, when the presentation buffer has filled enough to start
-    /// playback smoothly (see <see cref="PresentationBufferMilliseconds"/>) - not the same moment
-    /// this decoder is constructed (which happens as soon as VideoMetadata arrives, well before
-    /// ffmpeg has actually spun up and produced anything) or the moment the first frame decodes
-    /// (too early - there's no jitter margin yet). Actual display doesn't start until
-    /// <see cref="StartDisplay"/> is called; used to synchronize with audio playback start the
-    /// same way AudioPlaybackDecoder.ReadyToPlay does, so both start together rather than
-    /// whichever buffer happened to fill first. This is now just a reasonable starting point,
-    /// not the only thing keeping the two in sync - see DisplayLoop's ongoing PTS reconciliation
-    /// against <see cref="getAudioPtsMs"/> for what corrects any residual gap afterward.</summary>
-    public event Action? ReadyToDisplay;
+    /// <summary>See PresentationScheduler.ReadyToDisplay.</summary>
+    public event Action? ReadyToDisplay
+    {
+        add => scheduler.ReadyToDisplay += value;
+        remove => scheduler.ReadyToDisplay -= value;
+    }
 
     /// <summary>How many incoming network chunks got dropped because ffmpeg's decode couldn't
     /// keep up in real time (feedChannel filling up faster than FeedWriterLoop could hand chunks
@@ -108,25 +94,13 @@ public sealed class H264Decoder : IDisposable
     /// real time), not the network or the encoder.</summary>
     public long DroppedChunks => Interlocked.Read(ref droppedChunks);
 
-    /// <summary>How many decoded frames got evicted from the presentation buffer before ever
-    /// being shown, because decode is racing far enough ahead of the paced display clock to fill
-    /// it faster than DisplayLoop can drain it. Should normally stay near zero (decode is
-    /// throttled by the same network arrival rate driving display); a high value points at
-    /// FeedWriterLoop/decode momentarily bursting well beyond the target fps.</summary>
-    public long DisplayQueueDrops => Interlocked.Read(ref displayQueueDrops);
+    /// <summary>See PresentationScheduler.QueueDrops.</summary>
+    public long DisplayQueueDrops => scheduler.QueueDrops;
 
     public Exception? LastError { get; private set; }
 
-    /// <summary>How far the frame being shown sits from the audio clock, in milliseconds, smoothed
-    /// over recent frames. Negative means video is behind audio, positive means ahead.
-    ///
-    /// Exposed because "the sync feels wrong" and "the whole stream feels laggy" are different
-    /// problems with the same description, and only a number separates them: a drift near zero with
-    /// everything still feeling late is end-to-end latency, not synchronisation, and no A/V offset
-    /// will help. DisplayLoop already computes this every frame to decide pacing - it was simply
-    /// being discarded.</summary>
-    public long AvDriftMs => Interlocked.Read(ref avDriftMs);
-    private long avDriftMs;
+    /// <summary>See PresentationScheduler.AvDriftMs.</summary>
+    public long AvDriftMs => scheduler.AvDriftMs;
 
     /// <summary><paramref name="getAudioPtsMs"/> lets DisplayLoop ask, at any moment, "what PTS is
     /// audio currently playing" (null if there's no audio, or it hasn't started yet) - queried
@@ -152,16 +126,13 @@ public sealed class H264Decoder : IDisposable
         int audioLatencyBudgetMs = PresentationBufferMilliseconds)
     {
         this.gameAdapterDevice = gameAdapterDevice;
-        this.getAudioPtsMs = getAudioPtsMs;
-        this.getSyncOffsetMs = getSyncOffsetMs ?? (static () => 0);
         Width = width;
         Height = height;
+        DecoderName = $"ffmpeg ({codec})";
 
         Device device = gameAdapterDevice.Device;
         decodedTexture = SharedTextureFactory.CreateEmpty(device, Width, Height);
         SharedHandle = SharedTextureFactory.GetSharedHandle(decodedTexture);
-
-        frameIntervalMs = Math.Max(1, 1000 / Math.Max(1, fps));
 
         // Deep enough to cover the deliberate offset on top of the normal jitter budget. Delaying
         // video by N ms means N ms of frames have to be held somewhere, and this queue is the only
@@ -175,13 +146,15 @@ public sealed class H264Decoder : IDisposable
         // move together, which is why the audio budget is passed in rather than assumed.
         int bufferedMs = Math.Max(PresentationBufferMilliseconds, audioLatencyBudgetMs)
                          + Math.Max(0, getSyncOffsetMs?.Invoke() ?? 0);
-        presentationCapacity = Math.Clamp(fps * bufferedMs / 1000, 2, 45);
-        presentationQueue = Channel.CreateBounded<(long, byte[])>(new BoundedChannelOptions(presentationCapacity)
-        {
-            FullMode = BoundedChannelFullMode.DropOldest,
-            SingleReader = true,
-            SingleWriter = true,
-        });
+        scheduler = new PresentationScheduler<byte[]>(
+            fps,
+            Math.Clamp(fps * bufferedMs / 1000, 2, 45),
+            getAudioPtsMs,
+            getSyncOffsetMs ?? (static () => 0),
+            WriteFrameToTexture,
+            discard: null,   // plain managed arrays; nothing to hand back
+            RecordError,
+            "ScreenShare-H264Display");
 
         feedChannel = Channel.CreateBounded<(long, byte[])>(new BoundedChannelOptions(FeedChannelCapacity)
         {
@@ -206,18 +179,12 @@ public sealed class H264Decoder : IDisposable
         running = true;
         feedWriterThread = new Thread(FeedWriterLoop) { IsBackground = true, Name = "ScreenShare-H264DecFeed" };
         readerThread = new Thread(ReadLoop) { IsBackground = true, Name = "ScreenShare-H264DecRead" };
-        displayThread = new Thread(DisplayLoop) { IsBackground = true, Name = "ScreenShare-H264Display" };
         feedWriterThread.Start();
         readerThread.Start();
-        displayThread.Start();
     }
 
-    /// <summary>Begins draining the presentation buffer onto the display texture at the paced
-    /// target-fps rate - held off until called so playback can be started in lockstep with audio
-    /// (see MediaSessionService's sync coordination) rather than the instant the buffer fills.
-    /// Idempotent and safe to call more than once (e.g. if audio joins the stream mid-session,
-    /// after video is already playing).</summary>
-    public void StartDisplay() => displayStarted = true;
+    /// <summary>See PresentationScheduler.StartDisplay.</summary>
+    public void StartDisplay() => scheduler.StartDisplay();
 
     /// <summary>Never blocks - safe to call from a network receive thread. <paramref name="ptsMs"/>
     /// is the chunk's PTS on the host's shared session clock (see MediaSocketClient/H264Encoder) -
@@ -245,6 +212,21 @@ public sealed class H264Decoder : IDisposable
                     Interlocked.Exchange(ref lastFedPtsMs, entry.PtsMs);
                     decoderProcess.StandardInput.Write(entry.Chunk, 0, entry.Chunk.Length);
                 }
+
+                // Not optional, and the reason decode used to stall in bursts. Process redirects
+                // stdin through a FileStream with a 4096-byte write buffer, so a write smaller
+                // than that is simply held - measured, not assumed: 500 bytes written to a child's
+                // BaseStream never arrived until an explicit Flush. It went unnoticed while chunks
+                // came off ffmpeg's stdout in large reads that mostly exceeded the buffer, but the
+                // Media Foundation encoder sends one access unit per chunk, and a P-frame on a
+                // quiet screen is a few hundred bytes. Worse than latency alone: a large write
+                // whose tail lands under the threshold leaves a PARTIAL access unit stranded, so
+                // the decoder sits waiting for the rest of a frame it will not see until the next
+                // one pushes it through.
+                //
+                // Once per drained batch rather than per chunk - a batch is the work that just
+                // arrived together, so this costs one syscall per wake-up, not one per frame.
+                decoderProcess.StandardInput.Flush();
             }
         }
         catch (Exception ex) when (running)
@@ -292,158 +274,12 @@ public sealed class H264Decoder : IDisposable
                 }
 
                 Interlocked.Increment(ref framesDecoded);
-
-                if (presentationQueue.Reader.Count >= presentationCapacity)
-                    Interlocked.Increment(ref displayQueueDrops);
-                presentationQueue.Writer.TryWrite((Interlocked.Read(ref lastFedPtsMs), (byte[])frame.Clone()));
+                scheduler.Enqueue(Interlocked.Read(ref lastFedPtsMs), (byte[])frame.Clone());
             }
         }
         catch (Exception ex) when (running)
         {
             RecordError("ReadLoop (decoder stdout -> presentation buffer)", ex);
-        }
-    }
-
-    /// <summary>Drains the presentation buffer onto the display texture, reconciling against
-    /// audio's own estimated playback position (audio is the master clock - hardware-paced and
-    /// drift-free, unlike anything software here) rather than just pacing at a fixed interval:
-    ///
-    /// - Within <see cref="SyncToleranceMs"/> of audio: display normally, paced against a
-    ///   Stopwatch schedule (target = frameIndex * frameIntervalMs) so a slow iteration's real
-    ///   work (WriteFrameToTexture's lock + GPU calls) can't compound into drift over a session -
-    ///   see the earlier fix for why a plain Thread.Sleep(frameIntervalMs) each iteration doesn't
-    ///   do this correctly.
-    /// - Video running ahead of audio: hold this one frame a bit longer (capped at
-    ///   <see cref="MaxFrameHoldMs"/>) so audio can catch up, then resume normal pacing from a
-    ///   fresh schedule baseline.
-    /// - Video running behind audio: skip the normal pacing sleep for this iteration entirely,
-    ///   catching up faster than one frameInterval at a time would.
-    /// - Video severely behind (past <see cref="SeverelyBehindMs"/>): skip straight through any
-    ///   other already-stale queued frames rather than displaying each one in sequence, which
-    ///   would never actually close the gap while more keep arriving.
-    ///
-    /// If there's no audio (getAudioPtsMs returns null - never wired, or not playing yet), falls
-    /// back to the fixed-interval pacing this had before PTS-based sync existed - nothing to
-    /// reconcile against.
-    ///
-    /// Waits for the buffer to fill before raising <see cref="ReadyToDisplay"/>, then waits again
-    /// for <see cref="StartDisplay"/> so playback can begin roughly in lockstep with audio (the
-    /// reconciliation above then corrects whatever residual gap that starting heuristic leaves).
-    /// On an underrun (buffer empty - decode/network genuinely falling behind, a distinct problem
-    /// from jitter) this just holds the last displayed frame and waits for the next tick rather
-    /// than blocking indefinitely or busy-spinning.</summary>
-    private void DisplayLoop()
-    {
-        try
-        {
-            while (running && presentationQueue.Reader.Count < presentationCapacity)
-                Thread.Sleep(5);
-            if (!running)
-                return;
-
-            ReadyToDisplay?.Invoke();
-
-            while (running && !displayStarted)
-                Thread.Sleep(5);
-
-            var clock = Stopwatch.StartNew();
-            long frameIndex = 0;
-
-            while (running)
-            {
-                if (!presentationQueue.Reader.TryRead(out (long PtsMs, byte[] Frame) entry))
-                {
-                    Thread.Sleep(frameIntervalMs);
-                    continue;
-                }
-
-                long? audioPtsMs = getAudioPtsMs();
-                if (audioPtsMs is not { } rawAudioPts)
-                {
-                    // No audio to reconcile against - fixed-interval pacing, same as before PTS sync.
-                    WriteFrameToTexture(entry.Frame);
-                    frameIndex++;
-                    long noAudioSleepMs = frameIndex * frameIntervalMs - clock.ElapsedMilliseconds;
-                    if (noAudioSleepMs > 0)
-                        Thread.Sleep((int)noAudioSleepMs);
-                    continue;
-                }
-
-                // The user's deliberate offset shifts the clock video is measured against, so a
-                // positive value makes every frame look "early" and get held back by that much.
-                long syncOffsetMs = getSyncOffsetMs();
-                long currentAudioPts = rawAudioPts - syncOffsetMs;
-
-                // Drain to the NEWEST frame that is already due, rather than showing the oldest.
-                //
-                // The queue is primed to full before playback starts and then stays full, because
-                // producer and consumer run at the same rate - and a permanently full FIFO is
-                // permanent latency: video sits the queue's whole depth behind audio, forever. The
-                // old rule only skipped ahead once a frame was more than SeverelyBehindMs stale, so
-                // it did not remove that backlog, it capped it - which is why measured drift sat
-                // pinned at exactly -300ms, the value of that constant.
-                //
-                // Draining every frame whose time has already passed keeps the standing offset near
-                // one frame interval instead. Frames that are NOT yet due are still left alone, so
-                // this cannot run ahead of the clock, and a positive A/V offset (which shifts the
-                // clock earlier) still holds frames back exactly as before.
-                while (presentationQueue.Reader.TryPeek(out (long PtsMs, byte[] Frame) next)
-                       && next.PtsMs <= currentAudioPts
-                       && presentationQueue.Reader.TryRead(out (long PtsMs, byte[] Frame) fresher))
-                {
-                    entry = fresher;
-                }
-
-                long driftMs = entry.PtsMs - currentAudioPts;
-
-                // Reported against the RAW audio clock, deliberately not the offset-shifted one the
-                // pacing uses. Measuring against the shifted clock makes the offset invisible to the
-                // very readout meant to detect a desync: a leftover offset delays video for real
-                // while the number still reads zero, because both sides moved together.
-                //
-                // Smoothed, because the per-frame value swings by a frame interval or more as
-                // pacing corrects and an unsmoothed readout is unreadable at 30fps.
-                long reportedDriftMs = entry.PtsMs - rawAudioPts;
-                Interlocked.Exchange(ref avDriftMs, ((Interlocked.Read(ref avDriftMs) * 7) + reportedDriftMs) / 8);
-
-                if (driftMs > SyncToleranceMs)
-                {
-                    // Sleep BEFORE presenting, not after. Writing the frame first and then sleeping
-                    // (which is what this did) doesn't delay anything - the frame is already on
-                    // screen, and the sleep only postpones the NEXT one. That is why the offset
-                    // barely moved the picture however far it was pushed.
-                    //
-                    // The cap rises with the offset because the two are different things sharing
-                    // one branch: MaxFrameHoldMs bounds how bad a single wrong PTS estimate can
-                    // look, while the offset is a deliberate delay the user asked for and must not
-                    // be clamped to the error budget.
-                    long maxHoldMs = MaxFrameHoldMs + Math.Max(0, syncOffsetMs);
-                    Thread.Sleep((int)Math.Min(driftMs, maxHoldMs));
-                    WriteFrameToTexture(entry.Frame);
-                    frameIndex = 0;
-                    clock.Restart();
-                }
-                else if (driftMs < -SyncToleranceMs)
-                {
-                    // Video behind audio - skip the normal pacing sleep entirely this iteration.
-                    WriteFrameToTexture(entry.Frame);
-                    frameIndex = 0;
-                    clock.Restart();
-                }
-                else
-                {
-                    WriteFrameToTexture(entry.Frame);
-                    frameIndex++;
-                    long sleepMs = frameIndex * frameIntervalMs - clock.ElapsedMilliseconds;
-                    if (sleepMs > 0)
-                        Thread.Sleep((int)sleepMs);
-                    // else already behind schedule - loop again immediately rather than sleeping.
-                }
-            }
-        }
-        catch (Exception ex) when (running)
-        {
-            RecordError("DisplayLoop (presentation buffer -> shared texture)", ex);
         }
     }
 
@@ -504,10 +340,11 @@ public sealed class H264Decoder : IDisposable
     {
         running = false;
         feedChannel.Writer.TryComplete();
-        presentationQueue.Writer.TryComplete();
+        scheduler.Stop();
         feedWriterThread.Join(1000);
         readerThread.Join(1000);
-        bool displayExited = displayThread.Join(1000);
+        bool displayExited = scheduler.Join(1000);
+        scheduler.Dispose();
         decoderProcess.Dispose();
 
         if (!displayExited)

@@ -24,6 +24,18 @@
     <Compile Remove="ScreenShare.Plugin.Tests\**" />
     <EmbeddedResource Remove="ScreenShare.Plugin.Tests\**" />
     <None Remove="ScreenShare.Plugin.Tests\**" />
+
+    <!-- Same reasoning for tools\: MediaProbe is a console app that lives under this project so the
+         repo stays self-contained, and must not be compiled into the plugin. -->
+    <Compile Remove="tools\**" />
+    <EmbeddedResource Remove="tools\**" />
+    <None Remove="tools\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- MediaProbe soaks and benchmarks the REAL Media Foundation interop rather than a copy of it,
+         so the harness cannot quietly drift from the code it is meant to be testing. -->
+    <InternalsVisibleTo Include="MediaProbe" />
   </ItemGroup>
 
   <ItemGroup>

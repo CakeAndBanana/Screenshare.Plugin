@@ -491,7 +491,13 @@ public sealed class ShareWindow : Window, IDisposable
             return;
 
         string displayName = roomSession.Members.FirstOrDefault(m => m.ConnectionId == mediaSession.ViewingStreamerConnectionId)?.DisplayName ?? "someone";
-        ImGui.TextUnformatted($"Watching {displayName} in a popout window.");
+
+        // Says where the stream actually is, because with the popout closed and the panel in the
+        // world this line is the only thing left explaining why audio is still playing.
+        ImGui.TextUnformatted(worldScreen.IsProjecting && !StreamView.IsOpen
+            ? $"Watching {displayName} on the in-world screen."
+            : $"Watching {displayName} in a popout window.");
+
         ImGui.SameLine();
         if (ImGui.Button("Show##showStreamView"))
         {
@@ -666,6 +672,7 @@ public sealed class ShareWindow : Window, IDisposable
             ImGui.TextUnformatted(
                 $"Streaming: {mediaSession.HostFramesEncoded} encoded / {mediaSession.HostFramesSkipped} skipped " +
                 $"({mediaSession.HostAverageFps:F1} fps avg), {mediaSession.HostEncodedBytes} bytes sent " +
+                $"({mediaSession.HostAverageBitrateKbps:F0}kbps avg, target {mediaSession.HostCurrentBitrateKbps}) " +
                 $"({mediaSession.HostEncoderName}, {mediaSession.HostCodec})");
 
             // Shown only when adaptation has actually pulled the bitrate down, so quality dropping

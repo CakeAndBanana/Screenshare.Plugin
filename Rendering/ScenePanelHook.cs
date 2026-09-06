@@ -1,4 +1,4 @@
-using Dalamud.Hooking;
+﻿using Dalamud.Hooking;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Kernel;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Render;
 using ScreenShare.Plugin.Services;
@@ -49,6 +49,7 @@ public sealed unsafe class ScenePanelHook : IDisposable
 
     private WorldPanelDraw pending;
     private bool hasPending;
+    private bool submittedThisFrame;
     private int backBufferSwitches;
     private bool loggedFailure;
 
@@ -56,6 +57,11 @@ public sealed unsafe class ScenePanelHook : IDisposable
     // so repeated misses are evidence the choice is wrong on this machine rather than a transient.
     private int missedFrames;
     private bool escalatedToEveryPass;
+
+    /// <summary>Back-buffer switches in the previous frame that had a panel queued, or -1 when
+    /// there was no such frame to compare against. See <see cref="EndFrame"/> for what a change in
+    /// it means.</summary>
+    private int previousSwitches = -1;
 
     /// <summary>True once the hook is installed and drawing can actually happen here. False means
     /// the caller should fall back to the ImGui path rather than silently not drawing.</summary>
@@ -76,6 +82,12 @@ public sealed unsafe class ScenePanelHook : IDisposable
     /// it is the difference between "this machine needs every-pass" and "something else is wrong".</summary>
     public int MissedFrames => missedFrames;
 
+    /// <summary>Why the hook stopped trusting the configured pass, or null while it still does.
+    /// Two different failures lead here and they need different wording - "it never happened" and
+    /// "it happened but the count moved underneath it" point at different things, and a reader
+    /// told the wrong one would go looking in the wrong place.</summary>
+    public string? EscalationReason { get; private set; }
+
     /// <summary>Which back-buffer switch to draw after, zero-based. Negative means AUTO: draw in
     /// EVERY back-buffer pass of the frame.
     ///
@@ -83,6 +95,11 @@ public sealed unsafe class ScenePanelHook : IDisposable
     /// structure is not universal - FSR inserts an upscale pass, and vendors differ. Worse, it is
     /// not even stable frame to frame: measured on an AMD+FSR machine, the panel appeared in an
     /// irregular subset of frames, which is what a varying pass count looks like from the outside.
+    ///
+    /// It is not only AMD: the count also moves with frame rate, and a high-frame-rate client
+    /// flickers the same way. Whatever the cause, a pass that sometimes runs AFTER the chosen one
+    /// paints over the panel, which looks identical to missing it - see
+    /// <see cref="CheckPassCountStability"/>.
     ///
     /// That irregularity is also why auto does not simply target the last pass using the previous
     /// frame's count - a stale count is wrong on exactly the frames where the count changed, which
@@ -118,6 +135,7 @@ public sealed unsafe class ScenePanelHook : IDisposable
     {
         pending = draw;
         hasPending = true;
+        submittedThisFrame = true;
     }
 
     /// <summary>Call once per frame from the render thread. Rolls the per-frame counter over and
@@ -131,14 +149,60 @@ public sealed unsafe class ScenePanelHook : IDisposable
         if (hasPending && !escalatedToEveryPass && DrawAtOccurrence >= 0 && ++missedFrames >= MissedFramesBeforeEscalating)
         {
             escalatedToEveryPass = true;
+            EscalationReason = $"render pass {DrawAtOccurrence} never came up on {missedFrames} frames";
             ServiceCollector.PluginLog.Information(
-                $"ScreenShare in-world screen: render pass {DrawAtOccurrence} missed {missedFrames} frames, " +
-                "switching to drawing in every pass. The game's pass count varies on this machine.");
+                $"ScreenShare in-world screen: {EscalationReason}, switching to drawing in every pass.");
         }
+
+        CheckPassCountStability();
 
         LastFrameBackBufferSwitches = backBufferSwitches;
         backBufferSwitches = 0;
         hasPending = false;
+        submittedThisFrame = false;
+    }
+
+    /// <summary>
+    /// Escalates as soon as the number of back-buffer passes changes between two frames that both
+    /// had a panel queued.
+    ///
+    /// The missed-frame counter above cannot see the failure this catches. It only notices a panel
+    /// that was never drawn - but a panel drawn at pass 4 and then painted over by a pass 5 that
+    /// only exists on SOME frames counts as drawn, clears itself, and is invisible anyway. From the
+    /// outside that is indistinguishable from a miss: the panel flickers. From the inside the miss
+    /// counter reads zero and nothing ever escalates.
+    ///
+    /// A varying pass count is the common cause of both, and unlike "was it painted over" it can
+    /// actually be measured. One change is enough: a fixed index is only meaningful against a fixed
+    /// pass structure, so the moment the structure moves, the index is no longer trustworthy on
+    /// this machine. Erring toward every-pass costs a few wasted quad draws and cannot flicker.
+    ///
+    /// Both frames must have had a panel queued, and the comparison resets whenever one doesn't -
+    /// otherwise a count from before a loading screen would be compared against one after it, and
+    /// every session would escalate on its first zone change regardless of what the renderer does.
+    /// </summary>
+    private void CheckPassCountStability()
+    {
+        if (escalatedToEveryPass || DrawAtOccurrence < 0)
+            return;
+
+        if (!submittedThisFrame || backBufferSwitches == 0)
+        {
+            previousSwitches = -1;
+            return;
+        }
+
+        if (previousSwitches > 0 && backBufferSwitches != previousSwitches)
+        {
+            escalatedToEveryPass = true;
+            EscalationReason =
+                $"the game's back-buffer pass count changed ({previousSwitches} to {backBufferSwitches}), " +
+                $"so pass {DrawAtOccurrence} can't be relied on";
+            ServiceCollector.PluginLog.Information(
+                $"ScreenShare in-world screen: {EscalationReason}; switching to drawing in every pass.");
+        }
+
+        previousSwitches = backBufferSwitches;
     }
 
     private void DoSetTargetCommandDetour(ImmediateContext* immediateContext, RenderCommandSetTarget* command)

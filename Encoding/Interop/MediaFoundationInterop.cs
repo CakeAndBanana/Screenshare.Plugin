@@ -25,15 +25,24 @@ internal static class MediaFoundationInterop
         public Guid Subtype;
     }
 
+    /// <summary>
+    /// MFT_ENUM_FLAG, matching mftransform.h.
+    ///
+    /// These were wrong here until a decoder probe found it: several values were transposed, so
+    /// "hardware async" actually asked for hardware plus field-of-use. The encoder path happened to
+    /// work anyway - hardware encoders are async, and the extra flag only widens the set - which is
+    /// exactly why it went unnoticed. The decoder path does not survive it: asking for the wrong
+    /// flags there returns nothing at all.
+    /// </summary>
     [Flags]
     internal enum MftEnumFlags : uint
     {
-        SyncMft = 0x00000002,
-        AsyncMft = 0x00000008,
+        SyncMft = 0x00000001,
+        AsyncMft = 0x00000002,
         Hardware = 0x00000004,
-        FieldOfUse = 0x00000020,
-        LocalMft = 0x00000001,
-        TranscodeOnly = 0x00000010,
+        FieldOfUse = 0x00000008,
+        LocalMft = 0x00000010,
+        TranscodeOnly = 0x00000020,
         SortAndFilter = 0x00000040,
     }
 
@@ -77,6 +86,9 @@ internal static class MediaFoundationInterop
     /// <summary>MFT_CATEGORY_VIDEO_ENCODER.</summary>
     internal static readonly Guid VideoEncoderCategory = new("f79eac7d-e545-4387-bdee-d647d7bde42a");
 
+    /// <summary>MFT_CATEGORY_VIDEO_DECODER.</summary>
+    internal static readonly Guid VideoDecoderCategory = new("d6c02d4b-6833-45b4-971a-05a4b04bab91");
+
     /// <summary>MFMediaType_Video.</summary>
     internal static readonly Guid MajorTypeVideo = new("73646976-0000-0010-8000-00AA00389B71");
 
@@ -96,12 +108,21 @@ internal static class MediaFoundationInterop
     /// exactly one and releases the rest, and pairing that with SharpDX's own lifetime handling
     /// would make ownership harder to follow, not easier.
     /// </summary>
-    internal static List<nint> EnumerateEncoders(Guid outputSubtype, MftEnumFlags flags)
+    internal static List<nint> EnumerateEncoders(Guid outputSubtype, MftEnumFlags flags) =>
+        EnumerateTransforms(VideoEncoderCategory, VideoFormatNv12, outputSubtype, flags);
+
+    /// <summary>Decoder MFTs taking <paramref name="inputSubtype"/> and producing NV12, best first.
+    /// Same ownership contract as <see cref="EnumerateEncoders"/>.</summary>
+    internal static List<nint> EnumerateDecoders(Guid inputSubtype, MftEnumFlags flags) =>
+        EnumerateTransforms(VideoDecoderCategory, inputSubtype, VideoFormatNv12, flags);
+
+    private static List<nint> EnumerateTransforms(
+        Guid category, Guid inputSubtype, Guid outputSubtype, MftEnumFlags flags)
     {
-        var input = new MftRegisterTypeInfo { MajorType = MajorTypeVideo, Subtype = VideoFormatNv12 };
+        var input = new MftRegisterTypeInfo { MajorType = MajorTypeVideo, Subtype = inputSubtype };
         var output = new MftRegisterTypeInfo { MajorType = MajorTypeVideo, Subtype = outputSubtype };
 
-        int hr = MFTEnumEx(VideoEncoderCategory, flags, ref input, ref output, out nint activates, out uint count);
+        int hr = MFTEnumEx(category, flags, ref input, ref output, out nint activates, out uint count);
         if (hr < 0)
             throw Marshal.GetExceptionForHR(hr) ?? new InvalidOperationException($"MFTEnumEx failed (0x{hr:X8}).");
 
@@ -184,22 +205,74 @@ internal static class MediaFoundationInterop
     /// </summary>
     internal static nint ProcessOutput(nint transform)
     {
+        int hr = TryProcessOutput(transform, out nint sample);
+        if (hr < 0)
+            throw Marshal.GetExceptionForHR(hr) ?? new InvalidOperationException($"ProcessOutput failed (0x{hr:X8}).");
+
+        return sample;
+    }
+
+    /// <summary>
+    /// ProcessOutput returning its HRESULT instead of throwing.
+    ///
+    /// The decoder needs this because two of its failure codes are not failures at all - they are
+    /// how a synchronous MFT says "feed me more" and "my output format changed". Turning those into
+    /// exceptions would mean throwing several times per second through the normal decode path.
+    /// </summary>
+    internal static int TryProcessOutput(nint transform, out nint sample)
+    {
         nint vtable = Marshal.ReadIntPtr(transform);
         nint function = Marshal.ReadIntPtr(vtable, 25 * nint.Size);
         var call = Marshal.GetDelegateForFunctionPointer<ProcessOutputFn>(function);
 
         var buffer = new MftOutputDataBuffer();
         int hr = call(transform, 0, 1, ref buffer, out _);
-        if (hr < 0)
-            throw Marshal.GetExceptionForHR(hr) ?? new InvalidOperationException($"ProcessOutput failed (0x{hr:X8}).");
 
         // The events collection is optional and almost always absent, but it is an out-reference
         // when present and leaking one per frame would be a slow drip for the whole session.
         if (buffer.Events != nint.Zero)
             Marshal.Release(buffer.Events);
 
-        return buffer.Sample;
+        sample = buffer.Sample;
+        return hr;
     }
+
+    /// <summary>The transform has consumed everything it was given and has nothing to emit yet -
+    /// the ordinary state of a decoder between frames, not an error.</summary>
+    internal const int MfETransformNeedMoreInput = unchecked((int)0xC00D6D72);
+
+    /// <summary>The transform's output format changed and must be renegotiated before it will emit
+    /// anything more. A decoder raises this once it has parsed the stream's real parameters, which
+    /// may not match what it was told up front.</summary>
+    internal const int MfETransformStreamChange = unchecked((int)0xC00D6D61);
+
+    /// <summary>
+    /// Reaches the D3D11 texture inside a decoder's output sample, without copying it to system
+    /// memory the way IMFSample::ConvertToContiguousBuffer would - which is the entire point of
+    /// decoding on the GPU in the first place.
+    ///
+    /// <c>GetSubresourceIndex</c> matters: hardware decoders hand back slices of a texture ARRAY,
+    /// so the texture alone does not identify the frame. Copying subresource 0 unconditionally
+    /// yields whichever frame happens to live in the first slice.
+    /// </summary>
+    [ComImport]
+    [Guid("e7174cfa-1c9e-48b1-8866-626226bfc258")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMfDxgiBuffer
+    {
+        [PreserveSig] int GetResource(ref Guid riid, out nint resource);
+
+        [PreserveSig] int GetSubresourceIndex(out uint subresource);
+
+        [PreserveSig] int GetUnknown(ref Guid guid, ref Guid riid, out nint unknown);
+
+        [PreserveSig] int SetUnknown(ref Guid guid, nint unknown);
+    }
+
+    /// <summary>MF_SA_D3D11_AWARE - set on decoders that can be bound to a D3D11 device and will
+    /// then decode into GPU textures. A decoder without it works, but only in system memory, which
+    /// would leave the CPU round trip exactly where it is.</summary>
+    internal static readonly Guid MfSaD3D11Aware = new("206b4fc8-fcf9-4c51-afe3-9764369e33a0");
 
     // CODECAPI_* properties. Only the handful the encoder actually sets.
     internal static readonly Guid AvEncCommonRateControlMode = new("1c0608e9-370c-4710-8a58-cb6181c42423");

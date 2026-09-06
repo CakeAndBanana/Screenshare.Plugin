@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 using ScreenShare.Plugin.Capture.ScreenCapture;
 using ScreenShare.Plugin.Encoding.Interop;
@@ -276,13 +276,28 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         {
             var api = (ICodecApi)Marshal.GetObjectForIUnknown(transform.NativePointer);
 
-            TrySetCodecProperty(api, AvEncCommonRateControlMode, RateControlModeCbr);
-            TrySetCodecProperty(api, AvEncCommonMeanBitRate, (uint)(bitrateKbps * 1000));
-            TrySetCodecProperty(api, AvLowLatencyMode, true);
+            // Logged rather than silently attempted. Which of these an encoder accepts varies by
+            // vendor, and the difference is not cosmetic: without rate control and mean bitrate the
+            // MFT encodes to its own default, which can sit far above the configured budget and
+            // congest the uplink - a failure that looks like the network or the decoder struggling,
+            // nowhere near the encoder that caused it.
+            var accepted = new List<string>();
+            var refused = new List<string>();
+
+            void Apply(string name, Guid property, object value) =>
+                (TrySetCodecProperty(api, property, value) ? accepted : refused).Add(name);
+
+            Apply("CBR", AvEncCommonRateControlMode, RateControlModeCbr);
+            Apply($"{bitrateKbps}kbps", AvEncCommonMeanBitRate, (uint)(bitrateKbps * 1000));
+            Apply("low-latency", AvLowLatencyMode, true);
 
             // A keyframe every two seconds, so a viewer joining mid-stream gets a picture within
             // that rather than waiting on whatever default the vendor happened to choose.
-            TrySetCodecProperty(api, AvEncMpvGopSize, (uint)(fps * 2));
+            Apply($"GOP {fps * 2}", AvEncMpvGopSize, (uint)(fps * 2));
+
+            ServiceCollector.PluginLog.Information(
+                $"ScreenShare encoder settings on {EncoderName}: applied [{string.Join(", ", accepted)}]" +
+                (refused.Count > 0 ? $", refused [{string.Join(", ", refused)}]" : string.Empty));
 
             return api;
         }

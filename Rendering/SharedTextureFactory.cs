@@ -1,4 +1,4 @@
-using SharpDX.Direct3D11;
+﻿using SharpDX.Direct3D11;
 using SharpDX.DXGI;
 using Device = SharpDX.Direct3D11.Device;
 
@@ -10,7 +10,12 @@ namespace ScreenShare.Plugin.Rendering;
 /// </summary>
 public static class SharedTextureFactory
 {
-    public static Texture2D CreateEmpty(Device device, int width, int height, Format format = Format.B8G8R8A8_UNorm)
+    /// <param name="renderTarget">Also bind it as a render target, so it can be drawn INTO rather
+    /// than only copied into. Opt-in because most callers only ever receive a same-size
+    /// CopyResource; WindowCapture needs it to scale a resized window back down to the size the
+    /// encoder was built around.</param>
+    public static Texture2D CreateEmpty(
+        Device device, int width, int height, Format format = Format.B8G8R8A8_UNorm, bool renderTarget = false)
     {
         var desc = new Texture2DDescription
         {
@@ -21,7 +26,7 @@ public static class SharedTextureFactory
             Format = format,
             SampleDescription = new SampleDescription(1, 0),
             Usage = ResourceUsage.Default,
-            BindFlags = BindFlags.ShaderResource,
+            BindFlags = renderTarget ? BindFlags.ShaderResource | BindFlags.RenderTarget : BindFlags.ShaderResource,
             CpuAccessFlags = CpuAccessFlags.None,
             OptionFlags = ResourceOptionFlags.Shared,
         };
