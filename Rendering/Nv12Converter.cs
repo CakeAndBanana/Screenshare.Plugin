@@ -1,4 +1,4 @@
-using SharpDX.D3DCompiler;
+﻿using SharpDX.D3DCompiler;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
@@ -6,23 +6,6 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Rendering;
 
-/// <summary>
-/// Scales a BGRA capture into an NV12 texture on the GPU, which is the format hardware encoder
-/// MFTs actually want.
-///
-/// This replaces the downscale-then-read-back-to-CPU pair on the Media Foundation path. The
-/// encoder takes the resulting texture directly through an IMFDXGIDeviceManager, so a frame never
-/// leaves the GPU between capture and encode - removing both the readback's latency and the whole
-/// class of bug where a queued CopyResource sat unsubmitted (see AsyncTextureReadback's Flush).
-///
-/// NV12 is planar, and D3D11 exposes its planes by the FORMAT of the view rather than by any
-/// explicit plane index: an R8 view of an NV12 texture addresses the full-resolution luma plane,
-/// and an R8G8 view addresses the half-resolution interleaved chroma plane. So this is two passes
-/// over one texture rather than two textures.
-///
-/// Shape follows <see cref="GpuDownscaler"/> deliberately - inline HLSL compiled at runtime, and no
-/// vertex or index buffer, just the full-screen triangle generated from SV_VertexID.
-/// </summary>
 public sealed class Nv12Converter : IDisposable
 {
     // BT.709, studio range. The coefficients are the usual full-range BT.709 matrix scaled by
@@ -89,16 +72,12 @@ public sealed class Nv12Converter : IDisposable
     private readonly RenderTargetView lumaTarget;
     private readonly RenderTargetView chromaTarget;
 
-    /// <summary>The NV12 texture the encoder is handed. Owned here and reused every frame.</summary>
     public Texture2D Target { get; }
 
     public int Width { get; }
 
     public int Height { get; }
 
-    /// <summary>Dimensions must be even - NV12's chroma plane is exactly half size in both axes, so
-    /// an odd dimension has no valid representation. Callers already round to even when computing
-    /// the encode resolution (see H264Encoder.ComputeScaledSize).</summary>
     public Nv12Converter(Device device, int width, int height)
     {
         if (width % 2 != 0 || height % 2 != 0)
@@ -165,8 +144,6 @@ public sealed class Nv12Converter : IDisposable
         });
     }
 
-    /// <summary>Converts <paramref name="source"/> into <see cref="Target"/>. Caller must hold the
-    /// device's ImmediateContextLock, same as <see cref="GpuDownscaler.Blit"/>.</summary>
     public void Convert(DeviceContext context, ShaderResourceView source, int sourceWidth, int sourceHeight)
     {
         Span<float> constants =

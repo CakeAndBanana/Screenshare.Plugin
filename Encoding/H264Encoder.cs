@@ -7,20 +7,6 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Encoding;
 
-/// <summary>
-/// Capture -> GPU-encode pipeline for the network media plane. Reads frames from a running
-/// ICaptureSource (either a whole monitor via DesktopDuplicationCapture, or one specific window
-/// via WindowCapture), encodes them with a hardware encoder (see VideoEncoderSelector),
-/// and raises <see cref="ChunkEncoded"/> for each block of raw encoder output - no local decode.
-/// Uses the same non-blocking GPU readback (AsyncTextureReadback) and hardware-encoder-selection
-/// logic proven stable in-game during this pipeline's original local round-trip validation.
-///
-/// Downscales on the GPU (see GpuDownscaler) before the CPU readback rather than after - the
-/// readback transfer cost scales with whatever resolution it's reading, and reading native screen
-/// resolution regardless of the chosen encode resolution was confirmed to be the dominant cost
-/// behind a severe skip-rate cliff once a 30fps target was requested. Reading back only the
-/// already-downscaled frame is the actual fix.
-/// </summary>
 public sealed class H264Encoder : IVideoEncoder
 {
     private readonly GameAdapterDevice gameAdapterDevice;
@@ -49,18 +35,10 @@ public sealed class H264Encoder : IVideoEncoder
 
     public GpuVendor Vendor { get; }
 
-    /// <summary>The GPU vendor, which is as specific as this path can be: ffmpeg picks its encoder
-    /// from the vendor-specific argument set we build, and never tells us which one it chose. The
-    /// Media Foundation path reports the actual MFT's name.</summary>
     public string EncoderName => $"ffmpeg ({Vendor})";
 
-    /// <summary>False: bitrate is a spawn argument here, so changing it means respawning ffmpeg -
-    /// which is what MediaSessionService.RestartEncoderAsync exists to do, and why adaptation on
-    /// this path costs a visible hitch.</summary>
     public bool SupportsLiveBitrate => false;
 
-    /// <summary>No-op, so the adaptation loop can call it unconditionally. Callers that need the
-    /// bitrate to actually change check <see cref="SupportsLiveBitrate"/> and rebuild instead.</summary>
     public void SetBitrate(int bitrateKbps)
     {
     }
@@ -71,23 +49,10 @@ public sealed class H264Encoder : IVideoEncoder
 
     public long EncodedBytes => Interlocked.Read(ref encodedBytes);
 
-    /// <summary>Average encode rate since this encoder was constructed - directly comparable to
-    /// H264Decoder.AverageFps on the viewer's side, so the two can be checked side by side to see
-    /// exactly where a stream's effective FPS actually drops below its configured target: at
-    /// capture/encode (this number), or somewhere downstream (network, decode, or the viewer's
-    /// own render loop) if this number looks healthy but playback still looks choppy.</summary>
     public double AverageFps => FramesEncoded / Math.Max(sessionClock.Elapsed.TotalSeconds, 0.001);
 
     public Exception? LastError { get; private set; }
 
-    /// <summary>Raised on the internal reader thread - handlers must not block (e.g. hand the
-    /// bytes to MediaSocketClient.SendVideoChunk, which itself never blocks). The long is a PTS
-    /// in milliseconds on the shared sessionClock passed into this encoder's constructor - the
-    /// most recently CAPTURED frame's timestamp as of when this chunk was read from ffmpeg's
-    /// stdout (chunks aren't frame-aligned, so this is an approximation, but ffmpeg's low-latency
-    /// tuning keeps the gap small enough for A/V sync purposes). Comparable directly against
-    /// audio's own PTS on the viewer side only because both encoders share the exact same clock -
-    /// see MediaSessionService.StartHostingCoreAsync.</summary>
     public event Action<long, byte[]>? ChunkEncoded;
 
     public VideoCodec Codec { get; }
@@ -146,18 +111,6 @@ public sealed class H264Encoder : IVideoEncoder
         return (Math.Max(2, width), Math.Max(2, height));
     }
 
-    /// <summary>Paced against a Stopwatch schedule (target = frameIndex * frameIntervalMs) rather
-    /// than a plain Thread.Sleep(frameIntervalMs) each iteration - the latter doesn't account for
-    /// how long the GPU blit/readback/stdin-write themselves take (real, non-zero work under
-    /// ImmediateContextLock), so each loop iteration actually took slightly LONGER than
-    /// frameIntervalMs and the error compounded every frame, silently capturing/encoding at a rate
-    /// below the configured target regardless of what the target was set to. Very likely the real
-    /// explanation for an earlier, previously-unresolved report of the viewer consistently
-    /// receiving close to half of whatever target FPS was configured (e.g. 60 -> ~30, 30 -> ~16):
-    /// if the per-iteration work time happens to land in the same ballpark as frameIntervalMs
-    /// itself, an open-loop Sleep-per-iteration produces almost exactly that ratio. Scheduling
-    /// against elapsed time instead means a slow iteration just eats into the next frame's sleep
-    /// rather than permanently pushing every future frame later.</summary>
     private void WriteLoop()
     {
         byte[] frame = new byte[Width * Height * 4];
@@ -259,16 +212,6 @@ public sealed class H264Encoder : IVideoEncoder
         }
     }
 
-    /// <summary>The 1s Join timeout is bounded on purpose (Dispose must not hang forever), but
-    /// that means it's only a best-effort wait, not a guarantee writerThread has actually stopped
-    /// touching GPU resources - if the GPU is genuinely stalled/removed, a Map/blit call can stay
-    /// blocked well past 1s. Disposing downscaledTexture/sourceSrv/downscaler/readback regardless
-    /// of that would be a real use-after-dispose race: if the stuck call eventually returns (once
-    /// the driver unstalls, or mid-TDR-reset), it touches COM objects that were already released,
-    /// which crashes natively rather than throwing a catchable .NET exception - a real, reported
-    /// "rare crash when stopping a stream that had a stalled GPU" traced back to exactly this.
-    /// Skipping the GPU-resource disposal (intentionally leaking them) in that rare case is a far
-    /// better outcome than risking that crash.</summary>
     public void Dispose()
     {
         running = false;

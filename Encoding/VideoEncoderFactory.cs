@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using ScreenShare.Plugin.Capture.ScreenCapture;
 using ScreenShare.Plugin.Encoding.Interop;
 using ScreenShare.Plugin.Rendering;
@@ -6,15 +6,6 @@ using ScreenShare.Plugin.Services;
 
 namespace ScreenShare.Plugin.Encoding;
 
-/// <summary>
-/// Picks the video encoder for a hosting session: Media Foundation where the machine has a
-/// hardware MFT for the chosen codec, ffmpeg otherwise.
-///
-/// The fallback is automatic and silent to the user because it has to be. Async MFTs behave
-/// differently between NVIDIA, AMD and Intel, and HEVC in particular depends on codecs that may
-/// simply not be installed - ffmpeg bundles its own, so it works where MF does not. ffmpeg is
-/// still shipped for decoding regardless, so keeping it as the encode fallback costs nothing.
-/// </summary>
 public static class VideoEncoderFactory
 {
     public static IVideoEncoder Create(

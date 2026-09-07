@@ -1,19 +1,9 @@
-using ScreenShare.Plugin.Encoding.Interop;
+﻿using ScreenShare.Plugin.Encoding.Interop;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 
 namespace ScreenShare.Plugin.Encoding;
 
-/// <summary>
-/// Picks the video decoder for a watch session: Media Foundation where the machine can decode the
-/// codec into D3D11 textures, ffmpeg otherwise.
-///
-/// The fallback is per codec and genuinely load-bearing here, more so than on the encode side.
-/// H.264 decode ships with Windows; HEVC decode does not - it depends on the Microsoft Store's
-/// "HEVC Video Extensions", whose free "from Device Manufacturer" edition only installs on some
-/// hardware. ffmpeg bundles its own decoder for both, so a viewer without those extensions still
-/// watches an HEVC stream; it just pays the CPU round trip while doing it.
-/// </summary>
 public static class VideoDecoderFactory
 {
     public static IVideoDecoder Create(

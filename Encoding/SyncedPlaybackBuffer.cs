@@ -1,35 +1,10 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using NAudio.Wave;
 
 namespace ScreenShare.Plugin.Encoding;
 
-/// <summary>
-/// The viewer's audio jitter buffer, and the source of the master clock <see cref="H264Decoder"/>
-/// reconciles video against. Replaces NAudio's BufferedWaveProvider, which could not do the second
-/// job at all - three measured reasons, each of which desynced audio on its own:
-///
-/// 1. The output device holds audio that has been handed over but not yet heard. Measured on a
-///    default WaveOutEvent: 176-289ms in flight at any moment. BufferedWaveProvider.BufferedBytes
-///    cannot see any of it, so a clock built on that alone is a quarter-second wrong and, worse,
-///    wrong by an amount that swings ~110ms as the device cycles its buffers - nearly 3x
-///    H264Decoder's 40ms sync tolerance, so video visibly hunts even when nothing else is wrong.
-///    This class instead maps the device's OWN reported playback position (waveOutGetPosition,
-///    measured drift-free against wall clock to a constant 16ms offset) back onto content PTS.
-/// 2. On underrun BufferedWaveProvider zero-fills (ReadFully defaults to true) and says nothing.
-///    A wall-clock position estimate keeps advancing through audio nobody heard, so every underrun
-///    shifted real audio behind the estimate, cumulatively and uncorrected. Here a zero-filled run
-///    is recorded as silence and HOLDS the clock instead.
-/// 3. DiscardOnBufferOverflow discards INCOMING audio and keeps the oldest (verified: feeding
-///    1000ms into a 500ms buffer leaves packet #1 at the front). For a live stream that is exactly
-///    backwards - it pins playback to the oldest audio and throws away the newest. This class
-///    drops the OLDEST instead, which is what bounds latency rather than growing it.
-/// </summary>
 public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedMilliseconds) : IWaveProvider
 {
-    /// <summary>Only reached when nothing is asking for the clock (no video decoder attached, or it
-    /// died), since <see cref="GetPtsAtPlayedBytes"/> retires segments as the play position passes
-    /// them. Bounds memory in that case, at the cost of precision for positions nobody will ask
-    /// about.</summary>
     private const int MaxRetainedSegments = 8192;
 
     // How the adaptive band moves: a decisive step up after an underrun, a slow creep back down.
@@ -68,8 +43,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
 
     public WaveFormat WaveFormat => waveFormat;
 
-    /// <summary>The buffer depth currently being aimed at, which moves with measured conditions -
-    /// see the adaptive band above. Surfaced so the UI can show when the link has forced it up.</summary>
     public int TargetMilliseconds
     {
         get
@@ -79,8 +52,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
         }
     }
 
-    /// <summary>How much audio is waiting to be handed to the device - the part of end-to-end
-    /// latency this class controls (the device holds its own on top of it).</summary>
     public int BufferedMilliseconds
     {
         get
@@ -90,9 +61,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
         }
     }
 
-    /// <summary>Audio dropped to keep latency bounded - see <see cref="Add"/>. Climbing steadily
-    /// means the sender is running faster than this machine's output clock, or that delivery is
-    /// arriving in bursts larger than the buffer.</summary>
     public long DroppedMilliseconds
     {
         get
@@ -102,8 +70,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
         }
     }
 
-    /// <summary>Silence handed to the device because nothing had arrived in time. Climbing means
-    /// the jitter buffer is too small for this connection, and is what a listener hears as gaps.</summary>
     public long UnderrunMilliseconds
     {
         get
@@ -113,16 +79,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
         }
     }
 
-    /// <summary>Queues one decoded packet, dropping the OLDEST audio if that would push the buffer
-    /// past its cap.
-    ///
-    /// Dropping the oldest is what makes latency bounded rather than unbounded: a sender even
-    /// slightly faster than this machine's output clock would otherwise grow the backlog forever,
-    /// and every millisecond of backlog is a millisecond audio arrives late. It is also what keeps
-    /// playback starting at the LIVE EDGE - nothing drains this buffer until the owner starts
-    /// playback, and it waits for video, which can take seconds (ffmpeg spawn, hardware decoder
-    /// init, then a full presentation queue). Capping here means that wait leaves the newest audio
-    /// in hand rather than the audio that happened to arrive when the stream first came up.</summary>
     public void Add(long ptsMs, byte[] pcm)
     {
         lock (gate)
@@ -133,9 +89,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
         }
     }
 
-    /// <summary>Called by the output device on its own thread. Always fills the whole request (the
-    /// device must never be starved of bytes) but records which of those bytes carried real content
-    /// and which were silence, so <see cref="GetPtsAtPlayedBytes"/> can tell them apart.</summary>
     public int Read(byte[] buffer, int offset, int count)
     {
         lock (gate)
@@ -185,12 +138,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
         }
     }
 
-    /// <summary>Maps a device playback position (bytes the hardware reports as actually played)
-    /// onto the content timestamp being heard right now. Null until real content has been played.
-    ///
-    /// Inside a silence run the answer deliberately does not advance: nothing was heard, so the
-    /// clock holds and video holds with it, rather than both marching past audio that never
-    /// played.</summary>
     public long? GetPtsAtPlayedBytes(long playedBytes)
     {
         lock (gate)
@@ -210,8 +157,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
 
     private long PtsAtChunkCursor(Chunk chunk) => chunk.PtsMs + (long)(chunk.Offset / bytesPerMillisecond);
 
-    /// <summary>Grows the target after an underrun. Steps rather than creeps: an underrun means the
-    /// depth was already too shallow, and creeping would underrun repeatedly on the way up.</summary>
     private void WidenTargetLocked()
     {
         long step = (long)(bytesPerMillisecond * WidenStepMs);
@@ -219,9 +164,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
         cleanBytesSinceUnderrun = 0;
     }
 
-    /// <summary>Creeps the target back down while playback stays clean, so one bad patch early in a
-    /// session does not leave latency permanently inflated. Floored at half the configured budget -
-    /// the setting is the user preference, not something to optimise away behind their back.</summary>
     private void NarrowTargetLocked(int cleanBytes)
     {
         cleanBytesSinceUnderrun += cleanBytes;
@@ -232,7 +174,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
         targetBytes = Math.Max(targetBytes - (long)(bytesPerMillisecond * NarrowStepMs), baselineBytes / 2);
     }
 
-    /// <summary>Keeps a rolling copy of what was last played, for <see cref="ConcealLocked"/>.</summary>
     private void RememberForConcealmentLocked(byte[] buffer, int byteOffset, int byteCount)
     {
         ReadOnlySpan<float> samples = MemoryMarshal.Cast<byte, float>(buffer.AsSpan(byteOffset, byteCount));
@@ -252,18 +193,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
         historyWritten = keep + samples.Length;
     }
 
-    /// <summary>
-    /// Fills a gap with a decaying repeat of what was just playing, instead of digital silence.
-    ///
-    /// Silence is close to the most audible thing that can be inserted: an abrupt drop to nothing
-    /// is far more noticeable than a short repetition at the same level and timbre. Looping the
-    /// last few milliseconds is what packet-loss concealment in real-time voice codecs does, for
-    /// exactly this reason.
-    ///
-    /// It decays to silence over a short window deliberately - repeating indefinitely turns a
-    /// dropout into a stuck-record buzz, which is worse than the gap it replaced. A long outage
-    /// should still end up quiet.
-    /// </summary>
     private void ConcealLocked(byte[] buffer, int byteOffset, int byteCount)
     {
         Span<float> output = MemoryMarshal.Cast<byte, float>(buffer.AsSpan(byteOffset, byteCount));
@@ -321,9 +250,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
         }
     }
 
-    /// <summary>Records where a run of output bytes starts and what it carries, collapsing runs
-    /// that simply continue the previous one - so the queue grows with genuine discontinuities
-    /// (underruns, drops, packets lost upstream) rather than with every Read call.</summary>
     private void RecordSegment(long startHandedByte, long ptsMs, bool isSilence)
     {
         if (lastRecorded is { } last && last.IsSilence == isSilence)
@@ -356,13 +282,10 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
 
         public byte[] Pcm { get; } = pcm;
 
-        /// <summary>How far into <see cref="Pcm"/> the next unread byte is - moved by reading and
-        /// by trimming alike, which is why the PTS is always derived from it rather than stored.</summary>
         public int Offset { get; set; }
 
         public int Remaining => Pcm.Length - Offset;
     }
 
-    /// <summary>A run of bytes handed to the device, and the content PTS its first byte carried.</summary>
     private readonly record struct Segment(long StartHandedByte, long PtsMs, bool IsSilence);
 }

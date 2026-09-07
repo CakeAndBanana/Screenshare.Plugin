@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using System.Runtime.InteropServices;
 using SharpDX.D3DCompiler;
 using SharpDX.Direct3D;
@@ -8,39 +8,19 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Rendering;
 
-/// <summary>How the panel's fragments interact with the game's own scene depth.</summary>
 public enum PanelDepthMode
 {
-    /// <summary>No depth test - the panel draws over everything in the world.</summary>
     None,
 
-    /// <summary>Discard fragments the scene has geometry in front of, so walls, pillars and
-    /// characters hide the panel like any other object.</summary>
     Occlude,
 
-    /// <summary>Diagnostic: paint the sampled depth buffer itself instead of the video. Answers,
-    /// by eye, the one question about this whole approach that can't be settled by reading code -
-    /// whether the game's depth buffer still holds THIS frame's scene depth by the time ImGui
-    /// renders, or has already been cleared/reused.</summary>
     ShowDepthBuffer,
 
-    /// <summary>Diagnostic: the two sides of the occlusion test, side by side in one image - the
-    /// scene's depth in red, this panel's own depth in green. Exists because a depth buffer that
-    /// LOOKS right can still fail to occlude: the two values have to share a convention and a
-    /// range, and nothing about the greyscale view says whether they do. Yellow means the two
-    /// agree closely; a field that is flatly red or flatly green means they're on different scales
-    /// and no choice of comparison direction will work.</summary>
     ShowDepthComparison,
 
-    /// <summary>Diagnostic: the occlusion decision itself, green for kept and red for discarded,
-    /// with nothing actually discarded. This is the one that distinguishes "the comparison runs
-    /// but always answers the same way" from "the comparison never runs at all" - an all-green
-    /// panel means the test is reaching no conclusion rather than the wrong one, which is why
-    /// flipping the sign can appear to change nothing.</summary>
     ShowOcclusionTest,
 }
 
-/// <summary>Everything the panel draw needs, resolved on the render thread before ImGui renders.</summary>
 public readonly record struct WorldPanelDraw(
     Matrix4x4 ViewProjection,
     Vector3 Center,
@@ -53,21 +33,6 @@ public readonly record struct WorldPanelDraw(
     nint VideoShaderResourceView,
     nint DepthShaderResourceView);
 
-/// <summary>
-/// Draws the stream as an actual quad in the world: four world-space corners pushed through the
-/// game's own view-projection matrix, so perspective and near-plane clipping are the rasterizer's
-/// problem rather than ours. That's the whole reason this exists instead of an ImGui draw-list
-/// quad, where an oblique viewing angle produces affine texture warping and a corner behind the
-/// camera produces garbage.
-///
-/// Built on the GAME's device, not the plugin's: this runs inside ImGui's render pass, drawing
-/// into the game's backbuffer with the game-side SRV that SharedTextureBridge already hands us.
-///
-/// Shape follows <see cref="GpuDownscaler"/> deliberately - inline HLSL compiled at runtime, and
-/// no vertex or index buffer at all. The four corners come from SV_VertexID against a constant
-/// buffer, which is both less machinery than a vertex buffer and avoids a per-frame upload of
-/// geometry that's fully described by three vectors.
-/// </summary>
 public sealed class WorldPanelRenderer : IDisposable
 {
     // ViewProj is declared row_major because System.Numerics.Matrix4x4 is row-major in memory
@@ -280,11 +245,6 @@ public sealed class WorldPanelRenderer : IDisposable
         });
     }
 
-    /// <summary>Issues the panel draw on the game's immediate context. The caller saves and
-    /// restores pipeline state around this (see <see cref="WorldPanelDispatch"/>) - this method
-    /// deliberately leaves render targets, viewport, blend, depth-stencil and rasterizer state
-    /// exactly as it found them, because ImGui has already set all of those to what we want: the
-    /// backbuffer at display size, straight-alpha blending, no hardware depth test, no culling.</summary>
     public void Draw(DeviceContext context, in WorldPanelDraw draw) => DrawCore(context, in draw, setScissor: true);
 
     private void DrawCore(DeviceContext context, in WorldPanelDraw draw, bool setScissor)
@@ -335,12 +295,6 @@ public sealed class WorldPanelRenderer : IDisposable
         context.PixelShader.SetShaderResource(1, null);
     }
 
-    /// <summary>Draws the panel inside the game's own render pass rather than during ImGui's.
-    ///
-    /// Differs from <see cref="Draw"/> in that nothing useful can be inherited: the game's blend,
-    /// depth and rasterizer state are whatever its last pass needed, so all three are set
-    /// explicitly. The render target is deliberately NOT set - the caller hooks the moment the
-    /// game binds the back buffer, and that binding is exactly what we want to draw into.</summary>
     public void DrawInScene(DeviceContext context, in WorldPanelDraw draw)
     {
         context.OutputMerger.SetBlendState(sceneBlendState, new SharpDX.Mathematics.Interop.RawColor4(0f, 0f, 0f, 0f), unchecked((int)0xFFFFFFFF));
@@ -365,18 +319,6 @@ public sealed class WorldPanelRenderer : IDisposable
         vertexShader.Dispose();
     }
 
-    /// <summary>
-    /// Caches a SharpDX wrapper around an ID3D11ShaderResourceView* we were handed rather than
-    /// created - the decoded video's view, and the game's own depth view - rebuilding it only when
-    /// the underlying pointer actually changes (a resolution change, essentially).
-    ///
-    /// Takes a real COM reference for the wrapper's lifetime instead of wrapping the raw pointer
-    /// bare. SharpDX's ComObject releases on Dispose and from its finalizer, so a wrapper built
-    /// without a matching AddRef would eventually hand back a reference we never owned - dropping
-    /// someone else's refcount, the kind of bug that surfaces much later as an unrelated
-    /// use-after-free. Same balance <see cref="RawTextureWrap"/> and
-    /// <see cref="SharedTextureBridge"/> already keep.
-    /// </summary>
     private sealed class BorrowedShaderResourceView : IDisposable
     {
         private ShaderResourceView? view;

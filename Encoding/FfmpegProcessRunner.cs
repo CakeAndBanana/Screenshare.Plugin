@@ -1,12 +1,7 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 
 namespace ScreenShare.Plugin.Encoding;
 
-/// <summary>
-/// Runs ffmpeg as a child process with redirected stdin/stdout. Chromium's native crashes in
-/// this same plugin took the whole game down with it; ffmpeg as a separate OS process cannot -
-/// worst case it exits and this wrapper surfaces that as an error, the game keeps running.
-/// </summary>
 public sealed class FfmpegProcessRunner : IDisposable
 {
     // Bounds how much stderr text ThrowIfFailed's error message can quote - just needs enough to
@@ -68,12 +63,6 @@ public sealed class FfmpegProcessRunner : IDisposable
         }
     }
 
-    /// <summary>Call once a reader observes EOF on <see cref="StandardOutput"/> while still
-    /// expecting more data - EOF alone doesn't distinguish "ffmpeg exited cleanly" from "ffmpeg
-    /// crashed/failed to initialize" (e.g. a hardware decode path failing on an unusual system),
-    /// which otherwise look identical from the reading side and would silently produce zero
-    /// output forever with no explanation. No-ops (returns normally) if the process hasn't
-    /// actually exited or exited with code 0.</summary>
     public void ThrowIfFailed()
     {
         if (LastError is { } drainError)

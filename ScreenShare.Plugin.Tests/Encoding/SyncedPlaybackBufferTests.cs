@@ -1,14 +1,8 @@
-using NAudio.Wave;
+﻿using NAudio.Wave;
 using ScreenShare.Plugin.Encoding;
 
 namespace ScreenShare.Plugin.Tests.Encoding;
 
-/// <summary>
-/// Drives SyncedPlaybackBuffer the way an output device would - Read() pulls bytes, and the
-/// "device playback position" is supplied by hand - so the master clock can be checked without a
-/// sound card. Every case here is one of the ways the old BufferedWaveProvider-plus-stopwatch
-/// clock silently desynced audio from video.
-/// </summary>
 public class SyncedPlaybackBufferTests
 {
     private const int SampleRate = 48000;
@@ -23,8 +17,6 @@ public class SyncedPlaybackBufferTests
     private static SyncedPlaybackBuffer NewBuffer(int maxBufferedMs = 200) =>
         new(WaveFormat.CreateIeeeFloatWaveFormat(SampleRate, Channels), maxBufferedMs);
 
-    /// <summary>One 20ms packet whose every byte is <paramref name="marker"/>, so consumed audio
-    /// can be identified by content as well as by timestamp.</summary>
     private static byte[] Packet(byte marker)
     {
         byte[] pcm = new byte[PacketBytes];
@@ -70,10 +62,6 @@ public class SyncedPlaybackBufferTests
         Assert.Equal(1030, buffer.GetPtsAtPlayedBytes(30 * BytesPerMs));
     }
 
-    /// <summary>The whole point of the rewrite. The device is handed audio well before it plays it
-    /// (measured at 176-289ms on a default WaveOutEvent), and the clock has to report what has been
-    /// HEARD, not what has been handed over - reporting the latter is a fixed, invisible offset
-    /// that put audio permanently ahead of where video thought it was.</summary>
     [Fact]
     public void GetPtsAtPlayedBytes_WithAudioStillInsideTheDevice_ReportsWhatWasHeardNotWhatWasHandedOver()
     {
@@ -87,8 +75,6 @@ public class SyncedPlaybackBufferTests
         Assert.Equal(1060, buffer.GetPtsAtPlayedBytes(60 * BytesPerMs));
     }
 
-    /// <summary>An underrun is audible silence, not elapsed content. A wall-clock estimate marched
-    /// straight through it and never came back; here the clock holds so video holds with it.</summary>
     [Fact]
     public void GetPtsAtPlayedBytes_InsideAnUnderrun_HoldsInsteadOfAdvancing()
     {
@@ -119,9 +105,6 @@ public class SyncedPlaybackBufferTests
         Assert.Equal(1505, buffer.GetPtsAtPlayedBytes(65 * BytesPerMs));
     }
 
-    /// <summary>Packets dropped upstream (the host and relay both have bounded drop-oldest audio
-    /// queues) leave a hole in the PTS timeline that no byte count can reveal. Carrying each
-    /// packet's own timestamp through to playback is what keeps the clock right across one.</summary>
     [Fact]
     public void GetPtsAtPlayedBytes_WithPacketsLostUpstream_FollowsTheTimestampsNotTheByteCount()
     {
@@ -165,8 +148,6 @@ public class SyncedPlaybackBufferTests
         Assert.Equal(1020, buffer.GetPtsAtPlayedBytes(0));
     }
 
-    /// <summary>Half a packet is dropped, so the survivor starts 10ms into its own timeline. The
-    /// clock has to reflect that, or every subsequent frame is 10ms out.</summary>
     [Fact]
     public void Add_DroppingPartOfAPacket_AdvancesThatPacketsPtsToMatch()
     {
@@ -179,9 +160,6 @@ public class SyncedPlaybackBufferTests
         Assert.Equal(1020, buffer.GetPtsAtPlayedBytes(10 * BytesPerMs));
     }
 
-    /// <summary>What happens while playback is held back waiting for video. Nothing drains the
-    /// buffer during that wait, so a buffer that kept the OLDEST audio would have playback later
-    /// begin there - the startup offset that made audio late by however long video took to start.</summary>
     [Fact]
     public void Add_WhilePlaybackIsHeldBack_LeavesPlaybackAtTheLiveEdge()
     {
@@ -231,9 +209,6 @@ public class SyncedPlaybackBufferTests
         Assert.Equal(7, scratch[^1]);
     }
 
-    /// <summary>A steady stream produces no discontinuities, so the segment bookkeeping must
-    /// collapse rather than grow with every Read - and the clock must stay exact across thousands
-    /// of them, since drift is precisely the failure being fixed.</summary>
     [Fact]
     public void GetPtsAtPlayedBytes_OverASustainedSteadyStream_StaysExact()
     {
@@ -255,8 +230,6 @@ public class SyncedPlaybackBufferTests
 
     // --- Adaptive depth ---
 
-    /// <summary>A packet of a constant known amplitude, so concealment output can be checked by
-    /// magnitude rather than merely by "not all zero".</summary>
     private static byte[] TonePacket(float amplitude = 0.5f)
     {
         float[] samples = new float[PacketBytes / sizeof(float)];
@@ -279,8 +252,6 @@ public class SyncedPlaybackBufferTests
         Assert.Equal(200, NewBuffer(maxBufferedMs: 200).TargetMilliseconds);
     }
 
-    /// <summary>An underrun is direct evidence the depth is too shallow for this link, so the
-    /// target grows rather than the buffer simply gapping again at the same depth next time.</summary>
     [Fact]
     public void Underrun_GrowsTheTarget()
     {
@@ -291,7 +262,6 @@ public class SyncedPlaybackBufferTests
         Assert.True(buffer.TargetMilliseconds > 200, $"expected growth, got {buffer.TargetMilliseconds}ms");
     }
 
-    /// <summary>Growth is bounded, or one bad patch would inflate latency without limit.</summary>
     [Fact]
     public void RepeatedUnderruns_StopGrowingAtACeiling()
     {
@@ -303,8 +273,6 @@ public class SyncedPlaybackBufferTests
         Assert.InRange(buffer.TargetMilliseconds, 201, 600);
     }
 
-    /// <summary>Latency inflated by a bad patch must come back down once the link settles, or a
-    /// brief problem early in a session would cost latency for the rest of it.</summary>
     [Fact]
     public void SustainedCleanPlayback_NarrowsTheTargetBackDown()
     {
@@ -325,8 +293,6 @@ public class SyncedPlaybackBufferTests
 
     // --- Underrun concealment ---
 
-    /// <summary>Silence is close to the most audible thing that can be inserted into a gap, so a
-    /// gap after real audio is filled with a decaying repeat of it instead.</summary>
     [Fact]
     public void Underrun_AfterRealAudio_ConcealsWithSignalRatherThanSilence()
     {
@@ -339,8 +305,6 @@ public class SyncedPlaybackBufferTests
         Assert.Contains(concealed, sample => MathF.Abs(sample) > 0.1f);
     }
 
-    /// <summary>Repeating indefinitely turns a dropout into a stuck-record buzz, which is worse
-    /// than the gap it replaced - so a long outage still ends up quiet.</summary>
     [Fact]
     public void Underrun_SustainedGap_DecaysToSilence()
     {
@@ -354,8 +318,6 @@ public class SyncedPlaybackBufferTests
         Assert.All(late, sample => Assert.True(MathF.Abs(sample) < 0.001f, $"expected silence, got {sample}"));
     }
 
-    /// <summary>Nothing has ever played, so there is nothing to repeat and silence is the only
-    /// honest answer - this is the very first read of a session.</summary>
     [Fact]
     public void Underrun_BeforeAnyAudio_IsSilent()
     {
@@ -364,8 +326,6 @@ public class SyncedPlaybackBufferTests
         Assert.All(samples, sample => Assert.Equal(0f, sample));
     }
 
-    /// <summary>Concealed audio is not real content, so the clock must hold through it exactly as
-    /// it did through silence - otherwise video marches past audio that was never sent.</summary>
     [Fact]
     public void Concealment_DoesNotAdvanceTheClock()
     {

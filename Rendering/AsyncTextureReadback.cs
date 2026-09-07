@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using SharpDX;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
@@ -6,38 +6,6 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Rendering;
 
-/// <summary>
-/// Reads a GPU texture back to CPU memory without ever blocking the calling thread.
-///
-/// The earlier <see cref="TextureReadback"/> did CopyResource immediately followed by
-/// Map(MapMode.Read), which forces the CPU to wait for the GPU to finish ALL pending work up to
-/// that copy - a real, synchronous stall. Doing this repeatedly from a background thread, on a
-/// large texture, while the game is also driving that same GPU continuously, is the leading
-/// theory for a DXGI_ERROR_DEVICE_REMOVED (Windows TDR) crash hit during testing.
-///
-/// This version fixes it two ways: (1) a ring of staging textures (depth 3 by default), so each
-/// Map() targets a copy queued multiple ticks ago rather than the one just issued, making a wait
-/// rarely necessary in the first place; (2) MapFlags.DoNotWait, which makes the Map itself
-/// incapable of blocking at all - if the GPU genuinely isn't done yet, it throws WasStillDrawing
-/// instead of stalling, and that tick is just skipped (dropping a frame is fine for live video;
-/// freezing the game is not).
-///
-/// Depth was bumped from 2 to 3 after real network streaming testing (game + relay + audio
-/// encode + WS I/O all running at once) showed a ~47% skip rate, well above the ~10-30% seen in
-/// the earlier local-only round-trip test - the extra tick of margin traded latency for headroom
-/// against that contention. It is back to 2 now that the documented "real fix" from that same
-/// note is actually in place: H264Encoder downscales on the GPU first, so this only ever transfers
-/// the encode resolution rather than the full native screen, and the contention that justified the
-/// third slot is gone. Each slot costs one frame interval of latency (~33ms at 30fps) on the host,
-/// paid by every viewer. If the host's "skipped" counter climbs again, this is the number to raise.
-///
-/// Each queued copy carries the timestamp of the moment it was made, and that timestamp comes back
-/// out with the frame it belongs to. Stamping at READ time instead - which is what the caller used
-/// to do - labels every frame with a moment BufferDepth-1 ticks after the content actually
-/// happened, so video is presented that much later than the audio it belongs with. That desync is
-/// invisible to any PTS-based check, because the timestamps are wrong together and stay internally
-/// consistent.
-/// </summary>
 public sealed class AsyncTextureReadback : IDisposable
 {
     private const int BufferDepth = 2;
@@ -82,15 +50,6 @@ public sealed class AsyncTextureReadback : IDisposable
         return new Texture2D(device, desc);
     }
 
-    /// <summary>Queues a copy of <paramref name="source"/> for this tick, and - if a copy queued
-    /// BufferDepth-1 ticks ago is ready - fills destination with it and returns true. Never
-    /// blocks; a false return just means try again next tick. Caller must ensure no other thread
-    /// touches this device's ImmediateContext concurrently.
-    ///
-    /// <paramref name="sourceTimestampMs"/> is when the frame being COPIED was captured;
-    /// <paramref name="frameTimestampMs"/> comes back as when the frame being RETURNED was
-    /// captured, which is several ticks earlier. Keeping those distinct is what stops video from
-    /// being timestamped later than it happened - see the class summary.</summary>
     public bool TryReadPrevious(Texture2D source, long sourceTimestampMs, byte[] destination, out long frameTimestampMs)
     {
         device.ImmediateContext.CopyResource(source, stagingTextures[writeIndex]);

@@ -10,28 +10,6 @@ using SizeInt32 = ScreenShare.Plugin.Capture.ScreenCapture.Interop.WindowsGraphi
 
 namespace ScreenShare.Plugin.Capture.ScreenCapture;
 
-/// <summary>
-/// Captures one specific top-level window via Windows.Graphics.Capture, into a persistent shared
-/// texture on our own device, refreshed continuously on a background thread - the window-capture
-/// counterpart to <see cref="DesktopDuplicationCapture"/> (which only ever captures a whole
-/// monitor). See <see cref="WindowsGraphicsCaptureInterop"/> for the raw interop this is built on.
-///
-/// Resizing the window mid-stream is handled rather than skipped, which is what makes a browser
-/// going fullscreen work: Windows.Graphics.Capture hands back frames at the frame pool's size, so
-/// the pool is recreated at the window's new size and the frame is then scaled into the SAME
-/// fixed-size texture this capture has always exposed.
-///
-/// Keeping that texture fixed is the point. Everything downstream is built around the size this
-/// reported at construction - the encoder holds a ShaderResourceView over this exact texture, its
-/// encode resolution was derived from it, and the viewer was told that resolution once when the
-/// stream started. Recreating the texture would dangle that view; renegotiating the resolution
-/// would mean restarting the stream, which is precisely the interruption being avoided. Scaling
-/// into a fixed target costs one GPU blit and nothing downstream notices.
-///
-/// The scale preserves aspect ratio and centres, so a window that changes shape gets bars rather
-/// than a stretched picture. DesktopDuplicationCapture still has the older limitation for a
-/// monitor resolution change.
-/// </summary>
 public sealed class WindowCapture : ICaptureSource
 {
     private readonly Device device;
@@ -46,9 +24,6 @@ public sealed class WindowCapture : ICaptureSource
     private volatile bool running;
     private long framesCaptured;
 
-    /// <summary>The frame pool's current size, which tracks the WINDOW - unlike <see cref="Width"/>
-    /// and <see cref="Height"/>, which stay fixed for the life of this capture. Touched only by the
-    /// capture thread.</summary>
     private int poolWidth;
     private int poolHeight;
 
@@ -82,8 +57,6 @@ public sealed class WindowCapture : ICaptureSource
                 Marshal.ReleaseComObject(item);
             }
 
-            // Retained for the life of the capture rather than released here: recreating the frame
-            // pool on a window resize needs this same device.
             direct3DDevicePtr = CreateDirect3DDeviceFromSharpDXDevice(device);
             nint framePoolPtr = CreateFreeThreadedFramePool(direct3DDevicePtr, Width, Height);
 
@@ -209,8 +182,6 @@ public sealed class WindowCapture : ICaptureSource
                 }
                 finally
                 {
-                    // Releases our own reference from TryGetNextFrame's [out] parameter -
-                    // separate from (and in addition to) ProcessFrame releasing its own RCW.
                     Marshal.Release(framePtr);
                 }
             }
@@ -233,8 +204,6 @@ public sealed class WindowCapture : ICaptureSource
 
             if (contentWidth != poolWidth || contentHeight != poolHeight)
             {
-                // This frame still came out of the old pool, so it is dropped and the next one
-                // arrives at the new size - one or two frames at a resize, not a dead stream.
                 RecreateFramePool(contentWidth, contentHeight);
                 return;
             }
@@ -249,9 +218,6 @@ public sealed class WindowCapture : ICaptureSource
                     nint texturePtr = access.GetInterface(ref textureIid);
                     using var frameTexture = new Texture2D(texturePtr);
 
-                    // The texture's own description rather than the size the pool was asked for -
-                    // this is what is actually being sampled, and CopyResource is only legal when
-                    // it matches the destination exactly.
                     Texture2DDescription description = frameTexture.Description;
 
                     if (description.Width == Width && description.Height == Height)
@@ -278,9 +244,6 @@ public sealed class WindowCapture : ICaptureSource
         }
         finally
         {
-            // Close() lives on IClosable, a separate interface/vtable from IDirect3D11CaptureFrame
-            // itself - QI'd via the direct interface-to-interface cast, same underlying RCW.
-            // Returns the frame's buffer to the pool for reuse; must happen before releasing frame.
             ((WindowsGraphicsCaptureInterop.IWinRTClosable)frame).Close();
             Marshal.ReleaseComObject(frame);
         }
@@ -295,15 +258,11 @@ public sealed class WindowCapture : ICaptureSource
         poolWidth = width;
         poolHeight = height;
 
-        // A resize used to be reported as a failure and is no longer one, so an older one must not
-        // be left standing in the UI.
         LastError = null;
         ServiceCollector.PluginLog.Information(
             $"ScreenShare's captured window resized to {width}x{height}; scaling it into the {Width}x{Height} stream.");
     }
 
-    /// <summary>Scales a differently-sized frame into the fixed target, preserving aspect ratio and
-    /// centring it - a window that changes shape gets bars rather than a stretched picture.</summary>
     private void BlitFitted(Texture2D frameTexture, int sourceWidth, int sourceHeight)
     {
         using var sourceView = new ShaderResourceView(device, frameTexture);
@@ -316,8 +275,6 @@ public sealed class WindowCapture : ICaptureSource
         {
             DeviceContext context = device.ImmediateContext;
 
-            // Cleared every frame, not just the first after a resize: the bars fall outside the
-            // blit's viewport, so nothing else ever writes them.
             context.ClearRenderTargetView(targetView, new RawColor4(0f, 0f, 0f, 1f));
             downscaler.BlitToViewport(
                 context, sourceView, targetView,
@@ -332,14 +289,11 @@ public sealed class WindowCapture : ICaptureSource
 
         try
         {
-            // Close() lives on IClosable, a separate interface/vtable from IGraphicsCaptureSession
-            // and IDirect3D11CaptureFramePool themselves - QI for it explicitly on each, same as
-            // the per-frame Close() in the capture loop.
             ((WindowsGraphicsCaptureInterop.IWinRTClosable)session).Close();
         }
         catch
         {
-            // best-effort - may already be torn down (e.g. the window closed mid-stream)
+            // Ignore exceptions during close; we're shutting down anyway.
         }
 
         try
@@ -348,6 +302,7 @@ public sealed class WindowCapture : ICaptureSource
         }
         catch
         {
+            // Ignore exceptions during close; we're shutting down anyway.
         }
 
         Marshal.ReleaseComObject(session);

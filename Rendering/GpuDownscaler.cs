@@ -5,23 +5,6 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Rendering;
 
-/// <summary>
-/// Downscales a texture entirely on the GPU (a full-screen triangle sampled with bilinear
-/// filtering into a smaller render target) instead of reading the full source resolution back to
-/// the CPU and letting ffmpeg's software scaler shrink it afterward.
-///
-/// This exists because AsyncTextureReadback's CPU transfer cost scales with the SOURCE
-/// (native screen) resolution regardless of the chosen encode resolution - confirmed as the
-/// likely cause of a skip-rate cliff under real streaming load (a ~47%-then-3% swing from
-/// triple-buffering alone wasn't enough once a 30fps target was requested, with skip rates
-/// reported near 90%). Shrinking on the GPU first means the CPU-bound readback only ever has to
-/// move the much smaller encode-resolution frame, which is the actual fix rather than a bigger
-/// buffer margin working around the same underlying cost.
-///
-/// No vertex/index buffer is needed - the classic "full-screen triangle from SV_VertexID alone"
-/// trick covers the whole viewport with a single triangle larger than the screen, clipped by the
-/// rasterizer, which is cheaper than a quad (2 triangles, shared edge) for this exact purpose.
-/// </summary>
 public sealed class GpuDownscaler : IDisposable
 {
     private const string ShaderSource = """
@@ -63,16 +46,9 @@ public sealed class GpuDownscaler : IDisposable
         sampler = new SamplerState(device, SamplerStateDescription.Default());
     }
 
-    /// <summary>Draws <paramref name="source"/> into <paramref name="destination"/> at the
-    /// destination's own size. Caller must hold the device's ImmediateContextLock - this issues
-    /// ordinary draw calls against the shared ImmediateContext just like any other GPU work here.</summary>
     public void Blit(DeviceContext context, ShaderResourceView source, RenderTargetView destination, int destWidth, int destHeight) =>
         BlitToViewport(context, source, destination, 0, 0, destWidth, destHeight);
 
-    /// <summary>Scales the whole source into a sub-rectangle of the destination, leaving the rest
-    /// of it untouched - so a source whose shape no longer matches can be fitted inside instead of
-    /// stretched to fill. Whatever the caller left outside the rectangle stays (clear it first for
-    /// letterbox bars).</summary>
     public void BlitToViewport(
         DeviceContext context, ShaderResourceView source, RenderTargetView destination,
         int x, int y, int width, int height)

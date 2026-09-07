@@ -5,26 +5,10 @@ using ScreenShare.Plugin.Rendering;
 
 namespace ScreenShare.Plugin.Services;
 
-/// <summary>The panel's world-space frame: centre plus half-extent axes, which is exactly the form
-/// <see cref="WorldPanelRenderer"/>'s vertex shader wants, and also what the speaker positions are
-/// derived from.</summary>
 public readonly record struct PanelFrame(Vector3 Center, Vector3 RightHalf, Vector3 UpHalf, Vector3 Right, Vector3 Forward);
 
-/// <summary>
-/// Per-frame glue for the in-world screen: turns a <see cref="ScreenPlacementInfo"/> plus the
-/// decoded video's aspect ratio into panel geometry, hands that to the renderer, and points the
-/// audio at the matching virtual speakers.
-///
-/// Owns the decision of whether the panel should be visible at all this frame. That decision has
-/// to be one place rather than scattered, because audio depends on it too: any frame the panel
-/// isn't drawn, playback must fall back to <see cref="SpeakerGains.Identity"/> rather than being
-/// left attenuated by a screen that's no longer on screen.
-/// </summary>
 public sealed class WorldScreenController : IDisposable
 {
-    /// <summary>How far in front of the player "Place here" drops the screen, and how high its
-    /// centre sits. A screen placed exactly on top of the player would be unusable, and one at
-    /// ground level looks like a rug.</summary>
     private const float PlaceDistanceMeters = 4f;
     private const float PlaceHeightMeters = 2f;
 
@@ -33,31 +17,24 @@ public sealed class WorldScreenController : IDisposable
     private ScenePanelHook? sceneHook;
     private bool sceneHookFailed;
 
-    /// <summary>How many times the game switched to the back buffer last frame, for tuning which
-    /// one the in-scene draw attaches to. Zero when the hook isn't running.</summary>
     public int LastFrameBackBufferSwitches => sceneHook?.LastFrameBackBufferSwitches ?? 0;
 
-    /// <summary>Whether the hook has fallen back to drawing in every render pass, because the
-    /// configured one kept failing to occur on this machine.</summary>
     public bool IsDrawingEveryPass => sceneHook?.IsDrawingEveryPass == true;
 
-    /// <summary>Frames where a panel was queued but never drawn - see ScenePanelHook.</summary>
     public int MissedPanelFrames => sceneHook?.MissedFrames ?? 0;
 
-    /// <summary>Why the hook fell back to every-pass drawing, or null if it hasn't.</summary>
     public string? EveryPassReason => sceneHook?.EscalationReason;
 
-    /// <summary>Whether the panel is currently being drawn underneath the game's UI.</summary>
     public bool IsDrawingUnderUi => sceneHook?.IsActive == true;
 
-    /// <summary>Whether the last frame actually put a panel in the world - not merely whether the
-    /// setting is on. The difference is everything the setting cannot tell you: no stream, no
-    /// placement, a placement belonging to another zone, or no camera. Callers use this to decide
-    /// whether the stream is still visible to the player somewhere other than the popout window.</summary>
+    public bool EditMode { get; set; }
+
+    public GizmoOperation GizmoOperation { get; set; } = GizmoOperation.Move;
+
+    public bool IsDraggingGizmo { get; private set; }
+
     public bool IsProjecting { get; private set; }
 
-    /// <summary>Draws the panel for this frame if it should be drawn, and sets the audio mix to
-    /// match either way. Call once per frame from the render thread.</summary>
     public void Update(
         GameAdapterDevice? device,
         RawTextureWrap? videoTexture,
@@ -93,6 +70,8 @@ public sealed class WorldScreenController : IDisposable
             return;
         }
 
+        placement = ApplyGizmo(roomSession, placement!, videoTexture, scene);
+
         PanelFrame frame = BuildFrame(placement!, videoTexture.Width, videoTexture.Height);
 
         UpdateAudio(config, placement!, frame, scene, mediaSession);
@@ -100,8 +79,47 @@ public sealed class WorldScreenController : IDisposable
         IsProjecting = true;
     }
 
-    /// <summary>Whether a panel should be drawn this frame, and which placement it uses. The
-    /// room's placement wins over the local fallback whenever it exists, so the two can't fight.</summary>
+    private ScreenPlacementInfo ApplyGizmo(
+        RoomSessionService roomSession, ScreenPlacementInfo placement, RawTextureWrap videoTexture, SceneView scene)
+    {
+        if (!EditMode || !CanPlace(roomSession))
+        {
+            if (IsDraggingGizmo)
+            {
+                WorldScreenGizmo.Reset();
+                IsDraggingGizmo = false;
+            }
+
+            return placement;
+        }
+
+        float aspect = videoTexture.Width > 0 ? (float)videoTexture.Height / videoTexture.Width : 9f / 16f;
+
+        WorldScreenGizmo.GizmoResult result = WorldScreenGizmo.Draw(
+            scene, placement, aspect, GizmoOperation, ImGui.GetIO().DisplaySize);
+
+        IsDraggingGizmo = result.IsDragging;
+
+        if (result.Finished)
+            ApplyPlacement(roomSession, result.Placement);
+
+        return result.Placement;
+    }
+
+    public static bool CanPlace(RoomSessionService roomSession) => !roomSession.InRoom || roomSession.CanPlaceScreen;
+
+    public static void ApplyPlacement(RoomSessionService roomSession, ScreenPlacementInfo? placement)
+    {
+        if (roomSession.InRoom)
+        {
+            roomSession.UpdateScreenPlacement(placement);
+            return;
+        }
+
+        ServiceCollector.Config.LocalScreenPlacement = placement;
+        ServiceCollector.PI.SavePluginConfig(ServiceCollector.Config);
+    }
+
     private static bool TryResolveVisible(
         Configuration config,
         RoomSessionService roomSession,
@@ -119,9 +137,6 @@ public sealed class WorldScreenController : IDisposable
         return placement.TerritoryType == ServiceCollector.ClientState.TerritoryType;
     }
 
-    /// <summary>Builds the panel's world frame. Height comes from the stream's own aspect ratio
-    /// rather than being stored, so switching capture resolution mid-session resizes the panel
-    /// instead of stretching the picture.</summary>
     public static PanelFrame BuildFrame(ScreenPlacementInfo placement, int textureWidth, int textureHeight)
     {
         float halfWidth = MathF.Max(placement.WidthMeters, 0.1f) * 0.5f;
@@ -141,15 +156,6 @@ public sealed class WorldScreenController : IDisposable
             forward);
     }
 
-    /// <summary>Speakers flank the panel's edges, pushed out by the spread setting - derived from
-    /// the placement every frame rather than stored, so they can never drift out of sync with the
-    /// screen they belong to.
-    ///
-    /// The LEFT channel sits on the panel's +X side. That looks backwards written down, and is the
-    /// same handedness that made the picture come out mirrored: the panel's +X axis points to the
-    /// viewer's left when seen from the side it faces. Assigning by the axis name instead would put
-    /// the left channel on the listener's right - the stereo image mirrored exactly as the video
-    /// was.</summary>
     public static (Vector3 Left, Vector3 Right) SpeakerPositions(ScreenPlacementInfo placement, in PanelFrame frame)
     {
         Vector3 offset = frame.Right * (frame.RightHalf.Length() + MathF.Max(placement.SpeakerSpread, 0f));
@@ -229,9 +235,6 @@ public sealed class WorldScreenController : IDisposable
         panelDispatch!.Submit(in draw);
     }
 
-    /// <summary>Builds the render hook on first use. A failure disables it for the session rather
-    /// than being retried every frame - installing a hook is not something that becomes more likely
-    /// to work on the tenth attempt, and the log line would repeat forever.</summary>
     private bool TryGetSceneHook(GameAdapterDevice device, out ScenePanelHook? hook)
     {
         hook = sceneHook;
@@ -254,10 +257,6 @@ public sealed class WorldScreenController : IDisposable
         }
     }
 
-    /// <summary>Which view the panel paints, given the current settings and a usable depth buffer.
-    /// Public and static so the UI can report exactly what the renderer is doing rather than
-    /// re-deriving it and risking the two disagreeing - the whole point of a diagnostic is that it
-    /// can be trusted.</summary>
     public static PanelDepthMode ResolveDepthMode(Configuration config) => config.WorldScreenDiagnostic switch
     {
         >= 3 => PanelDepthMode.ShowOcclusionTest,
@@ -266,22 +265,10 @@ public sealed class WorldScreenController : IDisposable
         _ => config.WorldScreenDepthTest ? PanelDepthMode.Occlude : PanelDepthMode.None,
     };
 
-    /// <summary>Whether the game's depth buffer runs near = 1, far = 0. Everything about the
-    /// occlusion test follows from this one fact, which is why it is a single setting rather than
-    /// separate knobs for the conversion and the comparison direction - those must always agree,
-    /// and letting them be set independently produced a state where the panel vanished entirely.</summary>
     public static bool SceneUsesReversedZ(Configuration config) => !config.WorldScreenStandardDepth;
 
-    /// <summary>Which way round the occlusion comparison runs. Standard Z puts near at 0, so a
-    /// smaller depth is nearer and the panel survives where the scene is further away; reversed Z
-    /// inverts that, and so does the sign. Derived from the same setting as the range conversion
-    /// because the two are the same fact seen twice.</summary>
     public static float DepthSign(Configuration config) => SceneUsesReversedZ(config) ? -1f : 1f;
 
-    /// <summary>Builds the renderer on first use - it needs the game device, which doesn't exist
-    /// until a watch session has started. A construction failure (shader compile, out of memory)
-    /// disables the in-world screen for the session rather than being retried every frame, which
-    /// would mean one log line per frame forever.</summary>
     private bool TryGetDispatch(GameAdapterDevice device, out WorldPanelDispatch? panelDispatch)
     {
         panelDispatch = dispatch;
@@ -304,9 +291,6 @@ public sealed class WorldScreenController : IDisposable
         }
     }
 
-    /// <summary>Drops the renderer and its GPU resources - called when the device is being torn
-    /// down (device-removed recovery, or plugin unload), after which the next frame that wants a
-    /// panel rebuilds it against whatever device exists then.</summary>
     public void ReleaseDevice()
     {
         dispatch?.Dispose();
@@ -317,8 +301,6 @@ public sealed class WorldScreenController : IDisposable
         sceneHookFailed = false;
     }
 
-    /// <summary>Builds the placement for "Place here": a screen standing in front of the player,
-    /// turned to face them.</summary>
     public static ScreenPlacementInfo? PlaceInFrontOfPlayer(ScreenPlacementInfo? existing)
     {
         if (ServiceCollector.Objects.LocalPlayer is not { } player)
@@ -348,10 +330,6 @@ public sealed class WorldScreenController : IDisposable
             Version: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
     }
 
-    /// <summary>Shifts a placement along the panel's OWN axes rather than world X/Z, so "left" and
-    /// "forward" mean what they look like from in front of the screen however it happens to be
-    /// rotated. Sideways is negated for the same handedness reason as the speakers and the picture:
-    /// the panel's +X points to the viewer's left.</summary>
     public static ScreenPlacementInfo Nudge(ScreenPlacementInfo placement, float sidewaysMeters, float forwardMeters)
     {
         PanelFrame frame = BuildFrame(placement, 16, 9);

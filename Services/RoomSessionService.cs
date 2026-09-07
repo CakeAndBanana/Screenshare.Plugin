@@ -1,21 +1,10 @@
-using Microsoft.AspNetCore.SignalR.Client;
+﻿using Microsoft.AspNetCore.SignalR.Client;
 using ScreenShare.Plugin.Networking;
 
 namespace ScreenShare.Plugin.Services;
 
-/// <summary>One entry in a room's event history - see <see cref="RoomSessionService.Events"/>.
-/// Timestamped in local time because its only consumer is the UI, which shows it to a human
-/// sitting at this machine.</summary>
 public readonly record struct RoomEvent(DateTime TimestampLocal, string Message);
 
-/// <summary>
-/// Owns the relay connection and room state for the UI. Every public action method here fires
-/// its async work and returns immediately - safe to call directly from Draw(). Status is
-/// exposed via plain fields the UI polls each frame; a frame or two of staleness is invisible
-/// to a human, so this favors simplicity over strict memory-visibility guarantees. The one thing
-/// that must never happen is a blocking wait on the render thread, which this design avoids by
-/// construction (no method here returns a Task the caller is expected to await).
-/// </summary>
 public sealed class RoomSessionService : IDisposable
 {
     private readonly RoomHubClient client = new();
@@ -37,11 +26,8 @@ public sealed class RoomSessionService : IDisposable
     // the password around long enough to survive past the initial Create/Join button click.
     private string? lastRoomPassword;
 
-    /// <summary>False until the first active-streamer list of this room has been seen - see
-    /// <see cref="RecordStreamerChanges"/>. Reset when leaving so a later room starts fresh.</summary>
     private bool hasStreamerBaseline;
 
-    /// <summary>The watcher-list equivalent of <see cref="hasStreamerBaseline"/>.</summary>
     private bool hasWatcherBaseline;
 
     public string ConnectionStatus { get; private set; } = "Disconnected";
@@ -50,15 +36,8 @@ public sealed class RoomSessionService : IDisposable
 
     public string? ConnectionId => client.ConnectionId;
 
-    /// <summary>Which relay instance this client is actually talking to right now - always
-    /// populated once CreateRoom/JoinRoom has succeeded at least once (a single-instance
-    /// deployment just always reports the same one). Surfaced in the UI so the user can see which
-    /// physical relay process they ended up on, e.g. after a multi-instance redirect.</summary>
     public string? InstanceId => client.InstanceId;
 
-    /// <summary>The relay URL this client is currently connected to - may differ from what the
-    /// user originally typed into the Connect screen if JoinRoom had to follow a cross-instance
-    /// redirect.</summary>
     public string? RelayUrl => client.RelayUrl;
 
     public string? RoomId { get; private set; }
@@ -67,34 +46,18 @@ public sealed class RoomSessionService : IDisposable
 
     public bool InRoom => RoomId is not null;
 
-    /// <summary>Whether THIS client has been granted permission to stream - distinct from
-    /// <see cref="IsHost"/> (the owner can always stream) and from any other member's own
-    /// permission (tracked per-entry in <see cref="Members"/>).</summary>
     public bool CanStream { get; private set; }
 
     public bool CanStartStreaming => IsHost || CanStream;
 
-    /// <summary>Where the room's shared in-world screen is placed, or null if nobody has placed
-    /// one. Read every frame by the render path, written from a SignalR callback thread, so it's a
-    /// plain reference field holding an immutable record - a torn read is impossible and a frame of
-    /// staleness is invisible, matching how the rest of this class exposes state.</summary>
     public ScreenPlacementInfo? ScreenPlacement { get; private set; }
 
-    /// <summary>Whether this client may place or move the shared screen. Deliberately the same
-    /// permission as streaming (the relay authorizes UpdateScreenPlacement against CanStream, not
-    /// host-only) - arranging the screen is part of running a viewing session.</summary>
     public bool CanPlaceScreen => CanStartStreaming;
 
     public string? LastError { get; private set; }
 
-    /// <summary>The most recent entry of <see cref="Events"/>, kept as its own property for the
-    /// connect/lobby screens, which have no room for a history and only ever wanted the latest
-    /// line.</summary>
     public string? LastEvent { get; private set; }
 
-    /// <summary>The room's event history, oldest first, capped at <see cref="MaxLoggedEvents"/>.
-    /// Snapshotted under a lock on every read for the same reason Members/Watchers are: entries
-    /// are appended from SignalR callbacks on background threads and read from the render thread.</summary>
     public IReadOnlyList<RoomEvent> Events
     {
         get
@@ -110,14 +73,6 @@ public sealed class RoomSessionService : IDisposable
             events.Clear();
     }
 
-    /// <summary>Single funnel for everything that reaches the event log, so a new event source
-    /// can't update the latest line without also landing in the history.</summary>
-    /// <summary>Turns the relay's full active-streamer list into "started"/"stopped" events.
-    ///
-    /// The relay broadcasts the whole list rather than a delta - and re-sends it on join and on
-    /// reconnect - so who actually changed has to be worked out here. The first list after joining
-    /// is treated as a baseline rather than a set of transitions: those people were already live
-    /// before we arrived, and announcing them as having just started would be wrong.</summary>
     private void RecordStreamerChanges(List<ActiveStreamerInfo> previous, IReadOnlyCollection<ActiveStreamerInfo> current)
     {
         foreach (ActiveStreamerInfo streamer in current)
@@ -139,12 +94,6 @@ public sealed class RoomSessionService : IDisposable
         hasStreamerBaseline = true;
     }
 
-    /// <summary>Same shape as <see cref="RecordStreamerChanges"/>, over the watcher list: a full
-    /// snapshot each time, so transitions are derived by diffing.
-    ///
-    /// Keyed on the WATCHER rather than the pair, so someone switching directly from one streamer
-    /// to another reads as a single "started watching" line instead of a stop immediately followed
-    /// by a start.</summary>
     private void RecordWatcherChanges(List<WatcherInfo> previous, IReadOnlyCollection<WatcherInfo> current)
     {
         foreach (WatcherInfo watcher in current)
@@ -169,19 +118,12 @@ public sealed class RoomSessionService : IDisposable
         hasWatcherBaseline = true;
     }
 
-    /// <summary>Falls back to "someone" rather than showing a raw connection id - these broadcasts
-    /// can arrive fractionally before the member list that explains who the id belongs to.</summary>
     private string DisplayNameFor(string connectionId)
     {
         lock (membersLock)
             return members.FirstOrDefault(m => m.ConnectionId == connectionId)?.DisplayName ?? "someone";
     }
 
-    /// <summary>Adds a room to the recent list, newest first. Recorded only on SUCCESS - a code
-    /// that was rejected or a password that was wrong is not worth offering back as a shortcut.
-    ///
-    /// Keyed on relay URL AND code together, because a code only means anything on the relay that
-    /// issued it. Re-recording an existing entry moves it to the front rather than duplicating it.</summary>
     private static void RememberRoom(string roomId, string password, bool wasHost)
     {
         const int maxRemembered = 8;
@@ -224,9 +166,6 @@ public sealed class RoomSessionService : IDisposable
         }
     }
 
-    /// <summary>Every current room member, host included - <see cref="RoomMemberInfo.IsHost"/>
-    /// and <see cref="RoomMemberInfo.CanStream"/> tell the UI which icon(s)/actions apply to
-    /// each row.</summary>
     public IReadOnlyList<RoomMemberInfo> Members
     {
         get
@@ -245,9 +184,6 @@ public sealed class RoomSessionService : IDisposable
         }
     }
 
-    /// <summary>Every current watcher-to-streamer pairing in the room - lets the UI show an eye
-    /// icon next to whoever's currently watching a stream, and (via a lookup on WatcherConnectionId)
-    /// which streamer's feed they're on.</summary>
     public IReadOnlyList<WatcherInfo> Watchers
     {
         get
@@ -565,9 +501,6 @@ public sealed class RoomSessionService : IDisposable
         }
     }
 
-    /// <summary>Places, moves, or (with null) clears the room's shared screen. No-ops rather than
-    /// erroring when this client isn't permitted - the UI already disables the controls, and the
-    /// relay re-checks anyway, so this is just the third layer of the same guard.</summary>
     public void UpdateScreenPlacement(ScreenPlacementInfo? placement)
     {
         if (RoomId is not { } roomId || !CanPlaceScreen)

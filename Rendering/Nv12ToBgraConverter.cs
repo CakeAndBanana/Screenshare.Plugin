@@ -1,4 +1,4 @@
-using SharpDX.D3DCompiler;
+﻿using SharpDX.D3DCompiler;
 using SharpDX.DXGI;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
@@ -6,20 +6,6 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Rendering;
 
-/// <summary>
-/// Turns an NV12 texture into BGRA on the GPU - the inverse of <see cref="Nv12Converter"/>, and
-/// what lets the Media Foundation decoder's output reach the display without ever touching the CPU.
-///
-/// A hardware decoder emits NV12 D3D11 textures. Everything that displays a frame here - the popout
-/// window's ImGui image, the in-world panel - samples one BGRA shared texture. Converting on the
-/// GPU is what joins those two facts: the alternative is reading NV12 back, converting on the CPU,
-/// and uploading again, which is precisely the round trip the Media Foundation decoder exists to
-/// delete.
-///
-/// The two planes are read through separate shader resource views over the same texture (R8 for
-/// luma, R8G8 for the half-resolution chroma), the mirror of how Nv12Converter writes them through
-/// two render target views.
-/// </summary>
 public sealed class Nv12ToBgraConverter : IDisposable
 {
     // BT.709 studio range, inverted from the encode side's matrix so the two round-trip. The
@@ -87,8 +73,6 @@ public sealed class Nv12ToBgraConverter : IDisposable
         });
     }
 
-    /// <summary>The pair of views an NV12 texture is read through. Created once per texture and
-    /// kept, rather than per frame - the decoder reuses a small ring of them.</summary>
     public static (ShaderResourceView Luma, ShaderResourceView Chroma) CreateViews(Device device, Texture2D nv12)
     {
         var luma = new ShaderResourceView(device, nv12, new ShaderResourceViewDescription
@@ -116,8 +100,6 @@ public sealed class Nv12ToBgraConverter : IDisposable
         }
     }
 
-    /// <summary>Converts one NV12 frame into <paramref name="destination"/>. Caller holds the
-    /// device's ImmediateContextLock, same as every other GPU pass here.</summary>
     public void Convert(
         DeviceContext context,
         ShaderResourceView luma,

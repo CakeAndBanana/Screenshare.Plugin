@@ -4,26 +4,6 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace MediaProbe;
 
-/// <summary>
-/// Runs the decode path for as long as you like and watches the things that only go wrong slowly.
-///
-/// Built after a ~2.5 hour session lost a third of its frames. That turned out not to be a leak -
-/// the display side was throttling itself - but the session took two and a half hours to say so, and
-/// this compresses the same run into minutes of wall clock by decoding as fast as the hardware will
-/// go rather than at 30fps.
-///
-/// Four things are sampled, and between them they separate the failures that look identical from
-/// outside (frames stop arriving):
-///
-/// - free slots     - the pool running dry is the only way this loop loses a frame on its own.
-/// - handles        - a COM reference leaked per frame shows here long before anything else breaks.
-/// - private bytes  - the whole process, managed and native together.
-/// - managed heap    - reported beside it, because the two answer different questions: private bytes
-///                     climbing while the managed heap stays flat means COM objects or native
-///                     buffers, whereas the two climbing together usually means nothing at all,
-///                     since the GC is entitled to let a heap grow before collecting it.
-/// - decode rate    - the summary number; a leak elsewhere still eventually shows up as this falling.
-/// </summary>
 internal static class Soak
 {
     public static int Run(Device device, string ffmpegExePath, string workDirectory, int width, int height, int frames, int slotCount)

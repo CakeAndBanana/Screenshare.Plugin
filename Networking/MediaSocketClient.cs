@@ -1,4 +1,4 @@
-using System.Net.WebSockets;
+﻿using System.Net.WebSockets;
 using System.Threading.Channels;
 using ScreenShare.Plugin.Encoding;
 
@@ -9,34 +9,11 @@ public enum MediaMessageType : byte
     Video = 0,
     Audio = 1,
 
-    /// <summary>Sent once by the host at stream start: int32 width + int32 height + 1-byte
-    /// VideoCodec + uint16 target fps (little-endian). A viewer has no other way to know the
-    /// host's chosen capture/encode resolution, codec, or target frame rate before the first
-    /// video chunk arrives - width/height/codec size the decoded-frame buffer/texture and pick
-    /// the right ffmpeg decode format, and fps paces the viewer's own presentation buffer (see
-    /// H264Decoder's display loop) at the same rate frames are actually meant to be shown.</summary>
     VideoMetadata = 2,
 
-    /// <summary>Sent once by the host at stream start: int32 sample rate + int32 channel count
-    /// (little-endian) - the Opus decoder must be constructed with the exact same values the
-    /// encoder used.</summary>
     AudioMetadata = 3,
 }
 
-/// <summary>
-/// Thin wrapper around a raw WebSocket connection to ScreenShare.Relay's media-plane endpoint -
-/// deliberately separate from <see cref="RoomHubClient"/>'s SignalR connection, mirroring the
-/// relay's own control-plane/media-plane split (see RoomHub's doc comment) so a large media
-/// stream can never delay a control message like "kick".
-///
-/// <see cref="Send"/> is safe to call from any thread - including encoder callback threads - and
-/// never blocks: it just enqueues onto a bounded, drop-oldest channel that a single background
-/// task drains into the socket. ClientWebSocket does not allow concurrent SendAsync calls, so
-/// funneling every send through one queue/task is required, not just a nicety. Dropping under
-/// backpressure mirrors the same tradeoff already made for the local encoder/decoder relay in
-/// H264RoundTripValidator: an occasional skip is fine for live video, blocking a capture/encode
-/// thread on network I/O is not.
-/// </summary>
 public sealed class MediaSocketClient : IAsyncDisposable
 {
     private const int SendQueueCapacity = 512;
@@ -85,23 +62,12 @@ public sealed class MediaSocketClient : IAsyncDisposable
     private long droppedMessages;
     private long droppedAudioMessages;
 
-    /// <summary>How many outbound VIDEO chunks this socket has had to drop because sendQueue
-    /// filled up faster than SendLoopAsync could push them over the wire - i.e. the network
-    /// couldn't keep up with encode rate. Does not include audio (see <see cref="DroppedAudioMessages"/>,
-    /// tracked separately since the two no longer share a queue).</summary>
     public long DroppedMessages => Interlocked.Read(ref droppedMessages);
 
-    /// <summary>How many outbound AUDIO packets got dropped from audioQueue specifically - tracked
-    /// separately from <see cref="DroppedMessages"/> now that audio has its own queue, so a
-    /// stuttery-audio report can be attributed to the right side of the pipeline.</summary>
     public long DroppedAudioMessages => Interlocked.Read(ref droppedAudioMessages);
 
-    /// <summary>PTS (milliseconds since the host's shared session clock started) followed by the
-    /// raw chunk bytes - see MediaSessionService/H264Decoder for how this drives A/V sync.</summary>
     public event Action<long, byte[]>? VideoChunkReceived;
 
-    /// <summary>Same PTS convention as <see cref="VideoChunkReceived"/>, on the same shared clock -
-    /// this is what makes the two comparable at all.</summary>
     public event Action<long, byte[]>? AudioPacketReceived;
 
     public event Action<int, int, VideoCodec, int>? VideoMetadataReceived;
@@ -112,15 +78,6 @@ public sealed class MediaSocketClient : IAsyncDisposable
 
     public bool IsConnected => socket?.State == WebSocketState.Open;
 
-    /// <summary>
-    /// <paramref name="isStreamer"/> selects the role query value the relay authorizes via
-    /// RoomState.CanStream (owner or someone the owner granted permission to - "streamer" rather
-    /// than "host" now that streaming isn't owner-exclusive). A viewer must also pass
-    /// <paramref name="streamerConnectionId"/>, since a room can have more than one active
-    /// streamer at once and the relay routes each streamer's bytes through an independent
-    /// per-streamer channel (see MediaRelay on the relay) - a viewer subscribes to exactly the
-    /// one they picked to watch.
-    /// </summary>
     public async Task ConnectAsync(
         string relayUrl, string roomId, string connectionId, bool isStreamer,
         string? streamerConnectionId = null, CancellationToken cancellationToken = default)
@@ -136,8 +93,6 @@ public sealed class MediaSocketClient : IAsyncDisposable
         receiveLoopTask = Task.Run(() => ReceiveLoopAsync(newSocket, cts.Token), cancellationToken);
     }
 
-    /// <summary>Derives the media endpoint from the control-plane hub URL (same origin, ws(s)
-    /// scheme, /media/{roomId} path) rather than asking callers to track two separate URLs.</summary>
     private static Uri BuildMediaUri(string relayUrl, string roomId, string connectionId, bool isStreamer, string? streamerConnectionId)
     {
         var hubUri = new Uri(relayUrl, UriKind.Absolute);
@@ -157,10 +112,6 @@ public sealed class MediaSocketClient : IAsyncDisposable
         return builder.Uri;
     }
 
-    /// <summary>Never blocks - see the class doc comment for why. Safe to call from encoder
-    /// callback threads. Routes each message type onto its own queue - metadata (never-drop,
-    /// highest priority), audio (drop-oldest but isolated from video), video (drop-oldest, the
-    /// one meant to absorb backpressure) - see each queue field's own doc comment for why.</summary>
     public void Send(MediaMessageType type, byte[] payload)
     {
         byte[] framed = new byte[payload.Length + 1];
@@ -191,12 +142,8 @@ public sealed class MediaSocketClient : IAsyncDisposable
         sendQueue.Writer.TryWrite(framed);
     }
 
-    /// <summary>Prepends an 8-byte little-endian PTS (milliseconds since the host's shared
-    /// session clock started - see MediaSessionService) before the raw chunk bytes, so a viewer
-    /// can compare video and audio timing directly instead of only synchronizing playback start.</summary>
     public void SendVideoChunk(long ptsMs, byte[] chunk) => Send(MediaMessageType.Video, WithPts(ptsMs, chunk));
 
-    /// <summary>Same PTS convention as <see cref="SendVideoChunk"/>, on the same shared clock.</summary>
     public void SendAudioPacket(long ptsMs, byte[] packet) => Send(MediaMessageType.Audio, WithPts(ptsMs, packet));
 
     private static byte[] WithPts(long ptsMs, byte[] data)

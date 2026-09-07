@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using ScreenShare.Plugin.Services;
 using RenderCamera = FFXIVClientStructs.FFXIV.Client.Graphics.Render.Camera;
 using RenderTargetManager = FFXIVClientStructs.FFXIV.Client.Graphics.Render.RenderTargetManager;
@@ -6,11 +6,10 @@ using SceneCameraManager = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.Camera
 
 namespace ScreenShare.Plugin.Rendering;
 
-/// <summary>The game's current camera, in the form the world panel's vertex shader needs.
-/// <see cref="StandardZ"/> reports the depth convention: true means near maps to 0 and far to 1,
-/// false means the reversed-Z arrangement, which flips the direction of every depth comparison.</summary>
 public readonly record struct SceneView(
     Matrix4x4 ViewProjection,
+
+    Matrix4x4 View,
     Matrix4x4 Projection,
     Vector3 CameraPosition,
     Vector3 CameraForward,
@@ -18,29 +17,13 @@ public readonly record struct SceneView(
     float NearPlane,
     float FarPlane);
 
-/// <summary>The game's scene depth buffer as something bindable. <see cref="Width"/>/<see cref="Height"/>
-/// are the DEPTH texture's own size, which is not the backbuffer's whenever the player has the 3D
-/// resolution scale off 100% - the shader samples by normalized UV precisely so that mismatch
-/// doesn't matter, and these are carried only for diagnostics.</summary>
 public readonly record struct SceneDepthBuffer(nint ShaderResourceView, int Width, int Height);
 
-/// <summary>
-/// The one and only place this plugin touches FFXIVClientStructs. Kept deliberately narrow: those
-/// struct layouts are reverse-engineered and can shift on any game patch, so containing every
-/// pointer walk here means a patch break disables the in-world screen instead of taking the plugin
-/// (capture, encode, relay, the ImGui window) down with it.
-///
-/// Every accessor returns null rather than throwing. That isn't defensive padding - loading
-/// screens, character select, cutscene transitions and the frames right after a device reset all
-/// legitimately have no current camera or no allocated depth buffer, and they happen constantly.
-/// </summary>
 public static unsafe class GameSceneCamera
 {
     private static bool loggedViewFailure;
     private static bool loggedDepthFailure;
 
-    /// <summary>Must only be called from the render thread (UiBuilder.Draw or an ImGui draw
-    /// callback) - it dereferences live game state with no synchronization of its own.</summary>
     public static SceneView? TryGetView()
     {
         SceneCameraManager* manager = SceneCameraManager.Instance();
@@ -92,6 +75,7 @@ public static unsafe class GameSceneCamera
 
         return new SceneView(
             view * projection,
+            view,
             projection,
             new Vector3(render->Origin.X, render->Origin.Y, render->Origin.Z),
             forward,
@@ -100,10 +84,6 @@ public static unsafe class GameSceneCamera
             render->FarPlane);
     }
 
-    /// <summary>The scene depth buffer for the frame currently being presented. Whether it still
-    /// holds this frame's depth at the point ImGui renders is the one thing about the in-world
-    /// screen that can't be settled by reading code - see the depth-buffer diagnostic in
-    /// SettingsWindow, which draws it to screen so it can be confirmed by eye.</summary>
     public static SceneDepthBuffer? TryGetSceneDepth()
     {
         RenderTargetManager* manager = RenderTargetManager.Instance();

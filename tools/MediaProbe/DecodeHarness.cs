@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using ScreenShare.Plugin.Encoding;
 using ScreenShare.Plugin.Encoding.Interop;
@@ -11,18 +11,6 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace MediaProbe;
 
-/// <summary>
-/// The Media Foundation decode loop from MediaFoundationVideoDecoder, minus everything that needs
-/// the game: no Dalamud, no GameAdapterDevice, no audio clock, no presentation scheduler.
-///
-/// It calls the plugin's OWN interop and its OWN NV12-to-BGRA shader, so a change to either shows up
-/// here. What it necessarily reimplements is the loop around them - activation, type negotiation,
-/// ProcessInput/ProcessOutput, the stream-change renegotiation, the DXGI buffer unwrap, and the slot
-/// pool - because the real class is built around a device it cannot construct outside the game.
-///
-/// Keep this in step with MediaFoundationVideoDecoder.DecodeLoop/CaptureFrame. If they diverge, this
-/// harness is soaking something the plugin no longer does.
-/// </summary>
 internal sealed class DecodeHarness : IDisposable
 {
     private readonly Device device;
@@ -48,14 +36,10 @@ internal sealed class DecodeHarness : IDisposable
 
     public int FreeSlots => freeSlots.Count;
 
-    /// <summary>Frames the decoder produced that had nowhere to go. In the plugin this is the only
-    /// way a frame is lost without the network being involved, so it is the number a soak watches.</summary>
     public long SlotStarvations { get; private set; }
 
     public long StreamChanges { get; private set; }
 
-    /// <summary>The decoder's output texture dimensions and array size as first observed - padded
-    /// and array-backed on real hardware, which is what the region copy exists for.</summary>
     public string OutputShape { get; private set; } = "(nothing decoded yet)";
 
     public DecodeHarness(Device device, int width, int height, int slotCount, VideoCodec codec)
@@ -176,8 +160,6 @@ internal sealed class DecodeHarness : IDisposable
         throw new NotSupportedException("The decoder offers no NV12 output.");
     }
 
-    /// <summary>Feeds one access unit and presents everything it produces. Returns how many frames
-    /// were shown, so a caller can measure throughput without tracking state itself.</summary>
     public int SubmitAndDrain(byte[] accessUnit, long ptsMs)
     {
         MediaBuffer buffer = MediaFactory.CreateMemoryBuffer(accessUnit.Length);

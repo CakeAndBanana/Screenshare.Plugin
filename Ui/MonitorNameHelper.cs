@@ -1,25 +1,8 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using ScreenShare.Plugin.Services;
 
 namespace ScreenShare.Plugin.Ui;
 
-/// <summary>
-/// Resolves a monitor's real friendly name (e.g. "Dell U2720Q") for the GDI device name DXGI
-/// reports (e.g. "\\.\DISPLAY1") - DXGI's own OutputDescription only ever exposes that cryptic
-/// device path, never anything human-readable. Windows' Connecting and Configuring Displays (CCD)
-/// API is the actual purpose-built way to get this (it's what the Display Settings page itself
-/// uses): QueryDisplayConfig enumerates active display "paths", each pairing a source (the GDI
-/// device name) with a target (the physical monitor, whose EDID-derived friendly name is fetched
-/// via a separate DisplayConfigGetDeviceInfo call) - joining the two by path gives exactly the
-/// "\\.\DISPLAYn" -&gt; friendly-name mapping needed here.
-///
-/// Every struct field offset/size below was computed from Microsoft's own official struct
-/// definitions (wingdi.h/winuser.h, fetched from learn.microsoft.com) rather than guessed, matching
-/// this project's established practice for native interop. DISPLAYCONFIG_MODE_INFO's own contents
-/// are never read (only used as an output buffer QueryDisplayConfig requires) - it's declared as an
-/// opaque 64-byte blob rather than replicating its full internal union, since only its correct total
-/// size matters for marshaling.
-/// </summary>
 internal static class MonitorNameHelper
 {
     private const uint QDC_ONLY_ACTIVE_PATHS = 0x00000002;
@@ -129,10 +112,6 @@ internal static class MonitorNameHelper
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int DisplayConfigGetDeviceInfo(ref DISPLAYCONFIG_TARGET_DEVICE_NAME deviceName);
 
-    /// <summary>Maps GDI device name (e.g. "\\.\DISPLAY1", matching SharpDX.DXGI.OutputDescription.
-    /// DeviceName exactly) to the monitor's real friendly name - empty if the CCD API call failed
-    /// for any reason (never throws; this is a purely cosmetic lookup, and the caller already has
-    /// a perfectly functional fallback label).</summary>
     public static Dictionary<string, string> TryGetFriendlyNames()
     {
         var result = new Dictionary<string, string>();

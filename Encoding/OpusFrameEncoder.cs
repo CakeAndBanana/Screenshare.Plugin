@@ -1,12 +1,8 @@
-using Concentus;
+﻿using Concentus;
 using Concentus.Enums;
 
 namespace ScreenShare.Plugin.Encoding;
 
-/// <summary>
-/// Buffers arbitrary-length interleaved float PCM (as WASAPI delivers it) into Opus's
-/// fixed-size frames and encodes each complete frame as it fills up.
-/// </summary>
 public sealed class OpusFrameEncoder
 {
     private const int MaxPacketBytes = 4000;
@@ -19,18 +15,12 @@ public sealed class OpusFrameEncoder
 
     public int Channels { get; }
 
-    /// <summary>Live-adjustable - Opus supports changing bitrate mid-stream without recreating
-    /// the encoder, so a UI slider can just set this directly.</summary>
     public int Bitrate
     {
         get => encoder.Bitrate;
         set => encoder.Bitrate = value;
     }
 
-    /// <summary>PTS (milliseconds on the same shared session clock H264Encoder uses) alongside
-    /// each packet - see OpusFrameEncoder.Feed. Approximated as the timestamp of whichever Feed()
-    /// call happened to complete this packet's accumulator, which given a 20ms frame size is
-    /// accurate enough for A/V sync purposes (well under the sync tolerance H264Decoder applies).</summary>
     public event Action<long, byte[]>? PacketEncoded;
 
     public OpusFrameEncoder(int sampleRate, int channels, int frameMilliseconds = 20, int bitrate = 32000)

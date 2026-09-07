@@ -23,9 +23,6 @@ public sealed class ShareWindow : Window, IDisposable
     private GameAdapterDevice? device;
     private ICaptureSource? screenCapture;
 
-    /// <summary>True only while the CURRENT audio capture was started by streaming rather than by
-    /// the user clicking the audio button. Stopping the stream undoes an auto-start, but must
-    /// leave a hand-started capture alone - that was an explicit choice, not a side effect.</summary>
     private bool autoStartedAudioCapture;
     private RawTextureWrap? previewTexture;
     private string? streamSetupError;
@@ -36,10 +33,6 @@ public sealed class ShareWindow : Window, IDisposable
     private readonly RoomSessionService roomSession = new();
     private readonly MediaSessionService mediaSession = new();
 
-    /// <summary>Projects the watched stream onto a panel in the game world, and points the audio
-    /// at the virtual speakers flanking it. Lives here rather than in StreamViewWindow because it
-    /// needs the device and decoded texture ShareWindow owns; StreamViewWindow only supplies the
-    /// controls for it.</summary>
     private readonly WorldScreenController worldScreen = new();
     private string relayUrlInput = ServiceCollector.Config.RelayUrl;
     private string displayNameInput = ServiceCollector.Config.DisplayName;
@@ -52,18 +45,8 @@ public sealed class ShareWindow : Window, IDisposable
     private Exception? lastHandledHostMediaException;
     private Exception? lastHandledViewerMediaException;
 
-    /// <summary>Watching a stream happens in a separate popout window rather than inline here, so
-    /// it can stay visible (or be moved/resized) independently of the room UI - this is also the
-    /// natural seam for an eventual in-world "beamer" projection to grow into later. ShareWindow
-    /// still owns the whole watch-session lifecycle (device, decoded texture, MediaSessionService);
-    /// StreamView just renders what it's given and reports back when the user closes it.</summary>
     public StreamViewWindow StreamView { get; }
 
-    /// <summary>Streaming settings, as their own window rather than embedded in the room screen -
-    /// reachable regardless of connection/room state, and registered as the plugin's config UI in
-    /// Plugin.cs (Dalamud flags a plugin that never wires UiBuilder.OpenConfigUi). ShareWindow
-    /// still owns the actual capture/audio session objects; this window only owns the settings UI
-    /// and picker enumeration, consumed here via its public properties whenever a stream starts.</summary>
     public SettingsWindow Settings { get; }
 
     public ShareWindow() : base("Screen Share###ScreenShareMainWindow")
@@ -81,14 +64,6 @@ public sealed class ShareWindow : Window, IDisposable
             });
     }
 
-    /// <summary>Per-frame work that must happen whether or not any of this plugin's windows are
-    /// open, wired to UiBuilder.Draw in Plugin.cs rather than living in <see cref="Draw"/>.
-    ///
-    /// Dalamud only calls Draw() on an OPEN window, and "set the screen up, then close the UI and
-    /// watch" is the normal way to use the in-world projection - so leaving this in Draw() meant
-    /// the panel vanished and the audio mix froze the moment the user tidied the window away. It
-    /// also keeps the popout's decoded texture current in that same situation, which it previously
-    /// wasn't.</summary>
     public void TickFrame() => HandleViewerMediaLifecycle();
 
     public override void Draw()
@@ -179,10 +154,6 @@ public sealed class ShareWindow : Window, IDisposable
             ImGui.TextColored(ErrorColor, $"Relay error: {roomSession.LastError}");
     }
 
-    /// <summary>Shortcut list of rooms recently joined or created, so coming back after a restart
-    /// doesn't mean retyping a code from memory. Only rooms on the relay currently connected to are
-    /// offered: a code issued by one relay means nothing on another, so a shortcut across relays
-    /// would just be a join that fails.</summary>
     private void DrawRecentRooms()
     {
         Configuration config = ServiceCollector.Config;
@@ -315,9 +286,6 @@ public sealed class ShareWindow : Window, IDisposable
             ImGui.TextColored(ErrorColor, $"Relay error: {roomSession.LastError}");
     }
 
-    /// <summary>The room's event history, on its own tab. The room view used to end with a single
-    /// "Last event:" line, which only ever showed the most recent one - anything that happened
-    /// while you were looking at something else was simply gone by the time you looked back.</summary>
     private void DrawEventLog()
     {
         IReadOnlyList<RoomEvent> events = roomSession.Events;
@@ -356,14 +324,6 @@ public sealed class ShareWindow : Window, IDisposable
         ImGui.EndChild();
     }
 
-    /// <summary>Renders every current room member (host included) with icon badges - a crown for
-    /// the owner, a camera for whoever is actively streaming right now, an eye for whoever is
-    /// currently watching a stream (hovering shows which one), and a "permitted" badge for anyone
-    /// else who's been granted streaming permission but isn't live at the moment. A member who's
-    /// actively streaming (and isn't yourself) has a clickable name that opens <see cref="StreamView"/>
-    /// on their feed - hosting and viewing run on independent MediaSessionService connections, so
-    /// this stays clickable even while you're streaming your own feed. Kick/grant/revoke buttons
-    /// only render for the host, and never against their own row.</summary>
     private void DrawMemberList()
     {
         ImGui.TextUnformatted("Members:");
@@ -482,9 +442,6 @@ public sealed class ShareWindow : Window, IDisposable
             ImGui.SameLine(0, 6);
     }
 
-    /// <summary>One-line status shown while watching someone, mainly for discoverability -
-    /// <see cref="StreamView"/> can end up behind the game window or minimized, so this gives a
-    /// way to bring it back (or stop watching) without hunting for it.</summary>
     private void DrawWatchingStatus()
     {
         if (!mediaSession.IsViewing)
@@ -509,10 +466,6 @@ public sealed class ShareWindow : Window, IDisposable
             StopWatching();
     }
 
-    /// <summary>Start/stop streaming and audio capture - the actual streaming SETTINGS
-    /// (capture source, resolution/bitrate/fps/codec, audio source/bitrate) live in
-    /// <see cref="Settings"/> now, reachable via the button at the top of this window regardless
-    /// of room state, rather than a collapsed section buried in the room screen.</summary>
     private void DrawStreamingSection()
     {
         if (ImGui.Button(mediaSession.IsHosting ? "Stop streaming to room" : "Start streaming to room"))
@@ -531,12 +484,6 @@ public sealed class ShareWindow : Window, IDisposable
         DrawAudioStatus();
     }
 
-    /// <summary>Surfaces failures from the capture THREAD, which streamSetupError above cannot
-    /// reach - it only ever sees construction failures. A capture that starts cleanly and then dies
-    /// (a monitor whose duplication is lost and can't be rebuilt, most often) previously produced
-    /// no message at all: streaming reported itself as running, no frames flowed, and nothing in
-    /// the UI said why. The frame count is shown alongside because zero frames with no error is
-    /// itself the diagnosis - the capture is alive but the desktop isn't handing it anything.</summary>
     private void DrawScreenCaptureStatus()
     {
         if (screenCapture is null)
@@ -571,12 +518,6 @@ public sealed class ShareWindow : Window, IDisposable
             ImGui.TextColored(WarnColor, $"Audio capture error: {audioCapture.LastError.Message}");
     }
 
-    /// <summary>Per-frame room/media bookkeeping for a viewer: stops watching when leaving the
-    /// room, detects the currently-watched streamer going away, swaps in the decoded preview
-    /// texture once it exists, and surfaces device-removed recovery. Does NOT auto-start viewing
-    /// on join any more - a room can have more than one active streamer at once, so the viewer
-    /// has to explicitly click a streaming member's name in <see cref="DrawMemberList"/> to watch,
-    /// even when only one is live.</summary>
     private void HandleViewerMediaLifecycle()
     {
         bool isViewerInRoom = roomSession.InRoom && !roomSession.IsHost;
@@ -741,9 +682,6 @@ public sealed class ShareWindow : Window, IDisposable
         mediaSession.UpdateAudioSource(null);
     }
 
-    /// <summary>Undoes an auto-start when streaming ends, and does nothing at all otherwise -
-    /// including when auto-start is enabled but the user had already turned audio on themselves
-    /// before hitting stream.</summary>
     private void StopAutoStartedAudioCapture()
     {
         if (autoStartedAudioCapture)
@@ -764,10 +702,6 @@ public sealed class ShareWindow : Window, IDisposable
         }
     }
 
-    /// <summary>Async because activating process-loopback capture goes through WASAPI's
-    /// ActivateAudioInterfaceAsync, which is inherently asynchronous (a COM completion callback,
-    /// not a blocking call) - firing this and returning immediately keeps the render thread from
-    /// ever waiting on it, matching how every other network/media start already works here.</summary>
     private async Task StartProcessAudioCaptureAsync(int processId)
     {
         try
@@ -783,17 +717,6 @@ public sealed class ShareWindow : Window, IDisposable
         }
     }
 
-    /// <summary>NAudio's WASAPI/COM interop can throw an InvalidCastException where both the
-    /// source and target type names in the message are IDENTICAL (e.g. "cannot cast
-    /// MMDeviceEnumeratorComObject to MMDeviceEnumeratorComObject") - confirmed as a real
-    /// occurrence, not hypothetical. This is the classic .NET signature for two separate copies
-    /// of the same assembly being loaded into the process at once, most likely here from a
-    /// dev-plugin reload leaving a stale AssemblyLoadContext around from a previous load (COM
-    /// interop objects are a common reason a load context fails to fully unload). No amount of
-    /// retrying or picking a different capture source fixes this - the stale assembly is either
-    /// loaded or it isn't - so this exists purely to replace an extremely confusing raw exception
-    /// message with the one thing that actually helps: restart the whole game, not just reload
-    /// the plugin.</summary>
     private static string DescribeAudioCaptureError(Exception ex)
     {
         if (ex is InvalidCastException)
@@ -867,10 +790,6 @@ public sealed class ShareWindow : Window, IDisposable
         }
     }
 
-    /// <summary>DXGI_ERROR_DEVICE_REMOVED (and Reset/Hung) mean the GPU device is permanently
-    /// unusable - every further call against it fails identically. Without this, every button
-    /// would keep failing the same way until the plugin was reloaded; instead we tear down
-    /// everything tied to the dead device so the next action recreates it fresh.</summary>
     private bool TryRecoverFromDeviceRemoved(Exception ex)
     {
         if (ex is not SharpDX.SharpDXException sdx)
@@ -915,12 +834,6 @@ public sealed class ShareWindow : Window, IDisposable
         screenCapture = null;
     }
 
-    /// <summary>Every step is isolated deliberately. This used to be a bare sequence, so one
-    /// throwing teardown (a network session tearing down mid-unload is the realistic one) skipped
-    /// everything after it - and DisposeStreamCapture being one of those made the cost permanent
-    /// rather than cosmetic: a stranded OutputDuplication blocks every future capture of that
-    /// monitor for the whole game session, with no way back short of a restart. See
-    /// DesktopDuplicationCapture's class doc comment.</summary>
     public void Dispose()
     {
         DisposeStep(roomSession.Dispose, nameof(roomSession));

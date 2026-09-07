@@ -1,11 +1,9 @@
-using System.Numerics;
+﻿using System.Numerics;
 using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Services;
 
 namespace ScreenShare.Plugin.Tests.Services;
 
-/// <summary>Covers the placement-to-geometry half of <see cref="WorldScreenController"/> - the part
-/// that needs no game, no device and no room, and that everything else is built on.</summary>
 public class WorldScreenGeometryTests
 {
     private const float Tolerance = 0.001f;
@@ -31,8 +29,6 @@ public class WorldScreenGeometryTests
     private static void AssertClose(float expected, float actual, string because)
         => Assert.True(MathF.Abs(expected - actual) < Tolerance, $"{because}: expected ~{expected}, got {actual}");
 
-    /// <summary>Height is derived rather than stored precisely so a streamer changing capture
-    /// resolution mid-session resizes the panel instead of stretching the picture.</summary>
     [Theory]
     [InlineData(1920, 1080)]
     [InlineData(1280, 720)]
@@ -46,8 +42,6 @@ public class WorldScreenGeometryTests
         AssertClose(expectedHalfHeight, frame.UpHalf.Length(), "half height follows the source aspect");
     }
 
-    /// <summary>The texture is genuinely zero-sized for the frames between starting a watch session
-    /// and the first video metadata arriving, so this is a real path rather than a defensive one.</summary>
     [Fact]
     public void BuildFrame_ZeroSizedTexture_FallsBackTo16By9RatherThanDividingByZero()
     {
@@ -86,8 +80,6 @@ public class WorldScreenGeometryTests
         AssertClose(3f, frame.RightHalf.Length(), "rotation must not rescale the panel");
     }
 
-    /// <summary>A degenerate width would collapse the quad to a line, so it's clamped rather than
-    /// allowed through to the shader.</summary>
     [Fact]
     public void BuildFrame_ZeroWidth_IsClampedToSomethingDrawable()
     {
@@ -113,10 +105,6 @@ public class WorldScreenGeometryTests
         AssertClose(8f, (right - left).Length(), "separation is width plus twice the spread");
     }
 
-    /// <summary>The left channel sits on the panel's +X edge, which reads backwards but is correct:
-    /// the panel's +X axis points to the VIEWER's left when seen from the side it faces. That same
-    /// handedness is what made the picture render mirrored until the shader's u coordinate was
-    /// flipped; assigning speakers by axis name instead mirrors the stereo image the same way.</summary>
     [Fact]
     public void SpeakerPositions_ZeroSpread_SitsOnThePanelEdges()
     {
@@ -164,8 +152,6 @@ public class WorldScreenGeometryTests
         Assert.Equal(placement.Y, moved.Y);
     }
 
-    /// <summary>Nudging has to restamp the version, or the relay's echo is treated as stale by
-    /// RoomSessionService's staleness check and the move is silently reverted.</summary>
     [Fact]
     public void Nudge_AdvancesTheVersion()
     {
@@ -176,8 +162,6 @@ public class WorldScreenGeometryTests
         Assert.True(moved.Version > placement.Version, "version must advance");
     }
 
-    /// <summary>Speakers are derived from the placement every frame rather than stored, so rotating
-    /// the screen has to carry them with it.</summary>
     [Fact]
     public void SpeakerPositions_FollowTheScreensRotation()
     {

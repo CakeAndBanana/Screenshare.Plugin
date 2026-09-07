@@ -60,16 +60,6 @@ public sealed class Plugin : IDalamudPlugin
         ServiceCollector.PluginLog.Information("ScreenShare plugin loaded.");
     }
 
-    /// <summary>
-    /// Draws the plugin's windows, unless the player has the game UI hidden.
-    ///
-    /// This is the half of <see cref="IUiBuilder.DisableUserUiHide"/> that has to be paid for. That
-    /// flag keeps Draw running so the in-world screen survives a HUD toggle, but it applies to the
-    /// whole plugin - without this check, hiding the UI would leave the room window and the stream
-    /// popout sitting on screen, which is the opposite of what the player asked for.
-    ///
-    /// A method rather than a lambda so Dispose can unsubscribe the same delegate.
-    /// </summary>
     private void DrawWindows()
     {
         if (ServiceCollector.GameGui.GameUiHidden)

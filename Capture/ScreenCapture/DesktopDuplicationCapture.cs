@@ -1,4 +1,4 @@
-using ScreenShare.Plugin.Rendering;
+﻿using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 using SharpDX;
 using SharpDX.Direct3D11;
@@ -8,20 +8,6 @@ using DxgiDevice = SharpDX.DXGI.Device;
 
 namespace ScreenShare.Plugin.Capture.ScreenCapture;
 
-/// <summary>
-/// Captures a monitor via the DXGI Desktop Duplication API into a persistent shared texture on
-/// our own device, refreshed continuously on a background thread. Does not work under exclusive
-/// fullscreen (DuplicateOutput throws) - callers should surface that as a clear message.
-///
-/// The OutputDuplication this holds is a PROCESS-WIDE, SINGLE-OWNER resource: while one is alive,
-/// every further DuplicateOutput call for the same monitor anywhere in this process fails, and it
-/// stays that way until the game is restarted. Measured on an RTX 3080 / Windows 11, the failure
-/// is E_INVALIDARG (0x80070057), NOT the DXGI_ERROR_NOT_CURRENTLY_AVAILABLE the docs suggest -
-/// same result whether the second attempt uses the same device or a brand new one. That makes any
-/// path that drops this object without disposing it a permanent, and extremely confusing,
-/// "screen capture init failed: The parameter is incorrect" for the rest of the session, so both
-/// the constructor and <see cref="Dispose"/> below are written to never leak it.
-/// </summary>
 public sealed class DesktopDuplicationCapture : ICaptureSource
 {
     private readonly Device device;
@@ -30,14 +16,8 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
     private readonly Thread captureThread;
     private readonly int outputIndex;
 
-    /// <summary>Guards swapping <see cref="duplication"/> out on AccessLost against Dispose
-    /// disposing it - without it, a recreation racing teardown would strand the replacement, which
-    /// is precisely the leak the class doc comment warns about.</summary>
     private readonly Lock duplicationLock = new();
 
-    /// <summary>Not readonly: DXGI hands back AccessLost whenever the desktop changes underneath
-    /// us (resolution change, fullscreen transition, UAC/secure-desktop prompt, driver update),
-    /// and the documented cure is to build a fresh duplication rather than to give up.</summary>
     private OutputDuplication duplication;
 
     private volatile bool running;
@@ -48,12 +28,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
 
     public nint SharedHandle { get; }
 
-    /// <summary>The live capture texture itself (native resolution), on the same device passed
-    /// to the constructor. Exposed so callers on that same device (e.g. H264Encoder's GPU
-    /// downscale) can sample it directly via a ShaderResourceView instead of paying for another
-    /// CopyResource - safe since it already carries the ShaderResource bind flag (see
-    /// SharedTextureFactory.CreateEmpty). Callers must still go through ImmediateContextLock for
-    /// any GPU work against it.</summary>
     public Texture2D CaptureTexture => targetTexture;
 
     public Exception? LastError { get; private set; }
@@ -124,9 +98,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         }
     }
 
-    /// <summary>Turns an out-of-range monitor index into something that names the actual problem.
-    /// A stale saved MonitorIndex (a display was unplugged, or the picker was never reopened after
-    /// the layout changed) otherwise surfaces as a bare DXGI_ERROR_NOT_FOUND.</summary>
     private static Output GetOutputOrThrow(SharpDX.DXGI.Adapter adapter, int outputIndex)
     {
         try
@@ -142,13 +113,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         }
     }
 
-    /// <summary>Wraps the one failure worth explaining in full. E_INVALIDARG here has two quite
-    /// different causes and the raw "The parameter is incorrect" hints at neither: either this
-    /// process is already duplicating that monitor and never released it (see the class doc
-    /// comment), or the game is holding that monitor in exclusive fullscreen, which Desktop
-    /// Duplication cannot capture at all. The second is easy to mistake for a plugin bug, because
-    /// window capture keeps working perfectly - it goes through Windows.Graphics.Capture, which
-    /// has no such restriction. DXGI does not distinguish the two, so the message names both.</summary>
     private static OutputDuplication DuplicateOrThrow(Output1 output1, Device device, string deviceName)
     {
         try
@@ -170,15 +134,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         }
     }
 
-    /// <summary>Names which GPU each monitor is really attached to, for the error above.
-    ///
-    /// Desktop Duplication requires the D3D11 device to be on the adapter that genuinely drives the
-    /// output, and E_INVALIDARG is what DXGI returns when it isn't. That mismatch happens routinely
-    /// on hybrid-graphics machines: the discrete GPU enumerates monitors that are physically wired
-    /// through the integrated one, so the output looks available on this adapter and then refuses
-    /// to duplicate. Nothing in the raw HRESULT hints at any of that, and it is indistinguishable
-    /// by eye from the other causes - so the message says outright where the monitor actually
-    /// lives and where we tried to capture it from.</summary>
     private static string DescribeAdapterTopology(Device device, string deviceName)
     {
         try
@@ -218,19 +173,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         }
     }
 
-    /// <summary>Tries to duplicate every output on this adapter and reports which ones actually
-    /// work, plus whether the target is attached to the desktop at all.
-    ///
-    /// This is the measurement that separates the remaining explanations, which are otherwise
-    /// indistinguishable from a single failing HRESULT. If EVERY output refuses, the problem is
-    /// process-wide or device-wide and nothing about this particular monitor matters. If only this
-    /// one refuses while others succeed, something owns this specific output - another application
-    /// duplicating it, or the display not being in a duplicable state. Guessing between those from
-    /// the outside is what made this bug take several rounds; the probe answers it directly.
-    ///
-    /// Each probe is released immediately. A duplication left behind here would itself become the
-    /// permanent, process-wide failure this class's doc comment warns about - the diagnostic would
-    /// cause the disease it is trying to identify.</summary>
     private static string ProbeEveryOutput(Device device, string targetDeviceName)
     {
         try
@@ -271,15 +213,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         }
     }
 
-    /// <summary>Repeats the duplication attempt with a brand-new, independently created D3D11
-    /// device on the same adapter.
-    ///
-    /// Splits the last two explanations apart. If a fresh device succeeds where ours fails, the
-    /// fault is in how the capture device is built - it is created pinned to the game device's
-    /// feature level, which is not necessarily a level Desktop Duplication accepts. If a fresh
-    /// device fails identically, nothing this plugin does is responsible: something outside the
-    /// process holds the outputs, or duplication is unavailable machine-wide, and the fix is not
-    /// in this codebase at all.</summary>
     private static string ProbeWithFreshDevice(SharpDX.DXGI.Adapter adapter, string targetDeviceName)
     {
         try
@@ -377,11 +310,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         }
     }
 
-    /// <summary>Rebuilds the duplication after AccessLost, which DXGI raises routinely rather than
-    /// exceptionally - any resolution change, fullscreen transition or secure-desktop prompt does
-    /// it. This used to just break out of the capture loop, which left the stream frozen on its
-    /// last frame for the rest of the session while still reporting itself as capturing. Returns
-    /// false if the monitor is genuinely gone, which is the one case worth giving up on.</summary>
     private bool TryRecreateDuplication()
     {
         try

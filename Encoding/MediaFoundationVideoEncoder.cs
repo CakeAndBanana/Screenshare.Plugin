@@ -12,41 +12,8 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Encoding;
 
-/// <summary>
-/// Hardware video encoder built on Media Foundation, replacing the ffmpeg child process.
-///
-/// Two things it does that the ffmpeg path structurally cannot:
-///
-/// - **Retune bitrate on a running encoder** through ICodecAPI. ffmpeg takes bitrate as a spawn
-///   argument, so adapting meant respawning the process and wearing a visible hitch every time.
-/// - **Take the frame straight off the GPU.** The encoder is bound to our D3D11 device through an
-///   IMFDXGIDeviceManager and accepts the NV12 texture directly, so a frame is never read back to
-///   CPU memory, written down a pipe, and parsed out of a byte stream. That removes a frame
-///   interval of latency and the entire class of bug where a queued copy sat unsubmitted.
-///
-/// The sequence here was validated standalone against a real NVIDIA encoder MFT before being
-/// written into the plugin, which turned up three failures that all look identical from the
-/// outside - the encoder silently producing nothing:
-///
-/// 1. MFTEnumEx via SharpDX access-violates, so enumeration is hand-rolled (see the interop file).
-/// 2. A DXGI surface buffer arrives with CurrentLength zero. An encoder handed a zero-length
-///    sample encodes nothing and reports no error.
-/// 3. SharpDX marshals MFT_OUTPUT_DATA_BUFFER into ProcessOutput but never back out, so the
-///    sample the encoder produced is discarded and PSample is always null.
-/// </summary>
 public sealed class MediaFoundationVideoEncoder : IVideoEncoder
 {
-    /// <summary>
-    /// How many NV12 textures rotate between the converter and the encoder.
-    ///
-    /// The converter owns exactly one target and overwrites it every frame, so handing that
-    /// texture straight to the MFT would let the next frame's conversion land in it while the
-    /// encoder was still reading - intermittent tearing that shows up only under load and would be
-    /// miserable to trace back to here. Each frame is copied into the next slot instead: a
-    /// GPU-to-GPU copy of about 1.3MB at 720p, nothing like a readback. Three slots is far more
-    /// headroom than a hardware encoder needs, since it holds an input surface for well under a
-    /// frame.
-    /// </summary>
     private const int FrameRingLength = 3;
 
     private readonly GameAdapterDevice gameAdapterDevice;
@@ -91,8 +58,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
 
     public event Action<long, byte[]>? ChunkEncoded;
 
-    /// <summary>True whenever ICodecAPI was obtained. An encoder that refuses it is rebuilt for a
-    /// new bitrate, exactly as the ffmpeg path is.</summary>
     public bool SupportsLiveBitrate => codecApi is not null;
 
     public MediaFoundationVideoEncoder(
@@ -175,8 +140,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
     }
 
-    /// <summary>Matches H264Encoder's sizing exactly, including the rounding to even - NV12's
-    /// chroma plane is half size in both axes and has no representation for an odd dimension.</summary>
     private static (int Width, int Height) ComputeScaledSize(int sourceWidth, int sourceHeight, int targetHeight)
     {
         int height = Math.Min(targetHeight, sourceHeight);
@@ -233,8 +196,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         return activate.ActivateObject<Transform>(typeof(Transform).GUID);
     }
 
-    /// <summary>Output type first, then input: the encoder derives which inputs it will accept from
-    /// what it has been asked to produce, so the reverse order is rejected.</summary>
     private void ConfigureTypes(int width, int height, int fps, int bitrateKbps)
     {
         Guid subtype = Codec == VideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264;
@@ -261,15 +222,10 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         transform.SetInputType(0, inputType, 0);
     }
 
-    /// <summary>MFVideoInterlace_Progressive.</summary>
     private const int ProgressiveInterlaceMode = 2;
 
-    /// <summary>MF packs paired values - width/height, numerator/denominator - into a single 64-bit
-    /// attribute, high word first.</summary>
     private static long Pack(int high, int low) => ((long)high << 32) | (uint)low;
 
-    /// <summary>Optional configuration. Every property is attempted and none is required - vendors
-    /// differ on what they expose, and a missing one is not a reason to refuse to stream.</summary>
     private ICodecApi? TryGetCodecApi(int bitrateKbps, int fps)
     {
         try
@@ -326,11 +282,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
     }
 
-    /// <summary>
-    /// The async MFT contract: the transform says when it wants input and when output is ready,
-    /// through its event generator. Driving ProcessInput/ProcessOutput on our own schedule - how a
-    /// synchronous MFT works - simply fails on hardware encoders.
-    /// </summary>
     private void PumpLoop()
     {
         var clock = Stopwatch.StartNew();
@@ -472,16 +423,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
     }
 
-    /// <summary>
-    /// The capture-time PTS in milliseconds, which MF carries from the input sample through to the
-    /// output one - so what reaches the viewer is when the frame was grabbed, not when the encoder
-    /// finished with it.
-    ///
-    /// Falls back to the most recently fed frame's timestamp for an encoder that emits a sample
-    /// with no timestamp set at all, where reading it throws. Output order matches input order
-    /// here because low-latency CBR produces no B-frames, so that fallback is off by at most the
-    /// encoder's own latency rather than being meaningless.
-    /// </summary>
     private long ReadOutputPts(Sample sample)
     {
         try
@@ -498,11 +439,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         return Interlocked.Read(ref lastFedPtsMs);
     }
 
-    /// <summary>See the matching comment on H264Encoder.Dispose - same reasoning, mirrored here.
-    /// The bounded Join is best-effort, not a guarantee the pump thread has stopped touching the
-    /// encoder and its textures, and releasing those COM objects out from under a thread still
-    /// inside GetEvent or a GPU call crashes natively rather than throwing something catchable.
-    /// Leaking them in that rare case is much the better outcome.</summary>
     public void Dispose()
     {
         running = false;

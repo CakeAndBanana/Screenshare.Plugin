@@ -1,34 +1,11 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using NAudio.Wave;
 using ScreenShare.Plugin.Services;
 
 namespace ScreenShare.Plugin.Encoding;
 
-/// <summary>
-/// Applies the in-world screen's <see cref="SpeakerGains"/> to decoded audio on its way to the
-/// sound card. Wraps <see cref="SyncedPlaybackBuffer"/> and is handed to WaveOutEvent in its place.
-///
-/// Format-preserving, and that is a hard requirement rather than a convenience. The master clock
-/// in <see cref="AudioPlaybackDecoder.EstimatedCurrentPtsMs"/> maps the output device's own
-/// reported byte position back onto content PTS via
-/// <see cref="SyncedPlaybackBuffer.GetPtsAtPlayedBytes"/>, so device bytes and buffer bytes have to
-/// mean the same thing. Changing the channel count here (upmixing mono to stereo, say) would keep
-/// audio sounding fine while silently putting a constant factor into the clock that video is
-/// synchronized against - a desync with no obvious cause. So this rewrites samples in place,
-/// consumes exactly what it produces, buffers nothing, and reports the source's own byte count.
-///
-/// The consequence is that a MONO stream gets distance attenuation but no panning: there is only
-/// one output channel, and inventing a second one is exactly the format change that isn't allowed.
-///
-/// Gains ramp toward their targets rather than snapping. Targets are recomputed once per rendered
-/// frame, and stepping a gain discontinuously between frames puts a step edge in the waveform -
-/// audible as a click, or as continuous zipper noise while walking.
-/// </summary>
 public sealed class SpeakerMixWaveProvider : IWaveProvider
 {
-    /// <summary>Time constant for the gain ramp. Long enough that per-frame gain changes smooth
-    /// into inaudibility, short enough that the pan still tracks the camera rather than visibly
-    /// lagging behind it.</summary>
     private const float RampSeconds = 0.01f;
 
     private readonly IWaveProvider source;
@@ -45,8 +22,6 @@ public sealed class SpeakerMixWaveProvider : IWaveProvider
     private volatile float targetRightToRight = 1f;
     private volatile float targetMono = 1f;
 
-    /// <summary>Master playback volume, applied on top of the speaker mix. Ramped through the same
-    /// path as the gains so dragging the slider doesn't step the waveform.</summary>
     private volatile float targetVolume = 1f;
 
     private float leftToLeft = 1f;
@@ -72,14 +47,8 @@ public sealed class SpeakerMixWaveProvider : IWaveProvider
             : 1f;
     }
 
-    /// <summary>Sets the master playback volume, 0-1. Separate from the speaker mix because it
-    /// survives the in-world screen being off, where the mix falls back to identity.</summary>
     public void SetVolume(float value) => targetVolume = Math.Clamp(value, 0f, 1f);
 
-    /// <summary>Sets the mix the output ramps toward. Safe to call every frame from the render
-    /// thread. Pass <see cref="SpeakerGains.Identity"/> to return to untouched playback - which is
-    /// what happens whenever the in-world screen is off, unplaced, or in another zone, so turning
-    /// the feature off never costs the user their audio.</summary>
     public void SetGains(SpeakerGains gains)
     {
         targetLeftToLeft = gains.LeftToLeft;
@@ -129,9 +98,6 @@ public sealed class SpeakerMixWaveProvider : IWaveProvider
         }
     }
 
-    /// <summary>Mono (or any unexpected channel count): distance only, applied uniformly. Ramped
-    /// per FRAME rather than per sample so the ramp runs at the same rate whatever the channel
-    /// count is.</summary>
     private void ApplyScalarGain(Span<float> samples)
     {
         int perFrame = Math.Max(channels, 1);

@@ -78,8 +78,6 @@ static (int Width, int Height) ParseSize(string value)
     throw new ArgumentException($"Could not read '{value}' as a size; expected something like 1280x720.");
 }
 
-/// <summary>The bundled binary the plugin ships, so the harness generates its test stream with the
-/// same encoder the plugin would use rather than whatever is on PATH.</summary>
 static string FindFfmpeg()
 {
     for (DirectoryInfo? directory = new(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
@@ -152,15 +150,6 @@ static void ReportCategory(bool isEncoder, string label, Guid codecSubtype)
     Console.WriteLine($"  {label}: {string.Join(", ", names)}");
 }
 
-/// <summary>
-/// Whether the MFT will decode into D3D11 textures. Without it a decoder still works but hands back
-/// system-memory frames, leaving the CPU round trip exactly where it is - so the plugin refuses one
-/// and falls back to ffmpeg instead, and this report would be misleading without saying so.
-///
-/// The MFT has to be instantiated to find out. MF_SA_D3D11_AWARE lives on the transform's own
-/// attributes, not on the activation object, so reading it from the latter silently returns nothing
-/// and every decoder looks unaccelerated.
-/// </summary>
 static bool IsD3D11Aware(SharpDX.MediaFoundation.Activate activate)
 {
     SharpDX.MediaFoundation.Transform? transform = null;

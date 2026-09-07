@@ -8,32 +8,10 @@ using SharpDX.Direct3D11;
 
 namespace ScreenShare.Plugin.Encoding;
 
-/// <summary>
-/// Network media-plane counterpart to <see cref="H264Encoder"/>: takes arbitrary H264 byte
-/// chunks fed via <see cref="Feed"/> (as they arrive off a MediaSocketClient), decodes them with
-/// an ffmpeg subprocess, and uploads each decoded frame to a shared texture for display.
-/// <see cref="Feed"/> is safe to call from the network receive thread - it only ever enqueues
-/// onto a bounded channel, decoupling the network receive thread from the ffmpeg subprocess
-/// (a direct pipe between them caused a real multi-stage deadlock during this pipeline's
-/// original development).
-/// </summary>
 public sealed class H264Decoder : IVideoDecoder
 {
     private const int FeedChannelCapacity = 256;
 
-    /// <summary>How much decoded video to hold before it's actually shown, absorbing network/
-    /// decode jitter so playback runs on a steady clock instead of however bursty frame arrival
-    /// happened to be. Without this, each frame was written to the display texture the instant it
-    /// finished decoding - since decode completion directly follows network arrival timing (itself
-    /// bursty: bounded drop-oldest queues at multiple hops, WebSocket message boundaries, etc.),
-    /// playback visibly sped up through arrival bursts and slowed down through gaps, rather than
-    /// running at a steady pace. 200ms is enough margin for typical jitter without adding much
-    /// perceptible extra latency on top of it.
-    ///
-    /// Internal rather than private because it is also AudioPlaybackDecoder's latency budget: this
-    /// queue is bounded drop-oldest, so frames older than this are gone, and an audio clock that
-    /// sits further back than this reach asks for frames that no longer exist. The two constants
-    /// have to move together.</summary>
     internal const int PresentationBufferMilliseconds = 200;
 
     private readonly GameAdapterDevice gameAdapterDevice;
@@ -41,9 +19,6 @@ public sealed class H264Decoder : IVideoDecoder
     private readonly FfmpegProcessRunner decoderProcess;
     private readonly Channel<(long PtsMs, byte[] Chunk)> feedChannel;
 
-    /// <summary>Owns the jitter buffer and the audio-clock pacing; this class only decodes into it.
-    /// Shared with the Media Foundation decoder rather than duplicated - see the type's own
-    /// comment for why that logic exists exactly once.</summary>
     private readonly PresentationScheduler<byte[]> scheduler;
 
     private readonly Thread feedWriterThread;
@@ -63,57 +38,26 @@ public sealed class H264Decoder : IVideoDecoder
 
     public nint SharedHandle { get; }
 
-    /// <summary>Names the codec ffmpeg was asked for, which is as specific as this path can be -
-    /// ffmpeg picks its own decoder internally and never says which. The Media Foundation path
-    /// reports the actual MFT's name.</summary>
     public string DecoderName { get; }
 
     public long FramesDecoded => Interlocked.Read(ref framesDecoded);
 
-    /// <summary>Average decode rate since this decoder was constructed - not an instantaneous
-    /// rate, but a simple, cheap signal for "is decode actually keeping up with the stream's
-    /// target FPS overall" without needing a rolling window. Directly comparable to
-    /// H264Encoder.AverageFps on the host's side: if this is meaningfully lower than the
-    /// configured target FPS while HostQueueDrops/DroppedChunks are both near zero, decode itself
-    /// (not the network, not the encoder) is the bottleneck - most likely relevant for software
-    /// decode of a CPU-expensive codec, though -hwaccel d3d11va should mostly rule that out.</summary>
     public double AverageFps => FramesDecoded / Math.Max(sessionStopwatch.Elapsed.TotalSeconds, 0.001);
 
-    /// <summary>See PresentationScheduler.ReadyToDisplay.</summary>
     public event Action? ReadyToDisplay
     {
         add => scheduler.ReadyToDisplay += value;
         remove => scheduler.ReadyToDisplay -= value;
     }
 
-    /// <summary>How many incoming network chunks got dropped because ffmpeg's decode couldn't
-    /// keep up in real time (feedChannel filling up faster than FeedWriterLoop could hand chunks
-    /// to the decoder's stdin) - the signal to check if playback looks like it's stalling and
-    /// bursting rather than playing smoothly: a high value here means the decoder itself is the
-    /// bottleneck (e.g. software HEVC decode being more expensive than the viewer's CPU can do in
-    /// real time), not the network or the encoder.</summary>
     public long DroppedChunks => Interlocked.Read(ref droppedChunks);
 
-    /// <summary>See PresentationScheduler.QueueDrops.</summary>
     public long DisplayQueueDrops => scheduler.QueueDrops;
 
     public Exception? LastError { get; private set; }
 
-    /// <summary>See PresentationScheduler.AvDriftMs.</summary>
     public long AvDriftMs => scheduler.AvDriftMs;
 
-    /// <summary><paramref name="getAudioPtsMs"/> lets DisplayLoop ask, at any moment, "what PTS is
-    /// audio currently playing" (null if there's no audio, or it hasn't started yet) - queried
-    /// fresh every frame rather than captured once, so it stays correct even if audio gets wired
-    /// in or torn down mid-session. See MediaSessionService, which supplies this as
-    /// <c>() =&gt; audioDecoder?.EstimatedCurrentPtsMs</c>.
-    ///
-    /// <paramref name="getSyncOffsetMs"/> is the user's A/V offset in milliseconds - positive holds
-    /// video back. Passed as a provider rather than folded into the clock by the caller because it
-    /// has to influence three things that all have to agree: the clock comparison, the cap on how
-    /// long a frame may be held, and how deep the presentation queue is built. Shifting only the
-    /// clock (which is what an earlier attempt did) moves the comparison while leaving the other two
-    /// at their defaults, so the offset gets clamped away and appears to do almost nothing.</summary>
     public H264Decoder(
         GameAdapterDevice gameAdapterDevice,
         string ffmpegExePath,
@@ -183,13 +127,8 @@ public sealed class H264Decoder : IVideoDecoder
         readerThread.Start();
     }
 
-    /// <summary>See PresentationScheduler.StartDisplay.</summary>
     public void StartDisplay() => scheduler.StartDisplay();
 
-    /// <summary>Never blocks - safe to call from a network receive thread. <paramref name="ptsMs"/>
-    /// is the chunk's PTS on the host's shared session clock (see MediaSocketClient/H264Encoder) -
-    /// carried through to whichever decoded frame comes out the other side of ffmpeg, so DisplayLoop
-    /// can compare it against audio's own position.</summary>
     public void Feed(long ptsMs, byte[] chunk)
     {
         if (feedChannel.Reader.Count >= FeedChannelCapacity)
@@ -239,19 +178,6 @@ public sealed class H264Decoder : IVideoDecoder
         }
     }
 
-    /// <summary>Reads each raw decoded frame from ffmpeg as soon as it's available and hands it
-    /// to the presentation buffer - deliberately NOT written to the display texture here anymore.
-    /// Decode completion tracks network arrival timing (itself bursty), so displaying immediately
-    /// on this thread made playback speed follow that jitter directly; DisplayLoop now owns
-    /// actually showing frames, on its own steady clock.
-    ///
-    /// Each frame is paired with a PTS snapshot from FeedWriterLoop ("the most recently fed
-    /// chunk's timestamp"), not a frame-exact one - ffmpeg's decode pipeline doesn't preserve
-    /// arbitrary per-chunk metadata through to its raw output, and chunks aren't NAL-unit-aligned
-    /// to begin with. Given -tune ll's small encode/decode buffering, this approximation is off by
-    /// at most a few frames' worth of latency, well within the tolerance DisplayLoop's
-    /// reconciliation already applies - good enough to correct real drift without needing full
-    /// bitstream parsing to get frame-perfect timestamps.</summary>
     private void ReadLoop()
     {
         int frameSize = Width * Height * 4;
@@ -330,12 +256,6 @@ public sealed class H264Decoder : IVideoDecoder
         }
     }
 
-    /// <summary>See the matching comment on H264Encoder.Dispose() - same reasoning, mirrored here:
-    /// displayThread is the one thread that touches the shared GPU texture (via
-    /// WriteFrameToTexture), so its Join result specifically gates whether decodedTexture.Dispose()
-    /// is safe to run. If the GPU is stalled and displayThread is still stuck past the 1s timeout,
-    /// disposing decodedTexture out from under it risks a native use-after-dispose crash once the
-    /// stuck call eventually returns - leaking it in that rare case is the safer outcome.</summary>
     public void Dispose()
     {
         running = false;

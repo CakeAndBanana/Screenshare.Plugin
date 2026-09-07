@@ -1,14 +1,10 @@
-using System.Numerics;
+﻿using System.Numerics;
 using System.Runtime.InteropServices;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Textures.TextureWraps;
 
 namespace ScreenShare.Plugin.Rendering;
 
-/// <summary>
-/// Wraps a raw ID3D11ShaderResourceView* as an IDalamudTextureWrap so it can be drawn with
-/// ImGui.Image(). Owns one COM reference to the view for the lifetime of this instance.
-/// </summary>
 public sealed class RawTextureWrap(nint shaderResourceView, int width, int height) : IDalamudTextureWrap
 {
     private readonly nint handle = shaderResourceView;

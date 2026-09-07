@@ -1,24 +1,9 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 
 namespace MediaProbe;
 
-/// <summary>
-/// Makes and slices the H.264 the harness is fed.
-///
-/// Generated with the bundled ffmpeg rather than committed, so there is no binary in the repo and
-/// the stream always matches the encoder settings the plugin actually streams with.
-/// </summary>
 internal static class TestStream
 {
-    /// <summary>
-    /// Encodes a test pattern to Annex-B H.264, reusing the file if it already exists.
-    /// </summary>
-    /// <remarks>
-    /// <c>sliced-threads=0:slices=1</c> is not decoration. libx264's default threading emits several
-    /// slice NALs per frame, and the splitter below then yields one "access unit" per slice - five
-    /// times as many, each a fifth the size. A benchmark fed those measures something that is not a
-    /// frame rate, which is a mistake this harness has already made once.
-    /// </remarks>
     public static string Ensure(string ffmpegExePath, string path, int width, int height, int seconds, int bitrateKbps)
     {
         if (File.Exists(path))
@@ -45,13 +30,6 @@ internal static class TestStream
         return path;
     }
 
-    /// <summary>
-    /// Splits an Annex-B stream into access units, one per frame - the shape the Media Foundation
-    /// encoder emits and the decoder is fed on the wire.
-    ///
-    /// A new unit starts at the first slice NAL (type 1 or 5) once the current one already holds a
-    /// slice; parameter sets and SEI attach to the unit that follows them.
-    /// </summary>
     public static List<byte[]> SplitAccessUnits(byte[] stream)
     {
         var starts = new List<int>();

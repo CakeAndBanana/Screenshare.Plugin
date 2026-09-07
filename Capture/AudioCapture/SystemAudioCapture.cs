@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using NAudio.CoreAudioApi;
 using NAudio.CoreAudioApi.Interfaces;
@@ -7,21 +7,6 @@ using ScreenShare.Plugin.Capture.AudioCapture.Interop;
 
 namespace ScreenShare.Plugin.Capture.AudioCapture;
 
-/// <summary>
-/// Captures system output ("what you hear") via WASAPI loopback on the default render device.
-///
-/// Uses hand-rolled COM interop (<see cref="SystemLoopbackInterop"/>) for device enumeration
-/// instead of NAudio's own WasapiLoopbackCapture/MMDeviceEnumerator - see that type's doc comment
-/// for why: a real, confirmed, reproducible-even-after-a-full-PC-restart InvalidCastException from
-/// NAudio's own internal COM activation, not a hypothetical concern.
-///
-/// Threading/shutdown discipline mirrors <see cref="ProcessAudioCapture"/> deliberately (and, in
-/// turn, what this class itself used to do before this rewrite): this project already hit a real
-/// game freeze once from unbounded WASAPI shutdown blocking, so capture happens on its own
-/// polling thread, samples cross to a separate processing thread via a bounded drop-oldest
-/// channel before <see cref="SamplesAvailable"/> ever fires, and Dispose only ever does bounded
-/// (1s) Joins, never unbounded ones.
-/// </summary>
 public sealed class SystemAudioCapture : IAudioSource
 {
     private const int PollIntervalMs = 50;
@@ -41,8 +26,6 @@ public sealed class SystemAudioCapture : IAudioSource
 
     public Exception? LastError { get; private set; }
 
-    /// <summary>Raised on our own processing thread (never the capture thread) with each buffer
-    /// converted to interleaved float samples.</summary>
     public event Action<float[]>? SamplesAvailable;
 
     public SystemAudioCapture()
@@ -125,11 +108,6 @@ public sealed class SystemAudioCapture : IAudioSource
         }
     }
 
-    /// <summary>Coalesces every WASAPI packet available this poll into a single combined array
-    /// before queuing it, rather than queuing one entry per packet - see ProcessAudioCapture's
-    /// equivalent method for why this matters (sampleQueue's capacity is measured in items, not
-    /// audio duration, so many small entries give meaningfully less buffered-audio headroom than
-    /// one larger one per poll).</summary>
     private void ReadAvailablePackets()
     {
         List<float> pending = [];

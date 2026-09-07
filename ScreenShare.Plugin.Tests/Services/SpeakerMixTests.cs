@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using ScreenShare.Plugin.Services;
 
 namespace ScreenShare.Plugin.Tests.Services;
@@ -44,8 +44,6 @@ public class SpeakerMixTests
         }
     }
 
-    /// <summary>A zero-width or inverted band would otherwise divide by zero. It degrades to a hard
-    /// cutoff at the start radius instead of producing NaNs that reach the sound card.</summary>
     [Theory]
     [InlineData(8f, 8f)]
     [InlineData(8f, 2f)]
@@ -66,8 +64,6 @@ public class SpeakerMixTests
         Assert.True(gains.RightToRight > gains.RightToLeft, "the right speaker should favour the right ear");
     }
 
-    /// <summary>Turning around is the case the whole feature exists for: the speakers are in the
-    /// world, so the sound has to follow the camera rather than the stream's own channel order.</summary>
     [Fact]
     public void Compute_FacingAwayFromTheScreen_SwapsTheChannels()
     {
@@ -89,8 +85,6 @@ public class SpeakerMixTests
         AssertClose(0f, gains.MonoGain, "far away");
     }
 
-    /// <summary>Constant-power panning, not linear: a linear pan dips about 3dB as a source crosses
-    /// centre, heard as a hole in the middle when walking past the screen.</summary>
     [Fact]
     public void Compute_WithinFullVolume_PreservesPowerAcrossThePan()
     {
@@ -106,8 +100,6 @@ public class SpeakerMixTests
         }
     }
 
-    /// <summary>Standing exactly on a speaker leaves no direction to pan along. A NaN here would go
-    /// straight to the sound card, so it centres instead of normalizing a zero vector.</summary>
     [Fact]
     public void Compute_ListenerExactlyOnASpeaker_ProducesNoNaN()
     {
@@ -118,8 +110,6 @@ public class SpeakerMixTests
         Assert.False(float.IsNaN(gains.MonoGain), "mono");
     }
 
-    /// <summary>A zero forward vector is what a freshly-initialized or straight-down camera can
-    /// hand over; it must fall back to an axis rather than normalizing to NaN.</summary>
     [Fact]
     public void Compute_ZeroFacing_FallsBackInsteadOfProducingNaN()
     {
@@ -128,8 +118,6 @@ public class SpeakerMixTests
         Assert.False(float.IsNaN(gains.LeftToLeft) || float.IsNaN(gains.RightToRight), "gains should be finite");
     }
 
-    /// <summary>Elevation is deliberately ignored - two-channel amplitude panning can't express it -
-    /// so a listener directly above the speakers still hears them by distance alone.</summary>
     [Fact]
     public void Compute_PurelyVerticalOffset_StillCentresRatherThanFailing()
     {

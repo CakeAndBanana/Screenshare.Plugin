@@ -1,4 +1,4 @@
-using ScreenShare.Plugin.Services;
+﻿using ScreenShare.Plugin.Services;
 
 namespace ScreenShare.Plugin.Tests.Services;
 
@@ -16,8 +16,6 @@ public class BitrateAdaptationTests
         Assert.Equal(1500, decision.TargetKbps);
     }
 
-    /// <summary>A single clean window must not undo a backoff - probing upward that eagerly just
-    /// re-congests the link and oscillates.</summary>
     [Fact]
     public void Next_HoldsSteadyUntilTheCleanWindowStreakIsLongEnough()
     {
@@ -42,8 +40,6 @@ public class BitrateAdaptationTests
         Assert.Equal(0, probe.CleanWindows);
     }
 
-    /// <summary>Drops reset the streak, so congestion during a clean run doesn't leave the next
-    /// clean window one step away from probing upward again.</summary>
     [Fact]
     public void Next_DropsResetTheCleanStreak()
     {
@@ -80,8 +76,6 @@ public class BitrateAdaptationTests
         Assert.False(decision.ShouldApply);
     }
 
-    /// <summary>The headline difference the Media Foundation encoder buys: a step too small to be
-    /// worth an ffmpeg restart is still worth making when the encoder retunes in place.</summary>
     [Fact]
     public void Next_AppliesSmallStepsOnlyWhenTheEncoderRetunesInPlace()
     {
@@ -99,8 +93,6 @@ public class BitrateAdaptationTests
         Assert.False(restart.ShouldApply);
     }
 
-    /// <summary>A backoff always clears both thresholds, so congestion is never ignored on either
-    /// encoder - the two paths differ in how finely they adapt, never in whether they react.</summary>
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

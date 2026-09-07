@@ -13,34 +13,10 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Encoding;
 
-/// <summary>
-/// Hardware video decoder built on Media Foundation, replacing the ffmpeg child process on the
-/// viewer's side.
-///
-/// The cost this removes is larger than the encoder's was. The ffmpeg decoder has the child process
-/// write raw BGRA down a pipe - roughly 110 MB/s at 720p30, and four times that at 1080p60 - which
-/// is then read back into managed memory, buffered, and uploaded to the GPU with UpdateSubresource.
-/// Every one of those bytes came off the GPU's own decoder and is going straight back to it. Here
-/// the decoded frame is a D3D11 NV12 texture from the start: it is copied into a buffered slot,
-/// converted to BGRA by a shader when its time comes, and never enters system memory at all.
-///
-/// Jitter buffering and audio-clock pacing are NOT reimplemented - they live in
-/// <see cref="PresentationScheduler{TFrame}"/> and are shared verbatim with the ffmpeg decoder.
-/// What differs is only what a buffered frame IS: a slot index into a ring of NV12 textures rather
-/// than a managed byte array.
-///
-/// Unlike the encoder, hardware video decoder MFTs are SYNCHRONOUS: input goes in and output is
-/// pulled until the transform says it needs more. Two of its error codes are ordinary control flow
-/// on that path - "need more input" every frame, and "stream change" once the decoder has parsed
-/// the real stream parameters, which routinely differ from what it was told up front.
-/// </summary>
 public sealed class MediaFoundationVideoDecoder : IVideoDecoder
 {
     private const int FeedChannelCapacity = 256;
 
-    /// <summary>Spare NV12 slots beyond what the jitter buffer can hold: one for the frame being
-    /// presented and one being decoded into, so the decoder never has to stall waiting for the
-    /// display to hand a slot back.</summary>
     private const int SpareSlots = 2;
 
     private readonly GameAdapterDevice gameAdapterDevice;
@@ -205,21 +181,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
             OptionFlags = ResourceOptionFlags.None,
         });
 
-    /// <summary>
-    /// Picks a decoder MFT for the codec.
-    /// </summary>
-    /// <remarks>
-    /// Both hardware and synchronous software MFTs are considered, and the distinction matters less
-    /// than it sounds: Microsoft's own H.264 decoder MFT is registered as software but decodes on
-    /// the GPU through DXVA once it is handed a D3D manager. What actually decides whether a frame
-    /// stays on the GPU is MF_SA_D3D11_AWARE, which is checked here - a decoder without it would
-    /// hand back system-memory frames and leave the CPU round trip exactly where it is, so it is
-    /// rejected in favour of falling back to ffmpeg.
-    ///
-    /// HEVC is where this genuinely may find nothing: H.264 decode ships with Windows, HEVC depends
-    /// on the Store's "HEVC Video Extensions" being installed. That is a per-codec fallback, not a
-    /// reason to refuse the stream.
-    /// </remarks>
     private static Transform ActivateDecoder(VideoCodec codec, out string name)
     {
         Guid subtype = codec == VideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264;
@@ -285,14 +246,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         SelectNv12OutputType();
     }
 
-    /// <summary>
-    /// Picks the decoder's NV12 output from the types it offers, rather than describing one.
-    ///
-    /// Asking for a constructed type gets refused: a decoder's output type carries fields only it
-    /// knows - stride, the real frame size once the stream's parameters are parsed, interlace mode -
-    /// and a type built here would disagree on at least one. Enumerating and choosing is also what
-    /// makes the stream-change path work, since the same call re-runs against the new list.
-    /// </summary>
     private void SelectNv12OutputType()
     {
         for (int index = 0; transform.TryGetOutputAvailableType(0, index, out MediaType candidate); index++)
@@ -312,7 +265,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
 
     private static long Pack(int high, int low) => ((long)high << 32) | (uint)low;
 
-    /// <summary>Never blocks - safe to call from the network receive thread.</summary>
     public void Feed(long ptsMs, byte[] chunk)
     {
         if (feedChannel.Reader.Count >= FeedChannelCapacity)
@@ -361,8 +313,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         }
     }
 
-    /// <summary>Pulls every frame the decoder has ready. A decoder can emit more than one output
-    /// for a single input (or none at all), so this drains rather than assuming a 1:1 exchange.</summary>
     private void DrainDecodedFrames()
     {
         while (running)
@@ -392,10 +342,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         }
     }
 
-    /// <summary>Copies the decoded texture into a buffered slot and queues it. The copy is what
-    /// lets the decoder's own surface go straight back to it - a hardware decoder has only a
-    /// handful, and holding them for the length of the jitter buffer would starve it within a few
-    /// frames.</summary>
     private void CaptureFrame(Sample sample)
     {
         if (!freeSlots.TryTake(out int slot))
@@ -473,9 +419,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         }
     }
 
-    /// <summary>Converts one buffered NV12 slot into the shared BGRA texture the viewer samples.
-    /// This is the only place the format changes, and it happens once per frame actually shown -
-    /// not once per frame decoded.</summary>
     private void PresentSlot(int slot)
     {
         lock (gameAdapterDevice.ImmediateContextLock)
@@ -503,10 +446,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         running = false;
     }
 
-    /// <summary>See the matching comment on H264Decoder.Dispose - same reasoning. The display
-    /// thread is the one that touches the shared texture, so its exit specifically gates whether
-    /// releasing these GPU resources is safe; leaking them when it is still stuck is much better
-    /// than a native use-after-dispose crash.</summary>
     public void Dispose()
     {
         running = false;

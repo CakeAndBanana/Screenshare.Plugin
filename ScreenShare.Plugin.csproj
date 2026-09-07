@@ -36,6 +36,10 @@
     <!-- MediaProbe soaks and benchmarks the REAL Media Foundation interop rather than a copy of it,
          so the harness cannot quietly drift from the code it is meant to be testing. -->
     <InternalsVisibleTo Include="MediaProbe" />
+
+    <!-- So the placement round trip (matrix out, matrix back in) can be tested directly rather than
+         through a copy of the same maths, which would prove nothing. -->
+    <InternalsVisibleTo Include="ScreenShare.Plugin.Tests" />
   </ItemGroup>
 
   <ItemGroup>

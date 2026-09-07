@@ -12,49 +12,10 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Rendering;
 
-/// <summary>
-/// Draws the world panel inside the game's own render pass instead of on top of it, so the game's
-/// HUD covers the screen rather than the other way round.
-///
-/// The ImGui path (<see cref="WorldPanelDispatch"/>) can never do this: Dalamud composites ImGui
-/// after the game has finished drawing its 2D UI, so anything drawn there is necessarily on top of
-/// the hotbars. Getting underneath them means drawing earlier in the frame, which means hooking the
-/// game's renderer - there is no other seam.
-///
-/// The hook is on ImmediateContext.DoSetTargetCommand, which fires every time the game switches
-/// render target. Once the target is the swapchain back buffer, the 3D scene has been composited
-/// and the UI has not yet been drawn: that is the window we want. WHICH of those switches is the
-/// right one isn't knowable from reading code - it depends on the game's pass structure - so the
-/// occurrence index is a setting with a live per-frame count next to it, dialled in against a
-/// running game rather than guessed. Measured as 4 on patch-current retail; the debug-only tuner
-/// stays so it can be found again if a patch reshapes the passes.
-///
-/// This is the most fragile thing in the plugin by a wide margin. It runs inside the game's own
-/// render pipeline on reverse-engineered structures, so it is off by default, every failure
-/// disables it rather than retrying, and the ImGui path stays intact as the fallback.
-/// </summary>
 public sealed unsafe class ScenePanelHook : IDisposable
 {
-    /// <summary>Misses tolerated before giving up on the configured pass. High enough that a
-    /// loading screen or a cutscene transition - where the game may not touch the back buffer the
-    /// usual way - cannot trigger it, low enough that a genuinely wrong pass is corrected within a
-    /// second or two of streaming rather than after a visibly flickering minute.</summary>
     private const int MissedFramesBeforeEscalating = 30;
 
-    /// <summary>
-    /// How long a queued panel stays valid without being refreshed.
-    ///
-    /// This hook has two clocks and only one of them is ours. The detour runs on the game's render
-    /// loop, which never stops; Submit and EndFrame run from Dalamud's Draw callback, which STOPS
-    /// ENTIRELY when the player hides the game UI. Nothing in the original design survived that
-    /// gap - the queued panel was never cleared, so the render loop kept drawing the last frame's
-    /// geometry, with its frozen view-projection matrix, for as long as the UI stayed hidden. The
-    /// panel stopped tracking the camera and sat on the screen like a decal.
-    ///
-    /// Generous on purpose: a panel is normally resubmitted every rendered frame, so anything past
-    /// a handful of frames means the submitting side has stopped rather than merely stuttered
-    /// through a hitch or a loading screen.
-    /// </summary>
     private const long StaleAfterMs = 200;
 
     private delegate void DoSetTargetCommandDelegate(ImmediateContext* context, RenderCommandSetTarget* command);
@@ -67,8 +28,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
     private bool hasPending;
     private bool submittedThisFrame;
 
-    /// <summary>When <see cref="pending"/> was submitted, against a clock the detour can read
-    /// without needing the submitting side to still be running.</summary>
     private long pendingAtMs;
     private int backBufferSwitches;
     private bool loggedFailure;
@@ -78,55 +37,18 @@ public sealed unsafe class ScenePanelHook : IDisposable
     private int missedFrames;
     private bool escalatedToEveryPass;
 
-    /// <summary>Back-buffer switches in the previous frame that had a panel queued, or -1 when
-    /// there was no such frame to compare against. See <see cref="EndFrame"/> for what a change in
-    /// it means.</summary>
     private int previousSwitches = -1;
 
-    /// <summary>True once the hook is installed and drawing can actually happen here. False means
-    /// the caller should fall back to the ImGui path rather than silently not drawing.</summary>
     public bool IsActive => hook is { IsEnabled: true };
 
-    /// <summary>How many times the game switched to the back buffer during the last completed
-    /// frame. This is what makes <see cref="DrawAtOccurrence"/> tunable instead of guesswork - if
-    /// it reads 2, then only 0 and 1 are meaningful choices.</summary>
     public int LastFrameBackBufferSwitches { get; private set; }
 
-    /// <summary>Whether the panel is currently being drawn in every pass rather than one - either
-    /// because it was configured that way, or because the configured pass kept missing and the hook
-    /// escalated on its own.</summary>
     public bool IsDrawingEveryPass => escalatedToEveryPass || DrawAtOccurrence < 0;
 
-    /// <summary>How many frames had a panel queued that never got drawn. Non-zero means the chosen
-    /// pass is not reliably occurring; it is what drives escalation, and is worth surfacing because
-    /// it is the difference between "this machine needs every-pass" and "something else is wrong".</summary>
     public int MissedFrames => missedFrames;
 
-    /// <summary>Why the hook stopped trusting the configured pass, or null while it still does.
-    /// Two different failures lead here and they need different wording - "it never happened" and
-    /// "it happened but the count moved underneath it" point at different things, and a reader
-    /// told the wrong one would go looking in the wrong place.</summary>
     public string? EscalationReason { get; private set; }
 
-    /// <summary>Which back-buffer switch to draw after, zero-based. Negative means AUTO: draw in
-    /// EVERY back-buffer pass of the frame.
-    ///
-    /// A fixed index is only correct for the pass structure it was measured against, and that
-    /// structure is not universal - FSR inserts an upscale pass, and vendors differ. Worse, it is
-    /// not even stable frame to frame: measured on an AMD+FSR machine, the panel appeared in an
-    /// irregular subset of frames, which is what a varying pass count looks like from the outside.
-    ///
-    /// It is not only AMD: the count also moves with frame rate, and a high-frame-rate client
-    /// flickers the same way. Whatever the cause, a pass that sometimes runs AFTER the chosen one
-    /// paints over the panel, which looks identical to missing it - see
-    /// <see cref="CheckPassCountStability"/>.
-    ///
-    /// That irregularity is also why auto does not simply target the last pass using the previous
-    /// frame's count - a stale count is wrong on exactly the frames where the count changed, which
-    /// are the frames that were already failing. Drawing in every pass cannot miss: earlier draws
-    /// are harmlessly overwritten by whatever the game composites afterwards, and the final one
-    /// lands in the last pass before the UI, which is the window we want. The cost is a handful of
-    /// wasted quad draws per frame, which is nothing next to a flickering screen.</summary>
     public int DrawAtOccurrence { get; set; }
 
     public ScenePanelHook(Device gameDevice)
@@ -148,9 +70,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
         }
     }
 
-    /// <summary>Queues the panel for the current frame. Unlike the ImGui path this doesn't schedule
-    /// anything - the draw happens whenever the game next switches to the back buffer, which may
-    /// already have happened this frame, so a queued panel simply waits for the next one.</summary>
     public void Submit(in WorldPanelDraw draw)
     {
         pending = draw;
@@ -159,14 +78,8 @@ public sealed unsafe class ScenePanelHook : IDisposable
         pendingAtMs = Environment.TickCount64;
     }
 
-    /// <summary>Whether the queued panel is too old to draw - see <see cref="StaleAfterMs"/>.
-    /// Checked in the detour rather than only at the frame boundary, because the thing that owns
-    /// the frame boundary is exactly what stops.</summary>
     private bool PendingIsStale => Environment.TickCount64 - pendingAtMs > StaleAfterMs;
 
-    /// <summary>Call once per frame from the render thread. Rolls the per-frame counter over and
-    /// clears any panel that was queued but never drawn, so a stale frame's geometry can't appear
-    /// a frame late if the game's pass structure changes (a cutscene, a loading screen).</summary>
     public void EndFrame()
     {
         // Resuming after the submitting side stopped - the player un-hid the game UI, most likely.
@@ -201,25 +114,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
         submittedThisFrame = false;
     }
 
-    /// <summary>
-    /// Escalates as soon as the number of back-buffer passes changes between two frames that both
-    /// had a panel queued.
-    ///
-    /// The missed-frame counter above cannot see the failure this catches. It only notices a panel
-    /// that was never drawn - but a panel drawn at pass 4 and then painted over by a pass 5 that
-    /// only exists on SOME frames counts as drawn, clears itself, and is invisible anyway. From the
-    /// outside that is indistinguishable from a miss: the panel flickers. From the inside the miss
-    /// counter reads zero and nothing ever escalates.
-    ///
-    /// A varying pass count is the common cause of both, and unlike "was it painted over" it can
-    /// actually be measured. One change is enough: a fixed index is only meaningful against a fixed
-    /// pass structure, so the moment the structure moves, the index is no longer trustworthy on
-    /// this machine. Erring toward every-pass costs a few wasted quad draws and cannot flicker.
-    ///
-    /// Both frames must have had a panel queued, and the comparison resets whenever one doesn't -
-    /// otherwise a count from before a loading screen would be compared against one after it, and
-    /// every session would escalate on its first zone change regardless of what the renderer does.
-    /// </summary>
     private void CheckPassCountStability()
     {
         if (escalatedToEveryPass || DrawAtOccurrence < 0)
@@ -306,8 +200,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
         }
     }
 
-    /// <summary>Whether this target switch is binding the swapchain back buffer - the point at
-    /// which the 3D scene is composited and the UI has not yet been drawn over it.</summary>
     private static bool IsBackBufferTarget(RenderCommandSetTarget* command)
     {
         if (command->RenderTargetCount == 0)
@@ -321,15 +213,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
         return backBuffer is not null && command->RenderTargets[0] == backBuffer;
     }
 
-    /// <summary>
-    /// Draws the panel and puts every piece of pipeline state back exactly as it was.
-    ///
-    /// Far more thorough than the ImGui path's equivalent, and it has to be: there we were
-    /// borrowing a renderer that rebuilds most of its own state per draw command, whereas here we
-    /// are interrupting the game mid-frame and it is entitled to assume nothing changed underneath
-    /// it. Depth-stencil state matters most - the game may well have depth writes enabled, and a
-    /// panel that wrote depth would corrupt everything drawn after it.
-    /// </summary>
     private void DrawWithStateRestored()
     {
         RawViewportF[] viewports = context.Rasterizer.GetViewports<RawViewportF>();

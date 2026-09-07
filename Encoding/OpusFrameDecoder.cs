@@ -1,8 +1,7 @@
-using Concentus;
+﻿using Concentus;
 
 namespace ScreenShare.Plugin.Encoding;
 
-/// <summary>Decodes Opus packets produced by <see cref="OpusFrameEncoder"/> back to interleaved float PCM.</summary>
 public sealed class OpusFrameDecoder
 {
     private readonly IOpusDecoder decoder;

@@ -1,4 +1,4 @@
-using Dalamud.Bindings.ImGui;
+﻿using Dalamud.Bindings.ImGui;
 using ScreenShare.Plugin.Services;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
@@ -8,25 +8,6 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Rendering;
 
-/// <summary>
-/// Gets <see cref="WorldPanelRenderer"/>'s draw to happen at the one moment in the frame when the
-/// game's backbuffer is bound and the render thread is ours to borrow: inside ImGui's own render
-/// pass, via a draw callback on the background draw list.
-///
-/// Background rather than foreground so the panel layers correctly - it is a thing in the world,
-/// and every ImGui window (this plugin's included) belongs on top of it.
-///
-/// Pipeline state is saved and restored by hand rather than by asking ImGui to rebuild its own.
-/// The usual way to do that is the ImDrawCallback_ResetRenderState sentinel, but Dalamud's
-/// bindings expose ImDrawCallback as a managed delegate with no conversion from
-/// ImDrawCallbackEnum.ResetRenderState, so the sentinel simply isn't reachable through the typed
-/// API - confirmed against Dalamud 15, not assumed. What gets restored is exactly what ImGui's
-/// DX11 backend sets once per frame in SetupRenderState and never re-sets per draw command:
-/// input layout, topology, both shaders, their constant buffers, and the pixel sampler. The
-/// scissor rectangle joins them because the panel has to override it (see WorldPanelRenderer).
-/// Shader resources are the one exception - the backend rebinds slot 0 for every command and never
-/// uses slot 1 - so leaving those unbound is both correct and cheaper than round-tripping them.
-/// </summary>
 public sealed class WorldPanelDispatch : IDisposable
 {
     private readonly WorldPanelRenderer renderer;
@@ -47,12 +28,6 @@ public sealed class WorldPanelDispatch : IDisposable
         callback = OnRenderCallback;
     }
 
-    /// <summary>Queues the panel for this frame. Call from the render thread during
-    /// UiBuilder.Draw; the actual GPU work happens later in the same frame, when ImGui renders.
-    ///
-    /// Exactly one panel exists per frame, which is why the parameters live in a single field
-    /// rather than a per-callback allocation - a second concurrent panel would need real
-    /// per-callback storage (ImGui's void* user data) instead.</summary>
     public unsafe void Submit(in WorldPanelDraw draw)
     {
         pending = draw;
@@ -122,8 +97,6 @@ public sealed class WorldPanelDispatch : IDisposable
         }
     }
 
-    /// <summary>Entries come back null for any slot that had nothing bound, which is normal rather
-    /// than exceptional - ImGui leaves most sampler and constant-buffer slots empty.</summary>
     private static void DisposeAll<T>(T[] resources)
         where T : IDisposable?
     {

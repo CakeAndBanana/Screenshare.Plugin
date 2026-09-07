@@ -1,47 +1,11 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace ScreenShare.Plugin.Capture.ScreenCapture.Interop;
 
-/// <summary>
-/// Raw COM interop for the Windows.Graphics.Capture WinRT API (Windows 10 1903+), used to capture
-/// one specific top-level window instead of a whole monitor - what DXGI Desktop Duplication
-/// (<see cref="DesktopDuplicationCapture"/>) can't do, since it only ever captures a full output.
-///
-/// Deliberately classic <c>[ComImport]</c> interop rather than a CsWinRT-projected reference:
-/// tried adding the <c>Microsoft.Windows.SDK.Contracts</c> NuGet package first (the route
-/// Microsoft's own official samples use for plain desktop apps), but the modern .NET 5+ SDK
-/// hard-rejects any direct <c>.winmd</c> reference (NETSDK1130, no override) unless the project's
-/// TargetFramework carries a specific Windows-version suffix (e.g. <c>net10.0-windows10.0.19041.0</c>)
-/// - a repo-wide change this project's TFM shouldn't take on just for one capture mode. WinRT
-/// interfaces are ABI-compatible with classic COM (IInspectable extends IUnknown by exactly 3
-/// methods - GetIids/GetRuntimeClassName/GetTrustLevel - before an interface's own methods begin),
-/// so they can be declared and called the same way as any other COM interface; those 3 methods are
-/// declared below purely as vtable-slot placeholders and never actually invoked.
-///
-/// Every GUID and method order here was cross-verified against three independent sources before
-/// being trusted, not derived from memory: (1) Microsoft's own official C# sample
-/// (Composition.WindowsRuntimeHelpers/CaptureHelper.cs and Direct3D11Helper.cs, from the
-/// microsoft/Windows.UI.Composition-Win32-Samples repo) for IGraphicsCaptureItemInterop and
-/// IDirect3DDxgiInterfaceAccess - those two interfaces are declared exactly as that sample
-/// declares them, verbatim, rather than re-derived; (2) Microsoft's own Learn docs for
-/// RoGetActivationFactory; (3) a real, independent, non-CsWinRT interop implementation
-/// (github.com/TKMAX777/winapi's Go winrt package) which declares full raw vtable structs for
-/// every other interface used here (IGraphicsCaptureItem, IDirect3D11CaptureFramePool,
-/// IDirect3D11CaptureFramePoolStatics2, IGraphicsCaptureSession, IDirect3D11CaptureFrame) - used
-/// specifically to confirm exact method ORDER, which is the one thing docs alone don't reliably
-/// give and which is fatal to get wrong (wrong vtable slot = calling the wrong method = crash).
-/// For everything not taken verbatim from a proven C# declaration, every method is declared with
-/// explicit <c>[PreserveSig]</c> + an <c>int</c> HRESULT return + explicit <c>out</c> parameters
-/// matching the real native signature, rather than relying on .NET's "trailing out-param becomes
-/// the C# return value" auto-conversion convention for signatures nobody has already verified.
-/// </summary>
 internal static class WindowsGraphicsCaptureInterop
 {
     public const string Direct3D11CaptureFramePoolClassName = "Windows.Graphics.Capture.Direct3D11CaptureFramePool";
 
-    /// <summary>DXGI_FORMAT_B8G8R8A8_UNORM's numeric value - DirectXPixelFormat's values are
-    /// documented to correspond 1:1 with DXGI_FORMAT, confirmed against the Go reference's own
-    /// enum (which lists the same value under the same name).</summary>
     public const int PixelFormatB8G8R8A8UIntNormalized = 87;
 
     [StructLayout(LayoutKind.Sequential)]

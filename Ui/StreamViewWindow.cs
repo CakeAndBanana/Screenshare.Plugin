@@ -8,16 +8,6 @@ using ScreenShare.Plugin.Services;
 
 namespace ScreenShare.Plugin.Ui;
 
-/// <summary>
-/// Popout window showing whichever room member ShareWindow is currently watching - separate from
-/// the main room UI so it can be moved/resized/left open independently. Owns none of the actual
-/// watch-session lifecycle itself (that stays entirely in ShareWindow, the single owner of
-/// RoomSessionService/MediaSessionService/the decoded texture); this class only renders what it's
-/// given and reports back when the user closes it. That seam is what the "In-world screen" section
-/// below grew into: it only edits where the panel hangs, while this window stays the thing that
-/// starts and stops watching, so projecting in the world never became a second way to control the
-/// session.
-/// </summary>
 public sealed class StreamViewWindow : Window
 {
     private static readonly Vector4 ErrorColor = new(1f, 0.4f, 0.4f, 1f);
@@ -86,25 +76,6 @@ public sealed class StreamViewWindow : Window
         SizeCondition = ImGuiCond.FirstUseEver;
     }
 
-    /// <summary>Fires for every way this window can close - the X button, Esc, or ShareWindow
-    /// setting IsOpen = false itself (e.g. the watched stream died, or the room was left) - since
-    /// the underlying Dalamud Window only ever calls this once per open-to-close transition
-    /// regardless of which triggered it. Closing this window is the only thing that stops the
-    /// watch session; there's no separate "Stop watching" button duplicating that.</summary>
-    /// <summary>
-    /// Closing this window stops watching - unless the panel is currently in the world, in which
-    /// case it just goes away and the stream keeps running.
-    ///
-    /// It was the only way to stop watching before there was anywhere else to see the stream, so
-    /// closing it meant stopping. With the panel projected, the stream is still right there in
-    /// front of the player, and tearing it down because they tidied a window away would be a
-    /// surprise. ShareWindow keeps "Show" and "Stop watching" next to each other for whichever was
-    /// actually meant.
-    ///
-    /// Worth being clear about what this does NOT buy: nothing about decoding. The decoder runs off
-    /// network arrival and writes to a shared texture whether or not anything draws it - closing
-    /// this window removes one textured quad from ImGui, which costs nothing worth measuring.
-    /// </summary>
     public override void OnClose()
     {
         if (worldScreen().IsProjecting)
@@ -113,8 +84,6 @@ public sealed class StreamViewWindow : Window
         onClosed();
     }
 
-    /// <summary>Set here rather than in Draw() so it's current before ImGui.Begin uses it, not a
-    /// frame behind.</summary>
     public override void PreDraw()
     {
         string? watchingId = mediaSession.ViewingStreamerConnectionId;
@@ -214,9 +183,6 @@ public sealed class StreamViewWindow : Window
         DrawWorldScreenSection();
     }
 
-    /// <summary>Converts the cumulative underrun/drop totals into a per-minute rate over a rolling
-    /// window, so an ongoing problem is distinguishable from one that happened once at startup.
-    /// Resets when a counter goes backwards, which means a new watch session began.</summary>
     private void UpdateAudioHealthRates(long underrunMs, long droppedMs)
     {
         DateTime now = DateTime.UtcNow;
@@ -241,9 +207,6 @@ public sealed class StreamViewWindow : Window
         rateDroppedBaseMs = droppedMs;
     }
 
-    /// <summary>Volume and A/V sync for the stream being watched. Deliberately outside the in-world
-    /// section and above it: these apply to any way of watching, and burying playback volume inside
-    /// a projection feature nobody has enabled would make it unfindable.</summary>
     private void DrawPlaybackControls()
     {
         Configuration config = ServiceCollector.Config;
@@ -293,10 +256,6 @@ public sealed class StreamViewWindow : Window
         }
     }
 
-    /// <summary>Controls for projecting the stream onto a panel in the game world. Where the panel
-    /// hangs is room state rather than personal preference, so those controls are disabled for
-    /// anyone the room hasn't granted streaming rights to - the relay re-checks the same
-    /// permission, making this the readable half of the guard rather than the enforcing half.</summary>
     private void DrawWorldScreenSection()
     {
         if (!ImGui.CollapsingHeader("In-world screen"))
@@ -313,7 +272,7 @@ public sealed class StreamViewWindow : Window
         ScreenPlacementInfo? placement = roomSession.ScreenPlacement ?? config.LocalScreenPlacement;
 
         // Outside a room there's nobody to ask, so the local fallback placement is always editable.
-        bool canPlace = !roomSession.InRoom || roomSession.CanPlaceScreen;
+        bool canPlace = WorldScreenController.CanPlace(roomSession);
 
         ImGui.BeginDisabled(!canPlace);
         if (ImGui.Button(placement is null ? "Place here" : "Move here"))
@@ -357,7 +316,10 @@ public sealed class StreamViewWindow : Window
         else if (placement.TerritoryType != ServiceCollector.ClientState.TerritoryType)
             ImGui.TextColored(WarnColor, "The screen is placed in another zone, so it isn't being drawn here.");
         else
+        {
+            DrawGizmoControls(canPlace);
             DrawPlacementSliders(placement, canPlace);
+        }
 
         ImGui.Separator();
 
@@ -451,10 +413,6 @@ public sealed class StreamViewWindow : Window
     }
 
 #if DEBUG
-    /// <summary>The occlusion test has two halves that can each be wrong independently - whether
-    /// the depth buffer holds usable data, and whether its values share a scale and direction with
-    /// our own fragment depth. These surface both, so a panel that refuses to hide behind walls
-    /// can be narrowed down here instead of by guesswork.</summary>
     private void DrawDepthDiagnostics(Configuration config)
     {
         if (ImGui.Checkbox("Scene uses standard depth (near = 0)", ref standardDepth))
@@ -520,14 +478,6 @@ public sealed class StreamViewWindow : Window
         }
     }
 
-    /// <summary>The actual numbers behind the occlusion test, because colour is a hopeless readout
-    /// when both values sit near the bottom of the 0-1 range - a panel depth of 0.02 and one of
-    /// 0.0000 look identical on screen and behave completely differently.
-    ///
-    /// The panel's depth is computed here exactly as the vertex shader and rasterizer compute it
-    /// (transform by the view-projection, then divide by w), so this is the same number the
-    /// comparison uses rather than a re-derivation of it. The projection's depth-row elements are
-    /// shown alongside because they identify the convention outright - which beats inferring it.</summary>
     private void DrawDepthNumbers(in SceneView view)
     {
         ScreenPlacementInfo? placement = roomSession.ScreenPlacement ?? ServiceCollector.Config.LocalScreenPlacement;
@@ -551,9 +501,32 @@ public sealed class StreamViewWindow : Window
 
 #endif
 
-    /// <summary>Every slider commits on IsItemDeactivatedAfterEdit rather than per-frame - the same
-    /// idiom the config saves already use. It matters more here than there: without it, dragging a
-    /// slider would fire a hub call and a room-wide broadcast on every rendered frame.</summary>
+    private void DrawGizmoControls(bool canPlace)
+    {
+        WorldScreenController controller = worldScreen();
+
+        ImGui.BeginDisabled(!canPlace);
+
+        bool editMode = controller.EditMode;
+        if (ImGui.Checkbox("Edit with handles on the screen", ref editMode))
+            controller.EditMode = editMode;
+
+        if (controller.EditMode)
+        {
+            ImGui.SameLine();
+            int operation = (int)controller.GizmoOperation;
+            ImGui.SetNextItemWidth(140f);
+            if (ImGui.Combo("##gizmoOperation", ref operation, "Move\0Turn\0Tilt\0Resize\0"))
+                controller.GizmoOperation = (GizmoOperation)operation;
+
+            ImGui.TextDisabled(controller.IsDraggingGizmo
+                ? "Dragging - the room sees it when you let go."
+                : "Drag the handle on the screen. Roll and non-uniform stretch aren't stored, so they aren't offered.");
+        }
+
+        ImGui.EndDisabled();
+    }
+
     private void DrawPlacementSliders(ScreenPlacementInfo placement, bool canPlace)
     {
 #if DEBUG
@@ -598,7 +571,14 @@ public sealed class StreamViewWindow : Window
 
         // Ranges are anchored to the seeded height, not the live one, so the scale doesn't shift
         // underneath the handle while it's being dragged.
+        //
+        // Guarded against a non-finite value because a slider whose BOUNDS are NaN throws inside
+        // ImGui, taking the whole window's draw with it. The placement reaching here is not
+        // necessarily one this client produced - it can arrive from the room, from another client's
+        // build - so the value cannot simply be trusted to be sane.
         float heightAnchor = sliderSource?.Y ?? placement.Y;
+        if (!float.IsFinite(heightAnchor))
+            heightAnchor = 0f;
         ImGui.SliderFloat("Height (m)", ref sliderHeight, heightAnchor - 10f, heightAnchor + 10f);
         changed |= ImGui.IsItemDeactivatedAfterEdit();
         active |= ImGui.IsItemActive();
@@ -664,17 +644,6 @@ public sealed class StreamViewWindow : Window
         sliderFalloffEnd = placement.FalloffEnd;
     }
 
-    /// <summary>Routes a placement edit to the room when there is one, and to local config
-    /// otherwise, so the in-world screen still works while watching outside a room.</summary>
-    private void ApplyPlacement(ScreenPlacementInfo? placement)
-    {
-        if (roomSession.InRoom)
-        {
-            roomSession.UpdateScreenPlacement(placement);
-            return;
-        }
-
-        ServiceCollector.Config.LocalScreenPlacement = placement;
-        ServiceCollector.PI.SavePluginConfig(ServiceCollector.Config);
-    }
+    private void ApplyPlacement(ScreenPlacementInfo? placement) =>
+        WorldScreenController.ApplyPlacement(roomSession, placement);
 }

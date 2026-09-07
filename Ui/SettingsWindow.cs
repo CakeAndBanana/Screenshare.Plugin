@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
@@ -8,25 +8,6 @@ using ScreenShare.Plugin.Services;
 
 namespace ScreenShare.Plugin.Ui;
 
-/// <summary>
-/// Streaming settings (capture source, resolution/bitrate/fps/codec, audio source/bitrate) as
-/// their own window, separate from the room UI - previously a collapsed section inside
-/// ShareWindow's room screen, which meant it was only reachable while already in a room. Moved out
-/// so it's reachable regardless of connection/room state, and so it can be registered as the
-/// plugin's actual config UI (see Plugin.cs's UiBuilder.OpenConfigUi wiring - Dalamud's plugin
-/// installer flags a plugin that never registers one).
-///
-/// Deliberately does NOT own display name / relay URL - those stay on ShareWindow's Connect screen,
-/// since they're tied directly to the Connect action rather than being "streaming settings" in the
-/// sense the room screen's collapsed section used to mean.
-///
-/// ShareWindow still owns the actual capture/audio session objects and starts streaming/watching
-/// with whatever this window's properties currently hold - this class only owns the UI state and
-/// picker enumeration, not the session lifecycle. The three constructor delegates are the only
-/// coupling back to ShareWindow: whether a capture/audio session is currently running (to disable
-/// the relevant pickers, matching the "changes apply next time you start" pattern used throughout
-/// this plugin) and how to apply a live audio bitrate change to an already-running capture.
-/// </summary>
 public sealed class SettingsWindow : Window, IDisposable
 {
     private readonly Func<bool> isStreaming;
@@ -94,10 +75,6 @@ public sealed class SettingsWindow : Window, IDisposable
         SizeCondition = ImGuiCond.FirstUseEver;
     }
 
-    /// <summary>Number fields use InputInt (type a value, or use the +/- buttons) rather than
-    /// sliders - a drag bar was hard to land on an exact value with. Each one saves to disk via
-    /// <see cref="IsItemDeactivatedAfterEdit"/> so typing doesn't write on every keystroke, only
-    /// once you tab/click away with a finished value.</summary>
     public override void Draw()
     {
         DrawCaptureModePicker();
@@ -146,10 +123,6 @@ public sealed class SettingsWindow : Window, IDisposable
             ImGui.TextUnformatted("(resolution/bitrate/fps/codec changes apply next time you start streaming)");
     }
 
-    /// <summary>Lets audio capture target one specific process (and its child-process tree - the
-    /// actual audio in a browser usually renders in a child process, not the main one) instead of
-    /// the whole system mix. Disabled while capture is already running - switching source means
-    /// stopping and starting again, same as changing video settings mid-stream.</summary>
     private void DrawAudioSourcePicker()
     {
         string currentLabel = "System audio (all)";
@@ -182,8 +155,6 @@ public sealed class SettingsWindow : Window, IDisposable
             ImGui.TextUnformatted("(stop audio capture to change source)");
     }
 
-    /// <summary>Throttled - process enumeration is cheap but not free, and this only needs to be
-    /// fresh while the picker is actually open.</summary>
     private void RefreshAudioSourceCandidates()
     {
         if (DateTime.UtcNow - lastAudioSourceRefresh < TimeSpan.FromSeconds(2))
@@ -213,9 +184,6 @@ public sealed class SettingsWindow : Window, IDisposable
         audioSourceCandidates = candidates;
     }
 
-    /// <summary>Switches between capturing a whole monitor and capturing one specific window.
-    /// Disabled while already streaming, same as every picker here - switching means stop and
-    /// start again.</summary>
     private void DrawCaptureModePicker()
     {
         ImGui.BeginDisabled(isStreaming());
@@ -245,9 +213,6 @@ public sealed class SettingsWindow : Window, IDisposable
             DrawMonitorPicker();
     }
 
-    /// <summary>Lets a host pick one specific open window to share instead of a whole monitor -
-    /// useful when you only want to show a browser or a single app, not your whole desktop.
-    /// Disabled while already streaming, same as the monitor picker.</summary>
     private void DrawWindowPicker()
     {
         string currentLabel = selectedWindowHandle == 0
@@ -274,8 +239,6 @@ public sealed class SettingsWindow : Window, IDisposable
             ImGui.TextUnformatted("(stop streaming to change window)");
     }
 
-    /// <summary>Throttled the same way the audio source picker's process list is - cheap, but not
-    /// so cheap it should re-enumerate every frame while the dropdown happens to be open.</summary>
     private void RefreshWindowCandidates()
     {
         if (DateTime.UtcNow - lastWindowListRefresh < TimeSpan.FromSeconds(2))
@@ -306,10 +269,6 @@ public sealed class SettingsWindow : Window, IDisposable
         windowCandidates = candidates;
     }
 
-    /// <summary>Lets a host with multiple monitors pick which one to share instead of always
-    /// capturing whichever Windows currently treats as the desktop primary. Disabled while
-    /// already streaming - matches every other streaming setting here (changes apply next time
-    /// you start).</summary>
     private void DrawMonitorPicker()
     {
         string currentLabel = monitorCandidates.Find(c => c.Index == monitorIndex).Label
@@ -338,12 +297,6 @@ public sealed class SettingsWindow : Window, IDisposable
             ImGui.TextUnformatted("(stop streaming to change monitor)");
     }
 
-    /// <summary>Outputs are enumerated from the same D3D11 adapter DesktopDuplicationCapture will
-    /// actually use (via the lazily-created <see cref="enumerationDevice"/>), so the indices shown
-    /// here line up exactly with the outputIndex it's given. The label prefers the monitor's real
-    /// friendly name (e.g. "Dell U2720Q") over DXGI's own DeviceName, which is only ever a cryptic
-    /// "\\.\DISPLAYn" path - see MonitorNameHelper for how that's resolved. Falls back to the raw
-    /// DeviceName if the lookup can't find (or fails to find at all) a friendly name for it.</summary>
     private void RefreshMonitorCandidates()
     {
         try
