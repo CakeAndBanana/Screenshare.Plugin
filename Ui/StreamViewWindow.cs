@@ -232,10 +232,8 @@ public sealed class StreamViewWindow : Window
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(
-                "How much audio is held before playing. This sets the delay for BOTH streams - " +
-                "video is synchronised to audio, so it can never be shown sooner than the audio it " +
-                "belongs with. Lower is more responsive but more likely to gap when the network " +
-                "stutters. Applied when a stream starts, so restart watching after changing it.");
+                "How much audio is held before playing. This sets the delay for BOTH streams." +
+                "The streams would be audio and video stream.");
         }
 
         ImGui.SetNextItemWidth(200);
@@ -248,11 +246,7 @@ public sealed class StreamViewWindow : Window
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(
-                "Holds video back to line it up with audio. Raise it if the audio sounds late " +
-                "against the picture. How much is needed depends on your output device's own " +
-                "latency, so there is no single right value. " +
-                "Large values need a deeper frame buffer, which is sized when a stream starts - " +
-                "stop and restart watching after a big change.");
+                "Holds video back to line it up with audio.");
         }
     }
 
@@ -282,9 +276,6 @@ public sealed class StreamViewWindow : Window
         {
             ImGui.SameLine();
 
-            // A way back from a placement that's been dragged somewhere unusable - a 40m panel a
-            // few metres from your face fills the whole view, and from inside it there's no visual
-            // cue that size is the problem rather than the projection being broken.
             if (ImGui.Button("Reset shape"))
             {
                 ScreenPlacementInfo reset = placement with
@@ -473,7 +464,6 @@ public sealed class StreamViewWindow : Window
             ImGui.TextDisabled(
                 $"Active panel mode: {WorldScreenController.ResolveDepthMode(config)}, " +
                 $"sign {sign:+0;-0}, scene treated as {(WorldScreenController.SceneUsesReversedZ(config) ? "reversed Z" : "standard Z")}");
-
             DrawDepthNumbers(view);
         }
     }
