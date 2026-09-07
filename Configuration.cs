@@ -39,7 +39,6 @@ public sealed class Configuration : IPluginConfiguration
 
     public float WorldScreenOpacity { get; set; } = 1f;
 
-    public bool WorldScreenDepthTest { get; set; } = true;
 
     public int WorldScreenDiagnostic { get; set; }
 
@@ -55,7 +54,6 @@ public sealed class Configuration : IPluginConfiguration
 
     public bool WorldScreenDrawUnderUi { get; set; } = true;
 
-    public int WorldScreenHookOccurrence { get; set; } = 4;
 
     public bool WorldScreenStandardDepth { get; set; }
 

@@ -22,6 +22,7 @@ if (command is "help" or "-h" or "--help")
         MediaProbe - Media Foundation diagnostics for ScreenShare.Plugin
 
           mft                              What encoder and decoder MFTs this machine has.
+          duplication                      Which monitors Desktop Duplication will actually capture.
           soak [frames] [WxH] [slots]      Decode for a long time; watch slots, handles, memory.
                                            Default 54000 frames (30 min of video), 1280x720, 17 slots.
 
@@ -42,6 +43,9 @@ if (command == "mft")
     ReportMfts();
     return 0;
 }
+
+if (command == "duplication")
+    return Duplication.Run();
 
 if (command != "soak")
 {

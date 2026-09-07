@@ -19,11 +19,9 @@ public sealed class WorldScreenController : IDisposable
 
     public int LastFrameBackBufferSwitches => sceneHook?.LastFrameBackBufferSwitches ?? 0;
 
-    public bool IsDrawingEveryPass => sceneHook?.IsDrawingEveryPass == true;
+    public int LastFrameSceneSwitches => sceneHook?.LastFrameSceneSwitches ?? 0;
 
-    public int MissedPanelFrames => sceneHook?.MissedFrames ?? 0;
-
-    public string? EveryPassReason => sceneHook?.EscalationReason;
+    public string? SceneHookFallbackReason => sceneHook?.FallbackReason;
 
     public bool IsDrawingUnderUi => sceneHook?.IsActive == true;
 
@@ -200,13 +198,26 @@ public sealed class WorldScreenController : IDisposable
         if (!TryGetDispatch(device, out WorldPanelDispatch? panelDispatch))
             return;
 
-        bool wantsDepth = config.WorldScreenDepthTest || config.WorldScreenDiagnostic > 0;
-        SceneDepthBuffer? depth = wantsDepth ? GameSceneCamera.TryGetSceneDepth() : null;
+        // Always asked for. Occlusion is what makes the panel read as an object standing in the
+        // world rather than a picture pasted over it, so it is not a preference - the only reason
+        // to go without is the game not handing over a usable depth buffer, which is handled below.
+        SceneDepthBuffer? depth = GameSceneCamera.TryGetSceneDepth();
 
         // Falling back to an unoccluded overlay rather than refusing to draw: a panel that shows
         // through walls is a far better failure than no panel at all, and it's the same path the
         // depth-test toggle takes deliberately.
-        PanelDepthMode mode = depth is null
+        // The scene hook now draws the panel INTO the scene with depth written, so the hardware
+        // depth test decides occlusion and the shader must not also clip against a sampled copy -
+        // at the point it draws, that copy is the previous frame's, and clipping against it would
+        // punch holes wherever the world has since moved.
+        //
+        // The ImGui fallback still needs the shader test: it composites after the whole frame, long
+        // past any chance of the depth buffer accepting a write.
+        bool drawsIntoScene = config.WorldScreenDrawUnderUi
+            && TryGetSceneHook(device, out ScenePanelHook? sceneHookForMode)
+            && sceneHookForMode!.IsActive;
+
+        PanelDepthMode mode = depth is null || (drawsIntoScene && config.WorldScreenDiagnostic == 0)
             ? PanelDepthMode.None
             : ResolveDepthMode(config);
 
@@ -227,7 +238,6 @@ public sealed class WorldScreenController : IDisposable
         // the whole feature down with it.
         if (config.WorldScreenDrawUnderUi && TryGetSceneHook(device, out ScenePanelHook? hook) && hook!.IsActive)
         {
-            hook.DrawAtOccurrence = config.WorldScreenHookOccurrence;
             hook.Submit(in draw);
             return;
         }
@@ -262,7 +272,7 @@ public sealed class WorldScreenController : IDisposable
         >= 3 => PanelDepthMode.ShowOcclusionTest,
         2 => PanelDepthMode.ShowDepthComparison,
         1 => PanelDepthMode.ShowDepthBuffer,
-        _ => config.WorldScreenDepthTest ? PanelDepthMode.Occlude : PanelDepthMode.None,
+        _ => PanelDepthMode.Occlude,
     };
 
     public static bool SceneUsesReversedZ(Configuration config) => !config.WorldScreenStandardDepth;

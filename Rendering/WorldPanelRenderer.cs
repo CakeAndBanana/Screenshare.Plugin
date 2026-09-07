@@ -152,6 +152,8 @@ public sealed class WorldPanelRenderer : IDisposable
     private readonly Buffer constantBuffer;
     private readonly BlendState sceneBlendState;
     private readonly DepthStencilState sceneDepthStencilState;
+    private readonly DepthStencilState sceneDepthWriteState;
+    private readonly DepthStencilState sceneDepthWriteReversedState;
     private readonly RasterizerState sceneRasterizerState;
     private readonly BorrowedShaderResourceView video = new();
     private readonly BorrowedShaderResourceView depth = new();
@@ -214,6 +216,34 @@ public sealed class WorldPanelRenderer : IDisposable
             IsDepthEnabled = false,
             DepthWriteMask = DepthWriteMask.Zero,
             DepthComparison = Comparison.Always,
+            IsStencilEnabled = false,
+        });
+
+        // The other way of doing this: draw the panel as what it actually is - an opaque object
+        // standing in the world - at the START of the scene, and let the game's own depth testing
+        // sort out everything drawn afterwards.
+        //
+        // The shader-side occlusion above can only ever decide OUR pixels. Anything the game draws
+        // later has no idea the panel is there, which is why character nameplates sat behind it:
+        // they are drawn during the 3D phase, so no amount of reordering our single draw could put
+        // them in front without the world then covering us. Writing depth is what makes the panel
+        // visible to everything that comes after it.
+        //
+        // Two states because the comparison has to match the game's Z convention: with reversed Z
+        // (near = 1) a nearer fragment has the LARGER depth value.
+        sceneDepthWriteState = new DepthStencilState(gameDevice, new DepthStencilStateDescription
+        {
+            IsDepthEnabled = true,
+            DepthWriteMask = DepthWriteMask.All,
+            DepthComparison = Comparison.LessEqual,
+            IsStencilEnabled = false,
+        });
+
+        sceneDepthWriteReversedState = new DepthStencilState(gameDevice, new DepthStencilStateDescription
+        {
+            IsDepthEnabled = true,
+            DepthWriteMask = DepthWriteMask.All,
+            DepthComparison = Comparison.GreaterEqual,
             IsStencilEnabled = false,
         });
 
@@ -295,10 +325,14 @@ public sealed class WorldPanelRenderer : IDisposable
         context.PixelShader.SetShaderResource(1, null);
     }
 
-    public void DrawInScene(DeviceContext context, in WorldPanelDraw draw)
+    public void DrawInScene(DeviceContext context, in WorldPanelDraw draw, bool writeDepth)
     {
+        DepthStencilState depthState = writeDepth
+            ? (draw.DepthSign < 0f ? sceneDepthWriteReversedState : sceneDepthWriteState)
+            : sceneDepthStencilState;
+
         context.OutputMerger.SetBlendState(sceneBlendState, new SharpDX.Mathematics.Interop.RawColor4(0f, 0f, 0f, 0f), unchecked((int)0xFFFFFFFF));
-        context.OutputMerger.SetDepthStencilState(sceneDepthStencilState, 0);
+        context.OutputMerger.SetDepthStencilState(depthState, 0);
         context.Rasterizer.State = sceneRasterizerState;
         context.Rasterizer.SetViewport(0f, 0f, draw.DisplaySize.X, draw.DisplaySize.Y);
 
@@ -309,6 +343,8 @@ public sealed class WorldPanelRenderer : IDisposable
     {
         sceneRasterizerState.Dispose();
         sceneDepthStencilState.Dispose();
+        sceneDepthWriteState.Dispose();
+        sceneDepthWriteReversedState.Dispose();
         sceneBlendState.Dispose();
         video.Dispose();
         depth.Dispose();

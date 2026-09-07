@@ -1,0 +1,16 @@
+{
+  "profiles": {
+    "MFT report": {
+      "commandName": "Project",
+      "commandLineArgs": "mft"
+    },
+    "Duplication report": {
+      "commandName": "Project",
+      "commandLineArgs": "duplication"
+    },
+    "Decode soak (30 min of video)": {
+      "commandName": "Project",
+      "commandLineArgs": "soak"
+    }
+  }
+}

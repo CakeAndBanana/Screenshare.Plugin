@@ -22,11 +22,9 @@ public sealed class StreamViewWindow : Window
     // ImGui widgets need a by-ref local to bind to. These mirror config rather than replacing it -
     // config stays the source of truth, these are just what the widgets write into first.
     private bool projectInWorld = ServiceCollector.Config.ProjectInWorld;
-    private bool depthTest = ServiceCollector.Config.WorldScreenDepthTest;
     private bool spatialAudio = ServiceCollector.Config.SpatialAudio;
     private bool standardDepth = ServiceCollector.Config.WorldScreenStandardDepth;
     private bool drawUnderUi = ServiceCollector.Config.WorldScreenDrawUnderUi;
-    private int hookOccurrence = ServiceCollector.Config.WorldScreenHookOccurrence;
     private int diagnostic = ServiceCollector.Config.WorldScreenDiagnostic;
     private float opacity = ServiceCollector.Config.WorldScreenOpacity;
     private float volume = ServiceCollector.Config.ViewerVolume;
@@ -322,12 +320,6 @@ public sealed class StreamViewWindow : Window
             ServiceCollector.PI.SavePluginConfig(config);
         }
 
-        if (ImGui.Checkbox("Hide behind walls", ref depthTest))
-        {
-            config.WorldScreenDepthTest = depthTest;
-            ServiceCollector.PI.SavePluginConfig(config);
-        }
-
         if (ImGui.Checkbox("Positional audio", ref spatialAudio))
         {
             config.SpatialAudio = spatialAudio;
@@ -352,46 +344,48 @@ public sealed class StreamViewWindow : Window
             ImGui.TextColored(WarnColor, "The render hook isn't running - drawing over the game UI instead.");
 
         // Deliberately NOT compiled out of Release, unlike the depth diagnostics below. Which
-        // render pass to draw in depends on the machine - FSR adds an upscale pass, and vendors
-        // differ - so this is a setting a user may genuinely need, not a developer tool. Hiding it
-        // would leave anyone hitting a flickering view with no way out but turning the feature off.
+        // Which pass to draw in is worked out from the frame itself rather than configured. It was
+        // a setting once, and could not be one: the right value differs per machine, moves with the
+        // interface, and both ways of getting it wrong look like a bug in the feature rather than a
+        // number that needs tuning - the panel either hides behind the world or covers the HUD.
         if (drawUnderUi)
         {
-            bool auto = hookOccurrence < 0;
-            if (ImGui.Checkbox("Auto-detect render pass", ref auto))
+            int passes = worldScreen().LastFrameBackBufferSwitches;
+            int scenePasses = worldScreen().LastFrameSceneSwitches;
+            ImGui.TextDisabled($"Render passes last frame: {passes} ({scenePasses} drawing the 3D scene)");
+
+            // The game binds the back buffer once per HUD element, so on some machines this is over
+            // a hundred rather than a handful. Drawing in every one of those means the LAST draw
+            // lands after the whole interface, which puts the screen on top of it - the exact
+            // opposite of what "draw underneath the game UI" is for. Worth saying outright, because
+            // from the player's side it just looks like the setting does nothing.
+            // The panel is drawn in the passes that draw the 3D scene, so none of them means it
+            // cannot be drawn at all. Worth saying outright, because from the player's side that is
+            // indistinguishable from the feature simply being off.
+            if (scenePasses == 0 && passes > 0)
             {
-                // Unticking lands on 4, the value measured on an NVIDIA machine without FSR -
-                // a starting point to tune from, not a claim that it is right anywhere else.
-                hookOccurrence = auto ? -1 : 4;
-                config.WorldScreenHookOccurrence = hookOccurrence;
-                ServiceCollector.PI.SavePluginConfig(config);
+                ImGui.TextColored(WarnColor,
+                    "None of this frame's passes bound a depth buffer, so there is nowhere to draw the " +
+                    "screen underneath the interface. Untick \"Draw underneath the game UI\" to draw " +
+                    "it over the interface instead.");
             }
 
-            if (ImGui.IsItemHovered())
+            // The in-world panel is drawn between the game's own passes; an overlay that inserts
+            // passes of its own can paint over it on the frames those passes run. The popout window
+            // is drawn at present time and is never affected, which is why the two behave
+            // differently for the same person.
+            if (OverlayDetector.Detected is { } overlay)
             {
-                ImGui.SetTooltip(
-                    "Draws in every render pass instead of one fixed pass. Fixes a flickering panel: " +
-                    "the number of passes varies between frames, so a fixed pass only matches some of " +
-                    "them. Costs a few wasted draws per frame, which is not noticeable.");
+                ImGui.TextColored(WarnColor,
+                    $"{overlay} is loaded. If the in-world screen flickers while the popout window " +
+                    "doesn't, turn off \"Draw under the game UI\" - the panel then draws over the HUD " +
+                    "but stays steady.");
             }
 
-            if (!auto)
-            {
-                ImGui.SetNextItemWidth(120);
-                if (ImGui.InputInt("Render pass", ref hookOccurrence))
-                {
-                    hookOccurrence = Math.Max(hookOccurrence, 0);
-                    config.WorldScreenHookOccurrence = hookOccurrence;
-                    ServiceCollector.PI.SavePluginConfig(config);
-                }
-            }
-
-            ImGui.TextDisabled($"Render passes last frame: {worldScreen().LastFrameBackBufferSwitches}");
-
-            // Shown when the hook has corrected itself, so a user who never touched this setting
-            // still learns why - silent self-healing is fine until someone wonders what changed.
-            if (!auto && worldScreen().EveryPassReason is { } everyPassReason)
-                ImGui.TextDisabled($"Switched to drawing in every pass automatically: {everyPassReason}.");
+            // Shown when the hook has corrected itself, so someone who changed nothing still learns
+            // why - silent self-healing is fine until somebody wonders what happened.
+            if (worldScreen().SceneHookFallbackReason is { } fallbackReason)
+                ImGui.TextDisabled($"Adjusted automatically: {fallbackReason}.");
         }
 
 #if DEBUG

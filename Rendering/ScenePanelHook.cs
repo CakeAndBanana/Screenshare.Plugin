@@ -18,6 +18,25 @@ public sealed unsafe class ScenePanelHook : IDisposable
 
     private const long StaleAfterMs = 200;
 
+    // Missed frames tolerated before the hook stops insisting on the exact back-buffer pointer.
+    //
+    // Normally the game binds the very texture RenderTargetManager reports as the swap chain's back
+    // buffer, and matching it by pointer is precise. A post-processing overlay that redirects the
+    // final composite into a texture of its own breaks that: on the frames its passes run, the
+    // pointer never appears, no pass matches, and the panel is simply absent - which is the
+    // flickering reported with ReShade loaded, only for the in-world panel and never for the popout
+    // (which draws through ImGui at present time and cannot be affected).
+    //
+    // Drawing in every pass does not help there, because the problem is not WHICH bind was chosen -
+    // it is that no bind was recognised at all. So after enough misses the hook widens the test to
+    // any target the same size as the back buffer.
+    //
+    // Deliberately gated on real misses rather than on detecting an overlay. Widening the test is a
+    // genuine risk - a full-resolution intermediate target would then match, and the panel would be
+    // drawn into something the game later overwrites or uses elsewhere - so it is only worth taking
+    // for someone whose panel is already not being drawn.
+    private const int MatchBySizeAfterMisses = 60;
+
     private delegate void DoSetTargetCommandDelegate(ImmediateContext* context, RenderCommandSetTarget* command);
 
     private readonly WorldPanelRenderer renderer;
@@ -26,30 +45,47 @@ public sealed unsafe class ScenePanelHook : IDisposable
 
     private WorldPanelDraw pending;
     private bool hasPending;
-    private bool submittedThisFrame;
 
     private long pendingAtMs;
+
+    // Set once the panel has been missing often enough that pointer-matching the swap chain's back
+    // buffer is clearly not finding it - see MatchBySizeAfterMisses.
+    private bool matchTargetsBySize;
     private int backBufferSwitches;
+    private int depthBoundSwitches;
     private bool loggedFailure;
 
-    // Automatic escalation to every-pass drawing. A correctly chosen pass essentially never misses,
-    // so repeated misses are evidence the choice is wrong on this machine rather than a transient.
-    private int missedFrames;
-    private bool escalatedToEveryPass;
+    private int framesWithoutScenePass;
 
-    private int previousSwitches = -1;
+    // Per-frame, both reset in EndFrame: whether the 3D scene has been seen yet, and whether the
+    // panel has already been drawn at the transition out of it.
+    private bool sawScenePass;
+    private bool drewThisFrame;
+
+    // One-shot capture of a single frame's back-buffer binds, so the shape of the frame can be read
+    // instead of inferred. Nameplates sit behind the panel, which means they are drawn inside the
+    // 3D phase rather than with the rest of the interface - and drawing before them needs whatever
+    // distinguishes their pass from the world's, which is not something guessing has found.
+    private const int MaxRecordedPasses = 192;
+    private readonly (bool Depth, int Width, int Height, int DepthWidth)[] recorded = new (bool, int, int, int)[MaxRecordedPasses];
+    private int recordedCount;
+    // Captured automatically, once, on the first frame after the hook installs. No button, because
+    // it is not a thing anyone should have to know to press - it costs one log line per session and
+    // is the difference between reading the frame's shape and guessing at it.
+    private bool recordRequested = true;
+    private bool recording;
 
     public bool IsActive => hook is { IsEnabled: true };
 
     public int LastFrameBackBufferSwitches { get; private set; }
 
-    public bool IsDrawingEveryPass => escalatedToEveryPass || DrawAtOccurrence < 0;
+    // How many of those also had a depth buffer bound. The gap between the two numbers is the
+    // interface: the game binds the back buffer once per HUD element, and none of those bind depth.
+    public int LastFrameSceneSwitches { get; private set; }
 
-    public int MissedFrames => missedFrames;
-
-    public string? EscalationReason { get; private set; }
-
-    public int DrawAtOccurrence { get; set; }
+    // Set when the hook has had to widen how it recognises the back buffer, which is worth
+    // surfacing because it means something unusual is going on with the renderer.
+    public string? FallbackReason { get; private set; }
 
     public ScenePanelHook(Device gameDevice)
     {
@@ -62,6 +98,16 @@ public sealed unsafe class ScenePanelHook : IDisposable
                 (nint)ImmediateContext.MemberFunctionPointers.DoSetTargetCommand,
                 DoSetTargetCommandDetour);
             hook.Enable();
+
+            // Logged at install rather than on failure: the panel being painted over by an
+            // overlay's own pass looks like a missed pass from in here, so the two are worth being
+            // able to tell apart in a log someone sends later.
+            if (OverlayDetector.Detected is { } overlay)
+            {
+                ServiceCollector.PluginLog.Information(
+                    $"ScreenShare: {overlay} is loaded. It adds its own render passes, which is a known " +
+                    "cause of the in-world screen flickering while the popout window stays steady.");
+            }
         }
         catch (Exception ex)
         {
@@ -74,7 +120,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
     {
         pending = draw;
         hasPending = true;
-        submittedThisFrame = true;
         pendingAtMs = Environment.TickCount64;
     }
 
@@ -89,53 +134,53 @@ public sealed unsafe class ScenePanelHook : IDisposable
         if (PendingIsStale)
         {
             backBufferSwitches = 0;
-            previousSwitches = -1;
+            depthBoundSwitches = 0;
+            sawScenePass = false;
+            drewThisFrame = false;
             hasPending = false;
-            submittedThisFrame = false;
             return;
         }
 
-        // A panel still queued at the frame boundary was never drawn: the pass it was waiting for
-        // did not come up. That is the measurable form of the flicker - the panel is simply absent
-        // from those frames - so it is counted rather than inferred from what it looks like.
-        if (hasPending && !escalatedToEveryPass && DrawAtOccurrence >= 0 && ++missedFrames >= MissedFramesBeforeEscalating)
+        // Queued but never drawn: the frame never showed a 3D-to-2D transition on the back buffer.
+        // Counted because it is the only way this loop loses the panel on its own, and because
+        // enough of them is what justifies the wider match below.
+        if (hasPending && !drewThisFrame)
         {
-            escalatedToEveryPass = true;
-            EscalationReason = $"render pass {DrawAtOccurrence} never came up on {missedFrames} frames";
-            ServiceCollector.PluginLog.Information(
-                $"ScreenShare in-world screen: {EscalationReason}, switching to drawing in every pass.");
+            if (!matchTargetsBySize && ++framesWithoutScenePass >= MatchBySizeAfterMisses)
+            {
+                matchTargetsBySize = true;
+                FallbackReason = "the swap chain's back buffer was never bound by pointer, so any " +
+                                 "target of the same size is now accepted - something is redirecting " +
+                                 "the final composite, which a post-processing overlay does";
+                ServiceCollector.PluginLog.Information($"ScreenShare in-world screen: {FallbackReason}.");
+            }
+        }
+        else
+        {
+            framesWithoutScenePass = 0;
         }
 
-        CheckPassCountStability();
+        if (recording)
+        {
+            recording = false;
+            LogRecordedFrame();
+        }
+        else if (recordRequested)
+        {
+            // Started at a frame boundary rather than mid-frame, so the capture covers one whole
+            // frame instead of whatever was left of the current one.
+            recordRequested = false;
+            recording = true;
+            recordedCount = 0;
+        }
 
         LastFrameBackBufferSwitches = backBufferSwitches;
+        LastFrameSceneSwitches = depthBoundSwitches;
         backBufferSwitches = 0;
+        depthBoundSwitches = 0;
+        sawScenePass = false;
+        drewThisFrame = false;
         hasPending = false;
-        submittedThisFrame = false;
-    }
-
-    private void CheckPassCountStability()
-    {
-        if (escalatedToEveryPass || DrawAtOccurrence < 0)
-            return;
-
-        if (!submittedThisFrame || backBufferSwitches == 0)
-        {
-            previousSwitches = -1;
-            return;
-        }
-
-        if (previousSwitches > 0 && backBufferSwitches != previousSwitches)
-        {
-            escalatedToEveryPass = true;
-            EscalationReason =
-                $"the game's back-buffer pass count changed ({previousSwitches} to {backBufferSwitches}), " +
-                $"so pass {DrawAtOccurrence} can't be relied on";
-            ServiceCollector.PluginLog.Information(
-                $"ScreenShare in-world screen: {EscalationReason}; switching to drawing in every pass.");
-        }
-
-        previousSwitches = backBufferSwitches;
     }
 
     private void DoSetTargetCommandDetour(ImmediateContext* immediateContext, RenderCommandSetTarget* command)
@@ -149,12 +194,39 @@ public sealed unsafe class ScenePanelHook : IDisposable
             if (!IsBackBufferTarget(command))
                 return;
 
-            // Counted unconditionally, even when there's nothing to draw - the count is what the
-            // occurrence setting is dialled against, and it would be useless if it only advanced
-            // on frames that happened to have a panel queued.
-            int occurrence = backBufferSwitches++;
-            if (!hasPending)
+            backBufferSwitches++;
+
+            if (recording && recordedCount < MaxRecordedPasses)
+            {
+                Texture* recordedTarget = command->RenderTargets[0];
+                Texture* recordedDepth = command->DepthBuffer;
+                recorded[recordedCount++] = (
+                    recordedDepth is not null,
+                    recordedTarget is null ? 0 : (int)recordedTarget->ActualWidth,
+                    recordedTarget is null ? 0 : (int)recordedTarget->ActualHeight,
+                    recordedDepth is null ? 0 : (int)recordedDepth->ActualWidth);
+            }
+
+            // A bound depth buffer means this is still the 3D scene; the interface is 2D and binds
+            // none. The game binds the back buffer once per interface element, which is why that
+            // count runs past a hundred while the scene uses a handful.
+            // The FIRST pass of the 3D scene, drawn into as the world itself is about to be, with
+            // depth written so everything the game draws afterwards can see the panel is there.
+            //
+            // Ordering alone could never finish this. Drawing last put the panel over the world but
+            // also over the character nameplates, which are drawn during the 3D phase; drawing
+            // earlier let the world paint over the panel. The panel has to be IN the scene, not
+            // layered on top of it - so it goes in first and the game's depth test does the rest,
+            // exactly as it does for any other solid object.
+            if (command->DepthBuffer is null)
                 return;
+
+            depthBoundSwitches++;
+
+            if (sawScenePass || drewThisFrame || !hasPending)
+                return;
+
+            sawScenePass = true;
 
             // The submitting side has stopped and this geometry is from whenever it stopped. Drawing
             // it would pin a stale view-projection to the screen; EndFrame clears the rest of the
@@ -162,20 +234,7 @@ public sealed unsafe class ScenePanelHook : IDisposable
             if (PendingIsStale)
                 return;
 
-            if (!IsDrawingEveryPass)
-            {
-                if (occurrence != DrawAtOccurrence)
-                    return;
-
-                DrawWithStateRestored();
-
-                // Fixed mode draws exactly once per frame, so the panel is consumed here.
-                hasPending = false;
-                return;
-            }
-
-            // Every-pass: draw in this one and every later one this frame. Deliberately does NOT
-            // clear hasPending - EndFrame does that at the frame boundary.
+            drewThisFrame = true;
             DrawWithStateRestored();
         }
         catch (Exception ex)
@@ -200,7 +259,28 @@ public sealed unsafe class ScenePanelHook : IDisposable
         }
     }
 
-    private static bool IsBackBufferTarget(RenderCommandSetTarget* command)
+    private void LogRecordedFrame()
+    {
+        var text = new System.Text.StringBuilder();
+        text.Append($"ScreenShare frame structure: {recordedCount} back-buffer binds, ")
+            .Append("'D' = depth bound (3D scene), '.' = no depth (interface). ");
+
+        for (int i = 0; i < recordedCount; i++)
+        {
+            (bool depth, int width, int height, int depthWidth) = recorded[i];
+            text.Append(i > 0 ? " " : string.Empty)
+                .Append(i)
+                .Append(depth ? ":D" : ":.")
+                .Append(width).Append('x').Append(height);
+
+            if (depth && depthWidth != width)
+                text.Append("(depth ").Append(depthWidth).Append(')');
+        }
+
+        ServiceCollector.PluginLog.Information(text.ToString());
+    }
+
+    private bool IsBackBufferTarget(RenderCommandSetTarget* command)
     {
         if (command->RenderTargetCount == 0)
             return false;
@@ -210,7 +290,20 @@ public sealed unsafe class ScenePanelHook : IDisposable
             return false;
 
         Texture* backBuffer = targets->SwapChainBackBuffer;
-        return backBuffer is not null && command->RenderTargets[0] == backBuffer;
+        if (backBuffer is null)
+            return false;
+
+        Texture* target = command->RenderTargets[0];
+        if (target == backBuffer)
+            return true;
+
+        // Only reached once the exact pointer has stopped turning up - see MatchBySizeAfterMisses.
+        // Matching on size alone would otherwise catch full-resolution intermediates and draw the
+        // panel into buffers the game uses for something else entirely.
+        return matchTargetsBySize
+            && target is not null
+            && target->ActualWidth == backBuffer->ActualWidth
+            && target->ActualHeight == backBuffer->ActualHeight;
     }
 
     private void DrawWithStateRestored()
@@ -231,7 +324,7 @@ public sealed unsafe class ScenePanelHook : IDisposable
 
         try
         {
-            renderer.DrawInScene(context, in pending);
+            renderer.DrawInScene(context, in pending, writeDepth: true);
         }
         finally
         {
