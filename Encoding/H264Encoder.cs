@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
 using ScreenShare.Plugin.Capture.ScreenCapture;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
@@ -19,6 +20,13 @@ public sealed class H264Encoder : IVideoEncoder
     private readonly Thread writerThread;
     private readonly Thread readerThread;
     private readonly int frameIntervalMs;
+
+    // One entry per frame handed to ffmpeg, dequeued one per access unit that comes back out.
+    // The encoder runs with no B-frames (-tune ll / -tune zerolatency), so output order matches
+    // input order and the Nth unit out is the Nth frame in.
+    private readonly ConcurrentQueue<long> captureTimestamps = new();
+    private readonly int maxPendingTimestamps;
+
     private volatile bool running;
     private int errorRecorded;
 
@@ -70,6 +78,7 @@ public sealed class H264Encoder : IVideoEncoder
         this.gameAdapterDevice = gameAdapterDevice;
         this.sessionClock = sessionClock;
         frameIntervalMs = 1000 / fps;
+        maxPendingTimestamps = Math.Max(8, fps * 2);
         Codec = codec;
 
         (Width, Height) = ComputeScaledSize(source.Width, source.Height, targetHeight);
@@ -145,7 +154,16 @@ public sealed class H264Encoder : IVideoEncoder
                     // audio was stamped accurately at capture - so video was presented that much
                     // later than the audio it belonged with, and no viewer-side clock could correct
                     // it because the timestamps were self-consistently wrong.
-                    Interlocked.Exchange(ref lastCaptureTimestampMs, capturedAtMs);
+                    //
+                    // It rides a queue rather than a single field because ffmpeg answers on its
+                    // own schedule: a field holds whatever was submitted MOST RECENTLY, so every
+                    // unit read back got the timestamp of a frame several ticks newer than the one
+                    // it actually contained - the same defect described above, reintroduced on the
+                    // read side. Enqueued before the write, so the reader can never pull a unit
+                    // out of ffmpeg ahead of the timestamp belonging to it.
+                    captureTimestamps.Enqueue(capturedAtMs);
+                    TrimPendingTimestamps();
+
                     encoderProcess.StandardInput.Write(frame, 0, frame.Length);
                     Interlocked.Increment(ref framesEncoded);
                 }
@@ -174,22 +192,61 @@ public sealed class H264Encoder : IVideoEncoder
     private void ReaderLoop()
     {
         byte[] buffer = new byte[64 * 1024];
+
+        // A read off this pipe returns whatever bytes ffmpeg happened to have, which is never an
+        // access unit boundary - see AnnexBAccessUnitSplitter for what that broke and why every
+        // consumer downstream needs whole units instead.
+        var splitter = new AnnexBAccessUnitSplitter(Codec);
         try
         {
             int read;
             while (running && (read = encoderProcess.StandardOutput.Read(buffer, 0, buffer.Length)) > 0)
             {
+                // Counted as it comes off the pipe rather than as units are emitted, so the
+                // reported bitrate still accounts for bytes currently held mid-unit.
                 Interlocked.Add(ref encodedBytes, read);
-                ChunkEncoded?.Invoke(Interlocked.Read(ref lastCaptureTimestampMs), buffer[..read]);
+                splitter.Append(buffer, 0, read, EmitAccessUnit);
             }
 
+            // Only on a real end of stream. The final unit has no following start code to end it,
+            // so it is still buffered at that point - whereas a loop that exited because running
+            // went false is a teardown, and what is buffered there is half an access unit that
+            // nothing downstream can use.
             if (running)
+            {
+                if (splitter.Flush() is { } tail)
+                    EmitAccessUnit(tail);
+
                 encoderProcess.ThrowIfFailed();
+            }
         }
         catch (Exception ex) when (running)
         {
             RecordError("ReaderLoop (encoder stdout -> callback)", ex);
         }
+    }
+
+    private void EmitAccessUnit(byte[] accessUnit) =>
+        ChunkEncoded?.Invoke(NextCaptureTimestampMs(), accessUnit);
+
+    private long NextCaptureTimestampMs()
+    {
+        if (!captureTimestamps.TryDequeue(out long capturedAtMs))
+            return Interlocked.Read(ref lastCaptureTimestampMs);
+
+        Interlocked.Exchange(ref lastCaptureTimestampMs, capturedAtMs);
+        return capturedAtMs;
+    }
+
+    // Should ffmpeg ever return fewer access units than the frames it was given, this queue would
+    // grow without bound and every timestamp from that point on would be progressively staler.
+    // Discarding the oldest keeps the error bounded and self-correcting instead of compounding
+    // for the rest of the session. The cap is a couple of seconds of frames - far deeper than any
+    // real encoder pipeline, so it only ever trips on an actual mismatch.
+    private void TrimPendingTimestamps()
+    {
+        while (captureTimestamps.Count > maxPendingTimestamps)
+            captureTimestamps.TryDequeue(out _);
     }
 
     private void RecordError(string stage, Exception ex)

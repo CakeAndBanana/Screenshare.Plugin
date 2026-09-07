@@ -190,7 +190,7 @@ public sealed class MediaSessionService : IDisposable
 
             IVideoEncoder encoder = VideoEncoderFactory.Create(
                 gameAdapterDevice, screenCapture, ffmpegExePath, sessionClock, targetHeight, bitrateKbps, fps, codec);
-            encoder.ChunkEncoded += (ptsMs, chunk) => hostSocket?.SendVideoChunk(ptsMs, chunk);
+            WireVideoChunks(encoder);
             videoEncoder = encoder;
             newSocket.SendVideoMetadata(encoder.Width, encoder.Height, codec, fps);
 
@@ -302,8 +302,12 @@ public sealed class MediaSessionService : IDisposable
             var encoder = new H264Encoder(
                 settings.Device, settings.Capture, settings.FfmpegExePath, sessionClock,
                 settings.TargetHeight, bitrateKbps, settings.Fps, settings.Codec);
-            encoder.ChunkEncoded += (ptsMs, chunk) => hostSocket?.SendVideoChunk(ptsMs, chunk);
+            WireVideoChunks(encoder);
 
+            // The handover itself: WireVideoChunks mutes whichever encoder is not this field's
+            // value, so the outgoing one stops putting bytes on the wire at exactly the assignment
+            // that makes the new one start. Deliberately still BEFORE the old encoder is disposed,
+            // so a construction failure above leaves the previous encoder both alive and live.
             videoEncoder = encoder;
             currentBitrateKbps = bitrateKbps;
 
@@ -320,6 +324,28 @@ public sealed class MediaSessionService : IDisposable
 
         if (oldEncoder is not null)
             await Task.Run(() => DisposeSafely(oldEncoder, "H264Encoder (bitrate change)"), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends an encoder's output on the wire for exactly as long as it is the session's encoder.
+    ///
+    /// The identity check is not defensive tidiness. Bitrate adaptation on an encoder that cannot
+    /// retune (ffmpeg always; a Media Foundation encoder whose ICodecAPI was unavailable) replaces
+    /// it outright, and the outgoing encoder keeps producing until its process actually dies -
+    /// which is well after the replacement has started. Without this, two INDEPENDENT streams,
+    /// each with its own SPS/PPS and its own frame numbering, interleave on the one connection for
+    /// the length of the swap, and a viewer's decoder resolves references against whichever
+    /// stream's frames it happened to keep.
+    /// </summary>
+    private void WireVideoChunks(IVideoEncoder encoder)
+    {
+        encoder.ChunkEncoded += (ptsMs, chunk) =>
+        {
+            if (!ReferenceEquals(videoEncoder, encoder))
+                return;
+
+            hostSocket?.SendVideoChunk(ptsMs, chunk);
+        };
     }
 
     private void WireAudio(MediaSocketClient targetSocket, IAudioSource audioCapture, int bitrateBps)
