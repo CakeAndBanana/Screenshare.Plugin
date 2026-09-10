@@ -7,7 +7,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
 {
     private const int MaxRetainedSegments = 8192;
 
-    // How the adaptive band moves: a decisive step up after an underrun, a slow creep back down.
     private const int WidenStepMs = 60;
     private const int NarrowStepMs = 10;
     private const int NarrowIntervalMs = 5000;
@@ -16,19 +15,12 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
     private readonly Queue<Chunk> chunks = new();
     private readonly Queue<Segment> upcoming = new();
     private readonly double bytesPerMillisecond = waveFormat.AverageBytesPerSecond / 1000.0;
-
-    // Adaptive depth. The cap starts at the configured budget and moves within a band around it:
-    // it steps up after an underrun, because an underrun is direct evidence the current depth is
-    // too shallow for this link, and creeps back down while playback stays clean. A fixed depth has
-    // to be sized for the worst burst permanently - latency everyone pays all the time, for an
-    // event that happens occasionally.
+        
     private readonly long baselineBytes =
         (long)(waveFormat.AverageBytesPerSecond / 1000.0 * maxBufferedMilliseconds);
     private long targetBytes = (long)(waveFormat.AverageBytesPerSecond / 1000.0 * maxBufferedMilliseconds);
     private long cleanBytesSinceUnderrun;
 
-    // Recently played audio, kept so an underrun can be concealed with something resembling the
-    // signal rather than with digital silence. A tenth of a second is ample.
     private readonly float[] history = new float[waveFormat.SampleRate * waveFormat.Channels / 10];
     private int historyWritten;
     private int concealedFrames;
@@ -118,10 +110,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
                 int missing = count - written;
                 ConcealLocked(buffer, offset + written, missing);
 
-                // Still recorded as silence even though it is no longer silent: the clock must hold
-                // through concealed audio exactly as it did through digital silence, because none of
-                // it is real content, and letting the clock advance would march video past audio
-                // that was never sent.
                 RecordSegment(handedBytes + written, contentEndPtsMs ?? 0, isSilence: true);
                 silenceBytes += missing;
                 written = count;
@@ -138,10 +126,12 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
         }
     }
 
-    public long? GetPtsAtPlayedBytes(long playedBytes)
+    public long? GetPtsAtPlayedBytes(long rawPlayedBytes)
     {
         lock (gate)
         {
+            long playedBytes = UnwrapPlayedBytesLocked(rawPlayedBytes);
+
             while (upcoming.Count > 0 && upcoming.Peek().StartHandedByte <= playedBytes)
                 current = upcoming.Dequeue();
 
@@ -153,6 +143,18 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
 
             return segment.PtsMs + (long)((playedBytes - segment.StartHandedByte) / bytesPerMillisecond);
         }
+    }
+
+    private long UnwrapPlayedBytesLocked(long rawPlayedBytes)
+    {
+        const long Period = 1L << 32;
+
+        long offset = handedBytes - rawPlayedBytes + (Period / 2);
+        long wraps = offset >= 0
+            ? offset / Period
+            : -((-offset + Period - 1) / Period);
+
+        return rawPlayedBytes + (wraps * Period);
     }
 
     private long PtsAtChunkCursor(Chunk chunk) => chunk.PtsMs + (long)(chunk.Offset / bytesPerMillisecond);
@@ -184,9 +186,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
             return;
         }
 
-        // Slide what is kept back and append. A ring index would avoid the copy, but this runs once
-        // per device buffer over at most 100ms of audio, and a straight run is far easier to read
-        // back out of than a wrapped one.
         int keep = Math.Min(historyWritten, history.Length - samples.Length);
         Array.Copy(history, historyWritten - keep, history, 0, keep);
         samples.CopyTo(history.AsSpan(keep));
@@ -199,8 +198,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
         int channels = Math.Max(waveFormat.Channels, 1);
         int loopFrames = Math.Min(historyWritten / channels, waveFormat.SampleRate / 50);
 
-        // Nothing has played yet (an underrun before the first packet), so there is nothing to
-        // repeat and silence is the only honest answer.
         if (loopFrames < 2)
         {
             output.Clear();
@@ -240,9 +237,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
             }
             else
             {
-                // Partial drop. Advancing the cursor rather than rewriting the chunk keeps its PTS
-                // correct on its own terms - PtsAtChunkCursor derives the timestamp from wherever
-                // the cursor now sits, so dropped audio can never desync what follows it.
                 front.Offset += (int)excess;
                 bufferedBytes -= excess;
                 droppedBytes += excess;
@@ -258,8 +252,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
                 ? last.PtsMs
                 : last.PtsMs + (long)((startHandedByte - last.StartHandedByte) / bytesPerMillisecond);
 
-            // 1ms of slack absorbs the truncation in that division; anything H264Decoder reacts to
-            // is 40x larger.
             if (Math.Abs(continued - ptsMs) <= 1)
                 return;
         }

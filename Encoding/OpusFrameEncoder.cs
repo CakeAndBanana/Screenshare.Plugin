@@ -28,12 +28,6 @@ public sealed class OpusFrameEncoder
         Channels = channels;
         FrameSizePerChannel = sampleRate * frameMilliseconds / 1000;
 
-        // OpusCodecFactory.CreateEncoder can potentially return a native P/Invoke-backed
-        // implementation if a native opus/libopus happens to be discoverable - after the CEF
-        // native-hosting saga in this same plugin, that's a real risk here, not a hypothetical
-        // one. Forcing AttemptToUseNativeLibrary = false makes it always fall through to the
-        // same pure-managed OpusEncoder the old (obsolete) constructor call created directly -
-        // identical behavior, just reachable through the non-obsolete factory API instead.
         OpusCodecFactory.AttemptToUseNativeLibrary = false;
         encoder = OpusCodecFactory.CreateEncoder(sampleRate, channels, OpusApplication.OPUS_APPLICATION_AUDIO);
         encoder.Bitrate = bitrate;

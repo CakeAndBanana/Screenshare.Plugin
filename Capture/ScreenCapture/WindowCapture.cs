@@ -1,4 +1,5 @@
 ﻿using System.Runtime.InteropServices;
+using ScreenShare.Plugin.Capture.ScreenCapture.Interfaces;
 using ScreenShare.Plugin.Capture.ScreenCapture.Interop;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;

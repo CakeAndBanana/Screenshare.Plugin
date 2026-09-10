@@ -11,8 +11,6 @@ public static class SharedTextureBridge
         using Texture2D gameSideTexture = gameDevice.OpenSharedResource<Texture2D>(sharedHandle);
         using ShaderResourceView srv = new(gameDevice, gameSideTexture);
 
-        // Extract one owned COM reference for RawTextureWrap; disposing srv/gameSideTexture
-        // below only releases our local SharpDX wrappers' reference, not the underlying resource.
         Marshal.AddRef(srv.NativePointer);
         return new RawTextureWrap(srv.NativePointer, width, height);
     }

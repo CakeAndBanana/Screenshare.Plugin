@@ -228,6 +228,55 @@ public class SyncedPlaybackBufferTests
         Assert.Equal(0, buffer.DroppedMilliseconds);
     }
 
+    // waveOutGetPosition reports its byte count in an MMTIME DWORD, so the position an output
+    // device gives back rolls over every 2^32 bytes - three hours and six minutes of 48kHz stereo
+    // float. The segment anchors inside the buffer are keyed on a real 64-bit handed-byte counter
+    // that never rolls over, so past this mark a raw device position is ~4GB adrift of them.
+    private const long WaveOutPositionPeriod = 1L << 32;
+
+    [Fact]
+    public void GetPtsAtPlayedBytes_AfterTheDevicePositionCounterWraps_KeepsFollowingPlayback()
+    {
+        const int ChunkMs = 2500;
+        const int ChunkBytes = ChunkMs * BytesPerMs;
+
+        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 10_000);
+
+        // Both arrays are reused on purpose. Each chunk is fully drained before the next is added,
+        // so nothing aliases, and it keeps a test that has to move 4GB of audio down to memcpy.
+        // ChunkBytes stays under the adaptive target's own floor (half the configured depth) so
+        // nothing is ever trimmed and the PTS timeline below is exactly continuous.
+        byte[] pcm = new byte[ChunkBytes];
+        byte[] scratch = new byte[ChunkBytes];
+
+        long handedBytes = 0;
+        long ptsMs = 1000;
+        while (handedBytes <= WaveOutPositionPeriod)
+        {
+            buffer.Add(ptsMs, pcm);
+            buffer.Read(scratch, 0, scratch.Length);
+            handedBytes += ChunkBytes;
+            ptsMs += ChunkMs;
+        }
+
+        // The device sits its own buffer depth behind whatever it has been handed, and reports that
+        // position modulo 2^32 - by now a number in the megabytes against a handedBytes over 4GB.
+        long truePlayedBytes = handedBytes - (100 * BytesPerMs);
+        long reportedPlayedBytes = truePlayedBytes % WaveOutPositionPeriod;
+        Assert.True(reportedPlayedBytes < truePlayedBytes, "the device position has to have wrapped or this proves nothing");
+
+        Assert.Equal(1000 + (truePlayedBytes / BytesPerMs), buffer.GetPtsAtPlayedBytes(reportedPlayedBytes));
+
+        // And a wrapped position must still be able to REACH a later anchor, not just extrapolate
+        // from the one already in hand - a jump like this is what an upstream drop looks like.
+        long jumpedPtsMs = ptsMs + 60_000;
+        buffer.Add(jumpedPtsMs, pcm);
+        buffer.Read(scratch, 0, scratch.Length);
+
+        long insideJumpedChunk = handedBytes + (100 * BytesPerMs);
+        Assert.Equal(jumpedPtsMs + 100, buffer.GetPtsAtPlayedBytes(insideJumpedChunk % WaveOutPositionPeriod));
+    }
+
     // --- Adaptive depth ---
 
     private static byte[] TonePacket(float amplitude = 0.5f)

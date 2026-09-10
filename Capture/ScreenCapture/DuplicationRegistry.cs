@@ -11,9 +11,6 @@ internal static class DuplicationRegistry
     {
         get
         {
-            // Racy only in the sense that two instances could each build a dictionary; the loser's
-            // is discarded by GetOrAdd-style re-read below, and plugin loads are not concurrent in
-            // practice anyway.
             if (AppDomain.CurrentDomain.GetData(SlotName) is ConcurrentDictionary<Guid, StrongBox<bool>> existing)
                 return existing;
 

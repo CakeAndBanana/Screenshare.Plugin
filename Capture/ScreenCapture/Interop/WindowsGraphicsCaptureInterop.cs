@@ -15,10 +15,6 @@ internal static class WindowsGraphicsCaptureInterop
         public int Height;
     }
 
-    // --- IGraphicsCaptureItemInterop (Win32-side bridge, classic IUnknown - not WinRT itself).
-    // Declared verbatim from Microsoft's own CaptureHelper.cs sample, including its choice not to
-    // use [PreserveSig] - the trailing "out void** result" native parameter becomes the C# return
-    // value under that convention, proven by that shipped sample rather than assumed here. ---
 
     [ComImport]
     [Guid("3628E81B-3CAC-4C60-B7F4-23CE0E0C3356")]

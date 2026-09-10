@@ -1,4 +1,6 @@
-﻿using ScreenShare.Plugin.Encoding.Interop;
+﻿using ScreenShare.Plugin.Encoding.Enums;
+using ScreenShare.Plugin.Encoding.Interfaces;
+using ScreenShare.Plugin.Encoding.Interop;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 
@@ -35,8 +37,6 @@ public static class VideoDecoderFactory
             }
             catch (Exception ex)
             {
-                // Warning, not error: for HEVC on a machine without the Store extensions this is
-                // the expected outcome, and the stream is about to play regardless.
                 ServiceCollector.PluginLog.Warning(
                     ex, $"ScreenShare could not start a Media Foundation decoder for {codec}; falling back to ffmpeg.");
             }

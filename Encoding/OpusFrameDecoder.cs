@@ -14,8 +14,7 @@ public sealed class OpusFrameDecoder
     {
         Channels = channels;
         FrameSizePerChannel = sampleRate * frameMilliseconds / 1000;
-        // See OpusFrameEncoder for why AttemptToUseNativeLibrary is forced off - same reasoning
-        // applies here.
+
         OpusCodecFactory.AttemptToUseNativeLibrary = false;
         decoder = OpusCodecFactory.CreateDecoder(sampleRate, channels);
     }

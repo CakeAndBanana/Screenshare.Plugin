@@ -1,3 +1,5 @@
+using ScreenShare.Plugin.Encoding.Enums;
+
 namespace ScreenShare.Plugin.Encoding;
 
 /// <summary>
@@ -158,26 +160,16 @@ public sealed class AnnexBAccessUnitSplitter
     private int NalType(int payload) =>
         isHevc ? (buffer[payload] >> 1) & 0x3F : buffer[payload] & 0x1F;
 
-    /// <summary>
-    /// H.264's first_mb_in_slice and HEVC's first_slice_segment_in_pic_flag both sit at the very
-    /// front of the slice header, and both mean "this slice opens a picture" exactly when the
-    /// leading bit of the first RBSP byte is set - ue(v) 0 for the former, flag 1 for the latter.
-    /// </summary>
     private bool IsFirstSliceOfPicture(int payload) =>
         (buffer[payload + (isHevc ? 2 : 1)] & 0x80) != 0;
 
-    /// <summary>
-    /// Non-VCL NALs that belong at the FRONT of the access unit they describe. Everything else -
-    /// H.264 filler (which NVENC's CBR emits freely) and HEVC suffix SEI, both of which trail the
-    /// slices of the picture they belong to - accumulates into the unit already being built.
-    /// </summary>
     private bool IsAccessUnitPrefix(int payload)
     {
         int type = NalType(payload);
 
         return isHevc
-            ? type is 32 or 33 or 34 or 35 or 39   // VPS, SPS, PPS, AUD, prefix SEI
-            : type is 6 or 7 or 8 or 9;            // SEI, SPS, PPS, AUD
+            ? type is 32 or 33 or 34 or 35 or 39
+            : type is 6 or 7 or 8 or 9;
     }
 
     private void EnsureCapacity(int required)

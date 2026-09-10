@@ -1,4 +1,4 @@
-﻿namespace ScreenShare.Plugin.Encoding;
+﻿namespace ScreenShare.Plugin.Encoding.Interfaces;
 
 public interface IVideoDecoder : IDisposable
 {

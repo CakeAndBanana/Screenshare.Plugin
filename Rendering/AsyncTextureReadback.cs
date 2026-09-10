@@ -55,19 +55,8 @@ public sealed class AsyncTextureReadback : IDisposable
         device.ImmediateContext.CopyResource(source, stagingTextures[writeIndex]);
         stagingTimestamps[writeIndex] = sourceTimestampMs;
 
-        // Submit it. D3D11 batches commands and flushes them lazily, so without this the copy can
-        // sit in the command buffer unsubmitted - and Map(DoNotWait) then reports WasStillDrawing
-        // for work the GPU has not even been asked to start yet, which this class counts as a
-        // skipped frame.
-        //
-        // Whether that happened depended on whether something ELSE forced a flush, which is why
-        // the symptom looked absurd: capture ran fine while the mouse was moving (the game was
-        // rendering and flushing, dragging our copy along with it) and dropped roughly half its
-        // frames the moment the scene went still. Nothing to do with focus.
         device.ImmediateContext.Flush();
 
-        // The slot BufferDepth-1 ticks older than the one just written is exactly the slot that
-        // will be overwritten NEXT tick - i.e. the next index forward in the ring.
         int readIndex = (writeIndex + 1) % stagingTextures.Length;
         bool gotFrame = framesQueued >= stagingTextures.Length && TryMapAndCopy(stagingTextures[readIndex], destination);
         frameTimestampMs = gotFrame ? stagingTimestamps[readIndex] : sourceTimestampMs;
@@ -90,12 +79,6 @@ public sealed class AsyncTextureReadback : IDisposable
             return false;
         }
 
-        // SharpDX's Resource-typed MapSubresource overload special-cases DoNotWait +
-        // WasStillDrawing: rather than throwing (which the catch above is for), it returns an
-        // empty DataBox (DataPointer == IntPtr.Zero) instead - confirmed by decompiling
-        // SharpDX.Direct3D11.DeviceContext. That means the exception path above never actually
-        // fires for this overload, and without this check a "GPU isn't done yet" tick would
-        // Marshal.Copy from a null pointer instead of just being skipped like it should be.
         if (box.IsEmpty)
             return false;
 

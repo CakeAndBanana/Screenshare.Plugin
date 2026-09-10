@@ -50,9 +50,6 @@ public static class WorldScreenGizmo
         ImGuizmo.BeginFrame();
         ImGuizmo.Enable(true);
         ImGuizmo.SetOrthographic(false);
-
-        // The background draw list, not a window's: the handles belong over the world, and an ImGui
-        // window would put a panel behind them.
         ImGuizmo.SetDrawlist(ImGui.GetBackgroundDrawList());
         ImGuizmo.SetRect(0f, 0f, displaySize.X, displaySize.Y);
 
@@ -75,9 +72,6 @@ public static class WorldScreenGizmo
 
         bool dragging = ImGuizmo.IsUsing();
 
-        // Dalamud decides whether the game also sees this click from WantCaptureMouse, which ImGui
-        // works out from hovered WINDOWS - and these handles are not in one. Without this the game
-        // gets the drag too and the camera spins while the panel is being moved.
         if (dragging || ImGuizmo.IsOver())
             ImGui.GetIO().WantCaptureMouse = true;
 
@@ -107,13 +101,8 @@ public static class WorldScreenGizmo
 
     private static ImGuizmoOperation ToImGuizmoOperation(GizmoOperation operation) => operation switch
     {
-        // One ring each, about the axis that IS the stored value.
         GizmoOperation.Turn => ImGuizmoOperation.RotateY,
         GizmoOperation.Tilt => ImGuizmoOperation.RotateX,
-
-        // Uniform, because the panel's height is derived from the stream's aspect ratio rather than
-        // stored. A per-axis scale handle would let the user stretch a height that snaps straight
-        // back on the next frame.
         GizmoOperation.Resize => ImGuizmoOperation.Scaleu,
         _ => ImGuizmoOperation.Translate,
     };
@@ -142,19 +131,8 @@ public static class WorldScreenGizmo
         float yaw = MathF.Atan2(forward.X, forward.Z);
         float pitch = -MathF.Asin(Math.Clamp(forward.Y, -1f, 1f));
 
-        // Uniform scale in, so any axis is the width - averaged rather than picked, because a
-        // decomposition of a near-degenerate matrix can leave the three very slightly apart.
         float width = Math.Clamp((scale.X + scale.Y + scale.Z) / 3f, MinWidthMeters, MaxWidthMeters);
 
-        // A dragged handle can go degenerate - the drag ray running parallel to the plane it is
-        // being solved against, or a scale collapsing through zero - and what comes back out is
-        // then NaN or an infinity rather than a wrong-but-usable number. Decompose reports success
-        // for those, so this is the only place they get caught.
-        //
-        // It matters well beyond the panel looking odd: the placement is committed to the room and
-        // feeds the placement sliders, whose ranges are computed from it. A NaN there makes a
-        // slider's own bounds NaN, which throws inside ImGui - a crash in the settings UI, a long
-        // way from the drag that caused it.
         if (!IsFinite(translation) || !float.IsFinite(yaw) || !float.IsFinite(pitch) || !float.IsFinite(width))
             return original;
 

@@ -4,8 +4,6 @@ public readonly record struct BitrateDecision(int TargetKbps, int CleanWindows, 
 
 public static class BitrateAdaptation
 {
-    // Down hard and immediately, up gently and only after a sustained clean spell - the classic
-    // asymmetry, because re-congesting a link costs more than under-using it.
     public const double BackoffFactor = 0.75;
     public const double ProbeFactor = 1.15;
     public const int CleanWindowsBeforeProbe = 5;

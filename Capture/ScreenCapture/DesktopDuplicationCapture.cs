@@ -1,4 +1,5 @@
-﻿using ScreenShare.Plugin.Rendering;
+﻿using ScreenShare.Plugin.Capture.ScreenCapture.Interfaces;
+using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 using SharpDX;
 using SharpDX.Direct3D11;
@@ -14,8 +15,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
     private readonly Lock contextLock;
     private readonly Texture2D targetTexture;
 
-    // The device the duplication and the frame copy actually run on, and the texture the rest of
-    // the plugin reads. See ResolveCaptureDevice for why this is not simply the plugin's device.
     private readonly Device captureDevice;
     private readonly bool ownsCaptureDevice;
     private readonly Texture2D sharedView;
@@ -41,8 +40,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
     public long FramesCaptured => Interlocked.Read(ref framesCaptured);
     private long framesCaptured;
 
-    // Cross-reload stop flag. See DuplicationRegistry: a capture stranded by a plugin reload holds
-    // its monitor for the rest of the game session, and polling this is how it learns to let go.
     private readonly Guid registrationId;
     private readonly System.Runtime.CompilerServices.StrongBox<bool> stopRequested;
 
@@ -52,17 +49,12 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         contextLock = gameAdapterDevice.ImmediateContextLock;
         this.outputIndex = outputIndex;
 
-        // Before duplicating anything, ask any capture stranded by a previous plugin load to let
-        // go of its monitor. Without this, one reload that skipped Dispose blocks monitor capture
-        // until the game restarts - and the failure names the monitor, not the cause.
         int stranded = DuplicationRegistry.RequestStopAll();
         if (stranded > 0)
         {
             ServiceCollector.PluginLog.Information(
                 $"ScreenShare asked {stranded} capture(s) left by a previous plugin load to stop before duplicating.");
 
-            // Their loops poll at frame cadence and release on the way out; a short wait here is
-            // the difference between this attempt succeeding and failing for the same old reason.
             Thread.Sleep(250);
         }
 
@@ -116,13 +108,13 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         {
             long luid;
             using (DxgiDevice dxgiDevice = pluginDevice.QueryInterface<DxgiDevice>())
-            using (SharpDX.DXGI.Adapter adapter = dxgiDevice.Adapter)
+            using (Adapter adapter = dxgiDevice.Adapter)
                 luid = adapter.Description.Luid;
 
-            using var factory = new SharpDX.DXGI.Factory1();
+            using var factory = new Factory1();
             for (int i = 0; i < factory.GetAdapterCount1(); i++)
             {
-                using SharpDX.DXGI.Adapter1 adapter = factory.GetAdapter1(i);
+                using Adapter1 adapter = factory.GetAdapter1(i);
                 if (adapter.Description1.Luid != luid)
                     continue;
 
@@ -141,16 +133,16 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
     private static Output ResolveOutput(Device device, int outputIndex)
     {
         using DxgiDevice dxgiDevice = device.QueryInterface<DxgiDevice>();
-        using SharpDX.DXGI.Adapter gameAdapter = dxgiDevice.Adapter;
+        using Adapter gameAdapter = dxgiDevice.Adapter;
 
         try
         {
             long luid = gameAdapter.Description.Luid;
-            using var factory = new SharpDX.DXGI.Factory1();
+            using var factory = new Factory1();
 
             for (int i = 0; i < factory.GetAdapterCount1(); i++)
             {
-                using SharpDX.DXGI.Adapter1 adapter = factory.GetAdapter1(i);
+                using var adapter = factory.GetAdapter1(i);
                 if (adapter.Description1.Luid != luid || outputIndex >= adapter.GetOutputCount())
                     continue;
 
@@ -166,8 +158,9 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         return GetOutputOrThrow(gameAdapter, outputIndex);
     }
 
-    private static Output GetOutputOrThrow(SharpDX.DXGI.Adapter adapter, int outputIndex)
+    private static Output GetOutputOrThrow(Adapter adapter, int outputIndex)
     {
+        ArgumentNullException.ThrowIfNull(adapter);
         try
         {
             return adapter.GetOutput(outputIndex);
@@ -222,7 +215,7 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         try
         {
             using DxgiDevice dxgiDevice = device.QueryInterface<DxgiDevice>();
-            using SharpDX.DXGI.Adapter adapter = dxgiDevice.Adapter;
+            using Adapter adapter = dxgiDevice.Adapter;
 
             return $"Capture runs on {adapter.Description.Description.Trim()} " +
                    $"(LUID {adapter.Description.Luid}, feature level {device.FeatureLevel}).";
@@ -233,26 +226,13 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         }
     }
 
-    // Two objects are under suspicion and every probe so far varied only one of them, so none could
-    // tell them apart: the OUTPUT (enumerated from the adapter the game's D3D device handed us) and
-    // the DEVICE. Testing all four combinations in one go is what makes the next log conclusive
-    // instead of another round of narrowing.
-    //
-    // Measured outside the game, every one of these four duplicates happily on this hardware (see
-    // tools/MediaProbe duplication), including output and device from different DXGI factories. So
-    // whichever combinations fail here, the difference is something about this process.
-    //
-    //   own output + own device     fails => process-wide block; no object juggling will fix it.
-    //   own output + game device    works => the game-derived OUTPUT is being rejected.
-    //   game output + own device    works => the game-derived DEVICE is being rejected.
-    //   all but "game+game" work    => capture must be built from our own factory throughout.
     private static string ProbeObjectCombinations(Device gameDevice, string deviceName)
     {
-        SharpDX.DXGI.Factory1? factory = null;
-        SharpDX.DXGI.Adapter1? ownAdapter = null;
-        SharpDX.DXGI.Output? ownOutput = null;
-        SharpDX.DXGI.Adapter? gameAdapter = null;
-        SharpDX.DXGI.Output? gameOutput = null;
+        Factory1? factory = null;
+        Adapter1? ownAdapter = null;
+        Output? ownOutput = null;
+        Adapter? gameAdapter = null;
+        Output? gameOutput = null;
         Device? ownDevice = null;
 
         try
@@ -263,10 +243,10 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
             long luid = gameAdapter.Description.Luid;
             gameOutput = FindOutput(gameAdapter, deviceName);
 
-            factory = new SharpDX.DXGI.Factory1();
+            factory = new Factory1();
             for (int i = 0; i < factory.GetAdapterCount1() && ownAdapter is null; i++)
             {
-                SharpDX.DXGI.Adapter1 candidate = factory.GetAdapter1(i);
+                Adapter1 candidate = factory.GetAdapter1(i);
                 if (candidate.Description1.Luid == luid)
                     ownAdapter = candidate;
                 else
@@ -303,11 +283,11 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         }
     }
 
-    private static SharpDX.DXGI.Output? FindOutput(SharpDX.DXGI.Adapter adapter, string deviceName)
+    private static Output? FindOutput(Adapter adapter, string deviceName)
     {
         for (int i = 0; i < adapter.GetOutputCount(); i++)
         {
-            SharpDX.DXGI.Output output = adapter.GetOutput(i);
+            Output output = adapter.GetOutput(i);
             if (output.Description.DeviceName == deviceName)
                 return output;
 
@@ -317,7 +297,7 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         return null;
     }
 
-    private static string TryPair(SharpDX.DXGI.Output output, Device device)
+    private static string TryPair(Output output, Device device)
     {
         try
         {
@@ -340,15 +320,15 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         try
         {
             using DxgiDevice dxgiDevice = device.QueryInterface<DxgiDevice>();
-            using SharpDX.DXGI.Adapter ownAdapter = dxgiDevice.Adapter;
+            using Adapter ownAdapter = dxgiDevice.Adapter;
             long ownLuid = ownAdapter.Description.Luid;
             string ownName = ownAdapter.Description.Description;
 
-            using var factory = new SharpDX.DXGI.Factory1();
+            using var factory = new Factory1();
             for (int i = 0; i < factory.GetAdapterCount1(); i++)
             {
-                using SharpDX.DXGI.Adapter1 adapter = factory.GetAdapter1(i);
-                foreach (SharpDX.DXGI.Output output in adapter.Outputs)
+                using Adapter1 adapter = factory.GetAdapter1(i);
+                foreach (Output output in adapter.Outputs)
                 {
                     using (output)
                     {
@@ -369,7 +349,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         }
         catch (Exception ex)
         {
-            // Diagnostics must never replace the real failure with one of their own.
             return $"(could not determine which GPU owns it: {ex.Message})";
         }
     }
@@ -379,7 +358,7 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         try
         {
             using DxgiDevice dxgiDevice = device.QueryInterface<DxgiDevice>();
-            using SharpDX.DXGI.Adapter adapter = dxgiDevice.Adapter;
+            using Adapter adapter = dxgiDevice.Adapter;
 
             var results = new List<string>();
             string attachment = "unknown";
@@ -388,7 +367,7 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
             {
                 using (output)
                 {
-                    SharpDX.DXGI.OutputDescription description = output.Description;
+                    OutputDescription description = output.Description;
                     if (description.DeviceName == targetDeviceName)
                         attachment = description.IsAttachedToDesktop ? "attached to the desktop" : "NOT attached to the desktop";
 
@@ -480,11 +459,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
 
                     if (ownsCaptureDevice)
                     {
-                        // Our own device, and this thread is its only user, so the plugin's context
-                        // lock does not apply. The Flush is not optional: targetTexture is a classic
-                        // shared resource read by a DIFFERENT device, and without it the copy can sit
-                        // in the driver's command buffer, invisible over there until something
-                        // unrelated happens to flush - the same failure the decoder had.
                         captureDevice.ImmediateContext.CopyResource(frameTexture, targetTexture);
                         captureDevice.ImmediateContext.Flush();
                     }
@@ -546,20 +520,11 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
         running = false;
         bool captureExited = captureThread.Join(1000);
 
-        // Released first and unconditionally, before anything it was created from. Leaking a
-        // duplication blocks every future capture of this monitor until the game restarts, which is
-        // a worse outcome than any of the risks below. Under the same lock the capture thread swaps
-        // it under, so a teardown landing in the middle of an AccessLost recovery disposes the
-        // replacement rather than the object the recovery already threw away.
         lock (duplicationLock)
         {
             duplication.Dispose();
         }
 
-        // Same reasoning as H264Encoder.Dispose: the join is bounded so teardown cannot hang, which
-        // means it is not proof the capture thread has stopped touching these. It copies frames on
-        // captureDevice's context, so releasing that device out from under a thread still inside a
-        // GPU call crashes natively rather than throwing. Leaking them in that rare case is better.
         if (!captureExited)
         {
             ServiceCollector.PluginLog.Warning(
@@ -573,7 +538,6 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
 
         targetTexture.Dispose();
 
-        // Last: the duplication and both textures came from it.
         if (ownsCaptureDevice)
             captureDevice.Dispose();
     }

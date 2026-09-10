@@ -62,9 +62,6 @@ public sealed class GpuDownscaler : IDisposable
         context.PixelShader.SetSampler(0, sampler);
         context.Draw(3, 0);
 
-        // Unbind - the source stays alive across ticks (it wraps the capture's persistent
-        // texture) and must not be left bound as a PS input while the capture thread's own
-        // CopyResource touches it under the same shared ImmediateContext.
         context.PixelShader.SetShaderResource(0, null);
         context.OutputMerger.SetRenderTargets((RenderTargetView)null!);
     }

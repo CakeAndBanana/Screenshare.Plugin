@@ -35,9 +35,6 @@ public readonly record struct WorldPanelDraw(
 
 public sealed class WorldPanelRenderer : IDisposable
 {
-    // ViewProj is declared row_major because System.Numerics.Matrix4x4 is row-major in memory
-    // while HLSL packs constant-buffer matrices column-major by default. Without this the matrix
-    // arrives transposed and the panel projects to nonsense.
     private const string ShaderSource = """
         cbuffer PanelConstants : register(b0)
         {
@@ -177,9 +174,6 @@ public sealed class WorldPanelRenderer : IDisposable
             MaximumLod = float.MaxValue,
         });
 
-        // Point, not linear: filtering across a depth discontinuity blends a near and a far value
-        // into a meaningless middle one, which shows up as a halo of wrongly-kept or wrongly-cut
-        // pixels along every silhouette edge.
         pointSampler = new SamplerState(gameDevice, new SamplerStateDescription
         {
             Filter = Filter.MinMagMipPoint,
@@ -191,8 +185,6 @@ public sealed class WorldPanelRenderer : IDisposable
             MaximumLod = float.MaxValue,
         });
 
-        // Only needed by the in-scene path (see DrawInScene). The ImGui path inherits all three
-        // from ImGui, which already has exactly the settings we want.
         var blend = new BlendStateDescription();
         blend.RenderTarget[0] = new RenderTargetBlendDescription
         {
@@ -207,10 +199,6 @@ public sealed class WorldPanelRenderer : IDisposable
         };
         sceneBlendState = new BlendState(gameDevice, blend);
 
-        // Depth test AND write both off. Occlusion is decided in the pixel shader against a
-        // sampled copy of the depth buffer, so no hardware test is wanted - and a panel that WROTE
-        // depth while interrupting the game's own render pass would corrupt everything drawn after
-        // it, which is the single most damaging thing this could get wrong.
         sceneDepthStencilState = new DepthStencilState(gameDevice, new DepthStencilStateDescription
         {
             IsDepthEnabled = false,
@@ -219,18 +207,6 @@ public sealed class WorldPanelRenderer : IDisposable
             IsStencilEnabled = false,
         });
 
-        // The other way of doing this: draw the panel as what it actually is - an opaque object
-        // standing in the world - at the START of the scene, and let the game's own depth testing
-        // sort out everything drawn afterwards.
-        //
-        // The shader-side occlusion above can only ever decide OUR pixels. Anything the game draws
-        // later has no idea the panel is there, which is why character nameplates sat behind it:
-        // they are drawn during the 3D phase, so no amount of reordering our single draw could put
-        // them in front without the world then covering us. Writing depth is what makes the panel
-        // visible to everything that comes after it.
-        //
-        // Two states because the comparison has to match the game's Z convention: with reversed Z
-        // (near = 1) a nearer fragment has the LARGER depth value.
         sceneDepthWriteState = new DepthStencilState(gameDevice, new DepthStencilStateDescription
         {
             IsDepthEnabled = true,
@@ -247,9 +223,6 @@ public sealed class WorldPanelRenderer : IDisposable
             IsStencilEnabled = false,
         });
 
-        // No culling, because the panel is double-sided by design - walking behind the screen
-        // should show the picture mirrored, not nothing at all. Scissor off so the panel is never
-        // clipped by whatever rectangle the game's previous pass happened to leave bound.
         sceneRasterizerState = new RasterizerState(gameDevice, new RasterizerStateDescription
         {
             FillMode = FillMode.Solid,
@@ -297,11 +270,6 @@ public sealed class WorldPanelRenderer : IDisposable
 
         if (setScissor)
         {
-            // ImGui's backend sets the scissor rectangle immediately before each GEOMETRY command
-            // and not at all before a user callback, so whatever rectangle happens to be bound when
-            // we're invoked is inherited from somewhere else entirely - the game's own last draw,
-            // on the first command of a frame. Left alone, that silently clips the panel to an
-            // arbitrary box. The in-scene path disables scissoring outright instead.
             context.Rasterizer.SetScissorRectangle(0, 0, (int)draw.DisplaySize.X, (int)draw.DisplaySize.Y);
         }
 
@@ -318,9 +286,6 @@ public sealed class WorldPanelRenderer : IDisposable
 
         context.Draw(4, 0);
 
-        // Same reasoning as GpuDownscaler.Blit's trailing unbind: the video SRV wraps a texture
-        // the decode side keeps writing to, and leaving it bound as a pixel-shader input while
-        // that happens is exactly the hazard D3D warns about.
         context.PixelShader.SetShaderResource(0, null);
         context.PixelShader.SetShaderResource(1, null);
     }

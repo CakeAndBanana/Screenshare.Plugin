@@ -1,7 +1,9 @@
 ﻿using System.Diagnostics;
-using ScreenShare.Plugin.Capture.AudioCapture;
-using ScreenShare.Plugin.Capture.ScreenCapture;
+using ScreenShare.Plugin.Capture.AudioCapture.Interfaces;
+using ScreenShare.Plugin.Capture.ScreenCapture.Interfaces;
 using ScreenShare.Plugin.Encoding;
+using ScreenShare.Plugin.Encoding.Enums;
+using ScreenShare.Plugin.Encoding.Interfaces;
 using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Rendering;
 

@@ -1,6 +1,8 @@
 ﻿using System.Collections.Concurrent;
 using System.Diagnostics;
-using ScreenShare.Plugin.Capture.ScreenCapture;
+using ScreenShare.Plugin.Capture.ScreenCapture.Interfaces;
+using ScreenShare.Plugin.Encoding.Enums;
+using ScreenShare.Plugin.Encoding.Interfaces;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 using SharpDX.Direct3D11;
@@ -21,9 +23,6 @@ public sealed class H264Encoder : IVideoEncoder
     private readonly Thread readerThread;
     private readonly int frameIntervalMs;
 
-    // One entry per frame handed to ffmpeg, dequeued one per access unit that comes back out.
-    // The encoder runs with no B-frames (-tune ll / -tune zerolatency), so output order matches
-    // input order and the Nth unit out is the Nth frame in.
     private readonly ConcurrentQueue<long> captureTimestamps = new();
     private readonly int maxPendingTimestamps;
 
@@ -96,8 +95,6 @@ public sealed class H264Encoder : IVideoEncoder
             Vendor, codec, bitrateKbps, bitrateKbps * 4 / 3, bitrateKbps * 2, fps * 2);
         string rawFormat = VideoEncoderSelector.RawFormatName(codec);
 
-        // No -vf scale here - the frame arriving on stdin is already at Width x Height, scaled
-        // on the GPU before this process ever sees it.
         string encodeArgs =
             $"-hide_banner -loglevel error -f rawvideo -pix_fmt bgra -s {Width}x{Height} -r {fps} -i - " +
             $"-an {encoderArgs} -pix_fmt yuv420p -f {rawFormat} -";
@@ -126,8 +123,6 @@ public sealed class H264Encoder : IVideoEncoder
         var clock = Stopwatch.StartNew();
         long frameIndex = 0;
 
-        // See PrecisionSleep: plain Thread.Sleep paces to the system timer, which grabs frames at
-        // uneven intervals even when the average rate is right.
         using var pacer = new PrecisionSleep();
         try
         {
@@ -139,28 +134,12 @@ public sealed class H264Encoder : IVideoEncoder
                 {
                     downscaler.Blit(gameAdapterDevice.Device.ImmediateContext, sourceSrv, downscaledRtv, Width, Height);
 
-                    // The clock is read here, at the moment the frame is COPIED, and handed to the
-                    // readback so it can be carried alongside that frame through the ring. What
-                    // comes back is the timestamp of the frame actually returned, which was queued
-                    // a couple of ticks ago.
                     gotFrame = readback.TryReadPrevious(
                         downscaledTexture, sessionClock.ElapsedMilliseconds, frame, out capturedAtMs);
                 }
 
                 if (gotFrame)
                 {
-                    // Deliberately the frame's own capture time rather than "now". Stamping "now"
-                    // labelled every frame a couple of ticks newer than the content it held, while
-                    // audio was stamped accurately at capture - so video was presented that much
-                    // later than the audio it belonged with, and no viewer-side clock could correct
-                    // it because the timestamps were self-consistently wrong.
-                    //
-                    // It rides a queue rather than a single field because ffmpeg answers on its
-                    // own schedule: a field holds whatever was submitted MOST RECENTLY, so every
-                    // unit read back got the timestamp of a frame several ticks newer than the one
-                    // it actually contained - the same defect described above, reintroduced on the
-                    // read side. Enqueued before the write, so the reader can never pull a unit
-                    // out of ffmpeg ahead of the timestamp belonging to it.
                     captureTimestamps.Enqueue(capturedAtMs);
                     TrimPendingTimestamps();
 
@@ -174,8 +153,6 @@ public sealed class H264Encoder : IVideoEncoder
 
                 frameIndex++;
 
-                // A non-positive wait returns immediately, so a burst of slow iterations catches
-                // back up rather than the shortfall compounding.
                 pacer.Wait(frameIndex * frameIntervalMs - clock.ElapsedMilliseconds);
             }
         }
@@ -193,25 +170,16 @@ public sealed class H264Encoder : IVideoEncoder
     {
         byte[] buffer = new byte[64 * 1024];
 
-        // A read off this pipe returns whatever bytes ffmpeg happened to have, which is never an
-        // access unit boundary - see AnnexBAccessUnitSplitter for what that broke and why every
-        // consumer downstream needs whole units instead.
         var splitter = new AnnexBAccessUnitSplitter(Codec);
         try
         {
             int read;
             while (running && (read = encoderProcess.StandardOutput.Read(buffer, 0, buffer.Length)) > 0)
             {
-                // Counted as it comes off the pipe rather than as units are emitted, so the
-                // reported bitrate still accounts for bytes currently held mid-unit.
                 Interlocked.Add(ref encodedBytes, read);
                 splitter.Append(buffer, 0, read, EmitAccessUnit);
             }
 
-            // Only on a real end of stream. The final unit has no following start code to end it,
-            // so it is still buffered at that point - whereas a loop that exited because running
-            // went false is a teardown, and what is buffered there is half an access unit that
-            // nothing downstream can use.
             if (running)
             {
                 if (splitter.Flush() is { } tail)
@@ -238,11 +206,6 @@ public sealed class H264Encoder : IVideoEncoder
         return capturedAtMs;
     }
 
-    // Should ffmpeg ever return fewer access units than the frames it was given, this queue would
-    // grow without bound and every timestamp from that point on would be progressively staler.
-    // Discarding the oldest keeps the error bounded and self-correcting instead of compounding
-    // for the rest of the session. The cap is a couple of seconds of frames - far deeper than any
-    // real encoder pipeline, so it only ever trips on an actual mismatch.
     private void TrimPendingTimestamps()
     {
         while (captureTimestamps.Count > maxPendingTimestamps)

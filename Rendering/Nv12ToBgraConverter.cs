@@ -8,9 +8,6 @@ namespace ScreenShare.Plugin.Rendering;
 
 public sealed class Nv12ToBgraConverter : IDisposable
 {
-    // BT.709 studio range, inverted from the encode side's matrix so the two round-trip. The
-    // offsets come off first (16/255 luma, 128/255 chroma), then the standard BT.709 YCbCr-to-RGB
-    // matrix scaled by 255/219 and 255/224 for the studio-range compression.
     private const string ShaderSource = """
         struct VSOutput
         {
@@ -119,9 +116,6 @@ public sealed class Nv12ToBgraConverter : IDisposable
         context.PixelShader.SetSampler(0, sampler);
         context.Draw(3, 0);
 
-        // Unbound for the same reason the other passes do it: these views wrap textures the decode
-        // thread writes to under this same shared context, and leaving one bound as a pixel-shader
-        // input while that happens is exactly the hazard D3D warns about.
         context.PixelShader.SetShaderResource(0, null);
         context.PixelShader.SetShaderResource(1, null);
         context.OutputMerger.SetRenderTargets((RenderTargetView)null!);

@@ -10,6 +10,8 @@ using SharpDX.Direct3D11;
 using SharpDX.MediaFoundation;
 using static ScreenShare.Plugin.Encoding.Interop.MediaFoundationInterop;
 using Device = SharpDX.Direct3D11.Device;
+using ScreenShare.Plugin.Encoding.Interfaces;
+using ScreenShare.Plugin.Encoding.Enums;
 
 namespace ScreenShare.Plugin.Encoding;
 
@@ -85,15 +87,9 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
 
         Device device = gameAdapterDevice.Device;
 
-        // Same buffer depth reasoning as the ffmpeg decoder, and it has to stay the same: audio is
-        // the master clock, so if the clock may sit 500ms behind live this buffer must still hold
-        // frames that old or the display asks for frames already discarded.
         int bufferedMs = Math.Max(H264Decoder.PresentationBufferMilliseconds, audioLatencyBudgetMs)
                          + Math.Max(0, getSyncOffsetMs?.Invoke() ?? 0);
 
-        // Capped lower than the ffmpeg path's 45. These slots are VRAM rather than system memory:
-        // NV12 is 1.5 bytes per pixel, so 30 slots is about 41MB at 720p and 93MB at 1080p, which
-        // is the point where holding more video back stops being free.
         int capacity = Math.Clamp(fps * bufferedMs / 1000, 2, 30);
 
         decodedTexture = SharedTextureFactory.CreateEmpty(device, width, height, renderTarget: true);
@@ -129,8 +125,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
             deviceManager.ResetDevice(device);
             transform.ProcessMessage(TMessageType.SetD3DManager, deviceManager.NativePointer);
 
-            // Input type first here, the opposite of the encoder: a decoder derives what it can
-            // produce from what it is being given, not the other way round.
             ConfigureTypes(width, height, fps, codec);
 
             using (MediaAttributes attributes = transform.Attributes)
@@ -223,7 +217,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         }
         catch (Exception ex)
         {
-            // The attribute simply not being present means the same thing as it being zero.
             decoder.Dispose();
             throw new NotSupportedException($"{friendly} did not report D3D11 support ({ex.Message}).");
         }
@@ -252,7 +245,7 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         {
             using (candidate)
             {
-                if (candidate.Get<Guid>(MediaTypeAttributeKeys.Subtype) != VideoFormatNv12)
+                if (candidate.Get(MediaTypeAttributeKeys.Subtype) != VideoFormatNv12)
                     continue;
 
                 transform.SetOutputType(0, candidate, 0);
@@ -324,9 +317,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
 
             if (hr == MfETransformStreamChange)
             {
-                // The decoder has parsed the stream and its output format is not what it first
-                // advertised. Renegotiating is mandatory - it emits nothing at all until this is
-                // done - and is normal at stream start, not a failure.
                 SelectNv12OutputType();
                 continue;
             }
@@ -346,8 +336,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
     {
         if (!freeSlots.TryTake(out int slot))
         {
-            // Every slot is queued or on screen. Dropping the newest frame is the least-bad option:
-            // the alternative is stalling the decode thread, which backs up into the network queue.
             Interlocked.Increment(ref droppedChunks);
             return;
         }
@@ -367,15 +355,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
                 using var decodedFrame = new Texture2D(texturePtr);
                 Texture2DDescription description = decodedFrame.Description;
 
-                // Two things measured on a real decoder, both of which break a naive copy:
-                //
-                // - The output texture is PADDED. Asking for 640x360 gets a 640x368 surface, the
-                //   height rounded up to the codec's macroblock alignment, with the real picture in
-                //   the top-left. Copying the whole surface into a 640x360 slot is an invalid copy,
-                //   so the region is stated explicitly rather than passing null.
-                // - It is a texture ARRAY - eleven slices here - and the subresource index is which
-                //   frame this is. Copying slice 0 every time yields whatever happens to be in the
-                //   first slot, which is not the frame just decoded.
                 var region = new ResourceRegion(
                     0, 0, 0, Math.Min(Width, description.Width), Math.Min(Height, description.Height), 1);
 
@@ -392,8 +371,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
 
             Interlocked.Increment(ref framesDecoded);
 
-            // The decoder carries the PTS through from the input sample, but not every decoder sets
-            // one; the most recently fed chunk is the same fallback the ffmpeg path uses.
             long ptsMs = ReadSampleTime(sample) ?? Interlocked.Read(ref lastFedPtsMs);
 
             scheduler.Enqueue(ptsMs, slot);
@@ -426,11 +403,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
             DeviceContext context = gameAdapterDevice.Device.ImmediateContext;
             converter.Convert(context, slotLuma[slot], slotChroma[slot], decodedView, Width, Height);
 
-            // decodedTexture is a classic (non-keyed-mutex) shared resource opened on a SEPARATE
-            // device by the game's own render thread, so without an explicit Flush this draw can
-            // sit queued in the driver's command buffer indefinitely, invisible to that device
-            // until something unrelated triggers a flush. Same reasoning as the ffmpeg path's
-            // UpdateSubresource, and the same symptom if it is missing: frames arrive sometimes.
             context.Flush();
         }
     }

@@ -1,7 +1,5 @@
 ﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
-using ScreenShare.Plugin.Capture.ScreenCapture;
-using ScreenShare.Plugin.Encoding.Interop;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 using SharpDX.DXGI;
@@ -9,6 +7,9 @@ using SharpDX.Direct3D11;
 using SharpDX.MediaFoundation;
 using static ScreenShare.Plugin.Encoding.Interop.MediaFoundationInterop;
 using Device = SharpDX.Direct3D11.Device;
+using ScreenShare.Plugin.Encoding.Interfaces;
+using ScreenShare.Plugin.Encoding.Enums;
+using ScreenShare.Plugin.Capture.ScreenCapture.Interfaces;
 
 namespace ScreenShare.Plugin.Encoding;
 
@@ -95,7 +96,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
             encoder = ActivateEncoder(codec, out string name);
             EncoderName = name;
 
-            // Async MFTs reject everything until unlocked, and every hardware encoder is async.
             using (MediaAttributes attributes = encoder.Attributes)
                 attributes.Set(TransformAttributeKeys.TransformAsyncUnlock, 1);
 
@@ -126,9 +126,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
         catch
         {
-            // None of this reaches the caller if the constructor throws, so without an explicit
-            // teardown it would leak a live hardware encoder and four GPU textures for the rest of
-            // the session - and the fallback path deliberately keeps going after a failure here.
             generator?.Dispose();
             encoder?.Dispose();
             manager?.Dispose();
@@ -174,7 +171,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         if (activates.Count == 0)
             throw new NotSupportedException($"No hardware Media Foundation encoder for {codec} on this machine.");
 
-        // MFTEnumEx sorted them best-first, so the first is the one to use and the rest are released.
         nint chosen = activates[0];
         for (int i = 1; i < activates.Count; i++)
             Marshal.Release(activates[i]);
@@ -188,7 +184,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
         catch (Exception)
         {
-            // An optional attribute; not carrying one is no reason to refuse the encoder.
             friendly = $"{codec} hardware encoder";
         }
 
@@ -232,11 +227,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         {
             var api = (ICodecApi)Marshal.GetObjectForIUnknown(transform.NativePointer);
 
-            // Logged rather than silently attempted. Which of these an encoder accepts varies by
-            // vendor, and the difference is not cosmetic: without rate control and mean bitrate the
-            // MFT encodes to its own default, which can sit far above the configured budget and
-            // congest the uplink - a failure that looks like the network or the decoder struggling,
-            // nowhere near the encoder that caused it.
             var accepted = new List<string>();
             var refused = new List<string>();
 
@@ -247,8 +237,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
             Apply($"{bitrateKbps}kbps", AvEncCommonMeanBitRate, (uint)(bitrateKbps * 1000));
             Apply("low-latency", AvLowLatencyMode, true);
 
-            // A keyframe every two seconds, so a viewer joining mid-stream gets a picture within
-            // that rather than waiting on whatever default the vendor happened to choose.
             Apply($"GOP {fps * 2}", AvEncMpvGopSize, (uint)(fps * 2));
 
             ServiceCollector.PluginLog.Information(
@@ -276,8 +264,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
         catch (Exception ex)
         {
-            // Deliberately not fatal: the stream continuing at the old bitrate is a far better
-            // outcome than dropping it because one adaptation step failed.
             ServiceCollector.PluginLog.Warning(ex, "ScreenShare could not retune the encoder bitrate.");
         }
     }
@@ -286,9 +272,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
     {
         var clock = Stopwatch.StartNew();
 
-        // Capture pacing has the same problem display pacing does: Thread.Sleep rounds to the system
-        // timer, so frames get grabbed at uneven intervals and that unevenness is baked into their
-        // timestamps, where no amount of viewer-side pacing can take it back out.
         using var pacer = new PrecisionSleep();
 
         try
@@ -301,10 +284,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
                 if (type == MediaEventTypes.TransformDrainComplete)
                     break;
 
-                // While stopping, keep draining what the encoder has already produced so the drain
-                // can finish and this loop can exit - but stop feeding it. Feeding after
-                // NotifyEndOfStream is an error, and Dispose sends that before this thread has
-                // necessarily noticed.
                 if (!running)
                 {
                     if (type == MediaEventTypes.TransformHaveOutput)
@@ -327,9 +306,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
         catch (Exception ex)
         {
-            // An exception escaping a background thread takes the game down with it, so a failure
-            // here surfaces through LastError and the host's UI instead. While stopping it is
-            // expected - the encoder is being torn down underneath this loop.
             if (!running)
                 return;
 
@@ -341,17 +317,11 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
 
     private void FeedFrame(Stopwatch clock, PrecisionSleep pacer)
     {
-        // Paced against elapsed time rather than sleeping a fixed interval each iteration, for the
-        // same reason H264Encoder's WriteLoop is: conversion and submission take real time, and
-        // sleeping a whole interval on top of that drifts the capture rate below the target.
         long dueMs = nextFrameIndex * frameIntervalMs;
         long nowMs = clock.ElapsedMilliseconds;
 
         if (nowMs > dueMs + frameIntervalMs)
         {
-            // Behind schedule. Abandon the slots that have already passed rather than encoding them
-            // all late, which would only push the stream further behind, and count them - a
-            // climbing skip count is exactly the signal that capture cannot hold the target rate.
             long missed = (nowMs - dueMs) / frameIntervalMs;
             nextFrameIndex += missed;
             Interlocked.Add(ref framesSkipped, missed);
@@ -363,9 +333,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
 
         nextFrameIndex++;
 
-        // Timestamped here, at conversion, not when the encoder later emits it. Audio is stamped at
-        // capture on this same clock, and video labelled with its completion time instead would sit
-        // late against the audio it belongs with by however long the encoder took.
         long ptsMs = sessionClock.ElapsedMilliseconds;
         Interlocked.Exchange(ref lastFedPtsMs, ptsMs);
 
@@ -382,8 +349,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         MediaFactory.CreateDXGISurfaceBuffer(typeof(Texture2D).GUID, slot, 0, false, out MediaBuffer buffer);
         using (buffer)
         {
-            // Without this the buffer reports zero bytes, and an encoder handed an empty sample
-            // emits nothing at all and reports no error.
             buffer.CurrentLength = buffer.MaxLength;
 
             using Sample sample = MediaFactory.CreateSample();
@@ -429,11 +394,11 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         {
             long sampleTime = sample.SampleTime;
             if (sampleTime > 0)
-                return sampleTime / 10_000;   // MF counts in 100ns units; the wire carries ms.
+                return sampleTime / 10_000;
         }
         catch (Exception)
         {
-            // This sample carries no timestamp.
+            // Ignore; fall back to last fed PTS.
         }
 
         return Interlocked.Read(ref lastFedPtsMs);
@@ -443,8 +408,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
     {
         running = false;
 
-        // GetEvent blocks, so the pump thread has to be woken rather than merely asked to stop.
-        // Draining generates events, which is what lets it reach TransformDrainComplete and return.
         try
         {
             transform.ProcessMessage(TMessageType.NotifyEndOfStream, nint.Zero);

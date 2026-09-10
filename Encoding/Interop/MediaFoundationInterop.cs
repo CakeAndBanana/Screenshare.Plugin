@@ -33,7 +33,6 @@ internal static class MediaFoundationInterop
         if (Interlocked.Exchange(ref startupCalled, 1) != 0)
             return;
 
-        // MF_VERSION as the SDK headers define it, with MFSTARTUP_FULL.
         int hr = MFStartup(0x00020070, 0);
         if (hr < 0)
         {
@@ -91,8 +90,6 @@ internal static class MediaFoundationInterop
         }
         finally
         {
-            // The array itself came from CoTaskMemAlloc; the entries it held are now owned by the
-            // caller through the list above.
             if (activates != nint.Zero)
                 Marshal.FreeCoTaskMem(activates);
         }
@@ -154,8 +151,6 @@ internal static class MediaFoundationInterop
         var buffer = new MftOutputDataBuffer();
         int hr = call(transform, 0, 1, ref buffer, out _);
 
-        // The events collection is optional and almost always absent, but it is an out-reference
-        // when present and leaking one per frame would be a slow drip for the whole session.
         if (buffer.Events != nint.Zero)
             Marshal.Release(buffer.Events);
 

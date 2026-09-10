@@ -1,6 +1,8 @@
 ﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
+using ScreenShare.Plugin.Encoding.Enums;
+using ScreenShare.Plugin.Encoding.Interfaces;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 using SharpDX;
@@ -78,16 +80,6 @@ public sealed class H264Decoder : IVideoDecoder
         decodedTexture = SharedTextureFactory.CreateEmpty(device, Width, Height);
         SharedHandle = SharedTextureFactory.GetSharedHandle(decodedTexture);
 
-        // Deep enough to cover the deliberate offset on top of the normal jitter budget. Delaying
-        // video by N ms means N ms of frames have to be held somewhere, and this queue is the only
-        // place they can be - at the default depth, anything past ~200ms was simply dropped as
-        // drop-oldest before it could ever be shown late.
-        // Capped at 45 frames because these are raw BGRA - roughly 8MB each at 1080p - so the
-        // queue's memory cost is the real limit on how far video can be held back, not the logic.
-                // Also tracks the AUDIO latency budget, because audio is the master clock: if the clock is
-        // allowed to sit 500ms behind live, this queue must still be holding frames that old, or
-        // the display loop asks for frames that were already discarded. The two genuinely have to
-        // move together, which is why the audio budget is passed in rather than assumed.
         int bufferedMs = Math.Max(PresentationBufferMilliseconds, audioLatencyBudgetMs)
                          + Math.Max(0, getSyncOffsetMs?.Invoke() ?? 0);
         scheduler = new PresentationScheduler<byte[]>(
@@ -96,7 +88,7 @@ public sealed class H264Decoder : IVideoDecoder
             getAudioPtsMs,
             getSyncOffsetMs ?? (static () => 0),
             WriteFrameToTexture,
-            discard: null,   // plain managed arrays; nothing to hand back
+            discard: null,
             RecordError,
             "ScreenShare-H264Display");
 
@@ -107,16 +99,6 @@ public sealed class H264Decoder : IVideoDecoder
             SingleWriter = false,
         });
 
-        // -hwaccel d3d11va offloads the actual decode work to the GPU's dedicated video decode
-        // hardware (works uniformly across NVIDIA/AMD/Intel via Windows' own D3D11 Video
-        // Acceleration API, unlike encode's per-vendor NVENC/AMF/QSV selection) - decode still had
-        // no hardware path at all before this, always running ffmpeg's plain software decoder
-        // regardless of codec. That mattered little for H264 but made HEVC (meaningfully more
-        // CPU-expensive to decode in software) prone to falling behind real-time on the viewer's
-        // CPU, which is already busy running the game - producing exactly the "freezes, catches
-        // up in a burst, freezes again" pattern a real in-game HEVC test surfaced. Verified byte-
-        // for-byte identical output against software decode for both H264 and HEVC using this
-        // exact bundled ffmpeg binary before adding this, not assumed.
         string decodeArgs = $"-hide_banner -loglevel error -hwaccel d3d11va -f {VideoEncoderSelector.RawFormatName(codec)} -i - -f rawvideo -pix_fmt bgra -";
         decoderProcess = new FfmpegProcessRunner(ffmpegExePath, decodeArgs);
 
@@ -145,26 +127,10 @@ public sealed class H264Decoder : IVideoDecoder
             {
                 while (feedChannel.Reader.TryRead(out (long PtsMs, byte[] Chunk) entry))
                 {
-                    // Published for ReadLoop to snapshot against each decoded frame - see its own
-                    // comment for why "most recently fed chunk's PTS" is a reasonable proxy for a
-                    // frame's actual capture time without needing to parse NAL unit boundaries.
                     Interlocked.Exchange(ref lastFedPtsMs, entry.PtsMs);
                     decoderProcess.StandardInput.Write(entry.Chunk, 0, entry.Chunk.Length);
                 }
 
-                // Not optional, and the reason decode used to stall in bursts. Process redirects
-                // stdin through a FileStream with a 4096-byte write buffer, so a write smaller
-                // than that is simply held - measured, not assumed: 500 bytes written to a child's
-                // BaseStream never arrived until an explicit Flush. It went unnoticed while chunks
-                // came off ffmpeg's stdout in large reads that mostly exceeded the buffer, but the
-                // Media Foundation encoder sends one access unit per chunk, and a P-frame on a
-                // quiet screen is a few hundred bytes. Worse than latency alone: a large write
-                // whose tail lands under the threshold leaves a PARTIAL access unit stranded, so
-                // the decoder sits waiting for the rest of a frame it will not see until the next
-                // one pushes it through.
-                //
-                // Once per drained batch rather than per chunk - a batch is the work that just
-                // arrived together, so this costs one syscall per wake-up, not one per frame.
                 decoderProcess.StandardInput.Flush();
             }
         }
@@ -219,14 +185,6 @@ public sealed class H264Decoder : IVideoDecoder
                 var dataBox = new DataBox(pinned.AddrOfPinnedObject(), Width * 4, 0);
                 gameAdapterDevice.Device.ImmediateContext.UpdateSubresource(dataBox, decodedTexture);
 
-                // decodedTexture is a classic (non-keyed-mutex) shared resource opened on a
-                // SEPARATE device by the game's own render thread (see SharedTextureBridge) -
-                // without an explicit Flush here, this UpdateSubresource can sit queued in the
-                // driver's command buffer indefinitely, invisible to the other device until
-                // something UNRELATED happens to trigger a flush. That's exactly consistent
-                // with "sometimes gets a frame" rather than a clean success/failure - it's not
-                // broken, it's just unsynchronized. Flush forces this write to actually reach
-                // the GPU now, not whenever the driver next feels like it.
                 gameAdapterDevice.Device.ImmediateContext.Flush();
             }
         }

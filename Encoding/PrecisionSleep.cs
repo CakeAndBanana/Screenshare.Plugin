@@ -29,9 +29,6 @@ internal sealed class PrecisionSleep : IDisposable
 
     public PrecisionSleep()
     {
-        // Zero on anything older than Windows 10 1803, which is below what the game itself needs -
-        // but falling back rather than throwing keeps this a pacing improvement and not a new way
-        // for a stream to fail to start.
         timer = CreateWaitableTimerExW(0, null, CreateWaitableTimerHighResolution, TimerAllAccess);
     }
 
@@ -48,7 +45,6 @@ internal sealed class PrecisionSleep : IDisposable
             return;
         }
 
-        // Negative means relative rather than absolute, in 100ns units.
         long dueTime = -milliseconds * 10_000;
 
         if (SetWaitableTimer(timer, in dueTime, 0, 0, 0, false))

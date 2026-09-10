@@ -1,6 +1,6 @@
 ﻿using NAudio.Wave;
 
-namespace ScreenShare.Plugin.Capture.AudioCapture;
+namespace ScreenShare.Plugin.Capture.AudioCapture.Interfaces;
 
 public interface IAudioSource : IDisposable
 {

@@ -19,8 +19,6 @@ public sealed class StreamViewWindow : Window
     private readonly Func<WorldScreenController> worldScreen;
     private readonly Action onClosed;
 
-    // ImGui widgets need a by-ref local to bind to. These mirror config rather than replacing it -
-    // config stays the source of truth, these are just what the widgets write into first.
     private bool projectInWorld = ServiceCollector.Config.ProjectInWorld;
     private bool spatialAudio = ServiceCollector.Config.SpatialAudio;
     private bool standardDepth = ServiceCollector.Config.WorldScreenStandardDepth;
@@ -31,12 +29,6 @@ public sealed class StreamViewWindow : Window
     private int avSyncOffsetMs = ServiceCollector.Config.AvSyncOffsetMs;
     private int playbackLatencyMs = ServiceCollector.Config.PlaybackLatencyMs;
 
-    // Placement slider state. These MUST persist across frames rather than being re-read from the
-    // placement each time. ImGui hands a slider's live value back through the ref it was given, so
-    // re-seeding every frame overwrites the in-progress drag - and since the commit happens on
-    // release, the value committed was the one from BEFORE the drag. That's why resizing the
-    // screen appeared to do nothing at all. They're re-seeded only when the stored placement
-    // actually changes and nothing is currently being dragged.
     private ScreenPlacementInfo? sliderSource;
     private bool slidersActive;
     private float sliderWidth;
@@ -47,10 +39,6 @@ public sealed class StreamViewWindow : Window
     private float sliderFalloffStart;
     private float sliderFalloffEnd;
     private float nudgeStepMeters = 0.5f;
-
-    // Rolling rate for the audio health counters. The underlying numbers are cumulative totals, and
-    // over a long session those cannot distinguish "went badly wrong at startup and has been fine
-    // since" from "still going wrong every second" - the two need completely different responses.
     private DateTime rateSampledAt;
     private long rateUnderrunBaseMs;
     private long rateDroppedBaseMs;
@@ -119,8 +107,6 @@ public sealed class StreamViewWindow : Window
         ImGui.SameLine();
         ImGui.ProgressBar(Math.Clamp(mediaSession.ViewerAudioPeak, 0f, 1f), new Vector2(200, 0), "");
 
-        // Audio is the clock video syncs to, so its health IS the sync story - worth showing next
-        // to the video counters rather than leaving a desync to be guessed at.
         if (mediaSession.ViewerAudioPackets > 0)
         {
             ImGui.TextDisabled(
@@ -139,8 +125,6 @@ public sealed class StreamViewWindow : Window
                     ImGui.TextDisabled(rateText);
             }
 
-            // The number that separates "out of sync" from "laggy but in sync" - two complaints
-            // that feel identical and have completely different fixes.
             long drift = mediaSession.ViewerAvDriftMs;
             string driftLabel = Math.Abs(drift) < 50
                 ? "in sync"
@@ -148,8 +132,6 @@ public sealed class StreamViewWindow : Window
             string offsetNote = avSyncOffsetMs != 0 ? $", A/V sync offset {avSyncOffsetMs:+0;-0}ms applied" : string.Empty;
             ImGui.TextDisabled($"A/V drift {drift:+0;-0;0}ms ({driftLabel}){offsetNote}");
 
-            // Total viewer-side latency, measured. A steady value is buffering working as
-            // configured; a climbing one is a clock-rate mismatch, which no buffer setting fixes.
             if (mediaSession.ViewerBehindLiveMs is { } behind)
             {
                 bool runaway = behind > playbackLatencyMs + 400;
@@ -214,8 +196,6 @@ public sealed class StreamViewWindow : Window
         if (ImGui.SliderInt("Volume", ref volumePercent, 0, 100, "%d%%"))
             volume = Math.Clamp(volumePercent / 100f, 0f, 1f);
 
-        // Applied live while dragging - unlike the placement sliders, this one is only ever local,
-        // so there's no hub call to throttle and hearing the change as you drag is the point.
         ServiceCollector.Config.ViewerVolume = volume;
         if (ImGui.IsItemDeactivatedAfterEdit())
             ServiceCollector.PI.SavePluginConfig(config);
@@ -263,7 +243,6 @@ public sealed class StreamViewWindow : Window
 
         ScreenPlacementInfo? placement = roomSession.ScreenPlacement ?? config.LocalScreenPlacement;
 
-        // Outside a room there's nobody to ask, so the local fallback placement is always editable.
         bool canPlace = WorldScreenController.CanPlace(roomSession);
 
         ImGui.BeginDisabled(!canPlace);
@@ -312,7 +291,6 @@ public sealed class StreamViewWindow : Window
 
         ImGui.Separator();
 
-        // Below here is per-viewer taste and diagnostics - never shared, never permission-gated.
         ImGui.SliderFloat("Opacity", ref opacity, 0.05f, 1f);
         if (ImGui.IsItemDeactivatedAfterEdit())
         {
@@ -343,25 +321,12 @@ public sealed class StreamViewWindow : Window
         if (drawUnderUi && !worldScreen().IsDrawingUnderUi)
             ImGui.TextColored(WarnColor, "The render hook isn't running - drawing over the game UI instead.");
 
-        // Deliberately NOT compiled out of Release, unlike the depth diagnostics below. Which
-        // Which pass to draw in is worked out from the frame itself rather than configured. It was
-        // a setting once, and could not be one: the right value differs per machine, moves with the
-        // interface, and both ways of getting it wrong look like a bug in the feature rather than a
-        // number that needs tuning - the panel either hides behind the world or covers the HUD.
         if (drawUnderUi)
         {
             int passes = worldScreen().LastFrameBackBufferSwitches;
             int scenePasses = worldScreen().LastFrameSceneSwitches;
             ImGui.TextDisabled($"Render passes last frame: {passes} ({scenePasses} drawing the 3D scene)");
 
-            // The game binds the back buffer once per HUD element, so on some machines this is over
-            // a hundred rather than a handful. Drawing in every one of those means the LAST draw
-            // lands after the whole interface, which puts the screen on top of it - the exact
-            // opposite of what "draw underneath the game UI" is for. Worth saying outright, because
-            // from the player's side it just looks like the setting does nothing.
-            // The panel is drawn in the passes that draw the 3D scene, so none of them means it
-            // cannot be drawn at all. Worth saying outright, because from the player's side that is
-            // indistinguishable from the feature simply being off.
             if (scenePasses == 0 && passes > 0)
             {
                 ImGui.TextColored(WarnColor,
@@ -370,10 +335,6 @@ public sealed class StreamViewWindow : Window
                     "it over the interface instead.");
             }
 
-            // The in-world panel is drawn between the game's own passes; an overlay that inserts
-            // passes of its own can paint over it on the frames those passes run. The popout window
-            // is drawn at present time and is never affected, which is why the two behave
-            // differently for the same person.
             if (OverlayDetector.Detected is { } overlay)
             {
                 ImGui.TextColored(WarnColor,
@@ -382,17 +343,12 @@ public sealed class StreamViewWindow : Window
                     "but stays steady.");
             }
 
-            // Shown when the hook has corrected itself, so someone who changed nothing still learns
-            // why - silent self-healing is fine until somebody wonders what happened.
             if (worldScreen().SceneHookFallbackReason is { } fallbackReason)
                 ImGui.TextDisabled($"Adjusted automatically: {fallbackReason}.");
         }
 
 #if DEBUG
 
-        // Development-only. These exist to diagnose the depth pipeline (they're what identified a
-        // view matrix arriving with a zeroed w column), and none of it means anything to someone
-        // just watching a stream - so it's compiled out of Release rather than merely hidden.
         DrawDepthDiagnostics(config);
 #endif
     }
@@ -435,8 +391,6 @@ public sealed class StreamViewWindow : Window
                 "which is why flipping the sign appears to do nothing.");
         }
 
-        // Facts rather than inference: these are the two values the whole occlusion path hinges
-        // on, and both are read from reverse-engineered game structures.
         if (GameSceneCamera.TryGetSceneDepth() is { } sceneDepth)
         {
             Vector2 display = ImGui.GetIO().DisplaySize;
@@ -451,9 +405,6 @@ public sealed class StreamViewWindow : Window
         {
             ImGui.TextDisabled($"Depth convention reported by the game: {(view.StandardZ ? "standard Z (near = 0)" : "reversed Z (near = 1)")}");
 
-            // The mode the renderer will actually use this frame, resolved by the same code the
-            // renderer uses - not re-derived here, so the two can't drift apart and send us
-            // chasing a setting that was never in effect.
             float sign = WorldScreenController.DepthSign(config);
             ImGui.TextDisabled(
                 $"Active panel mode: {WorldScreenController.ResolveDepthMode(config)}, " +

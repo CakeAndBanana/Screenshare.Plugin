@@ -8,9 +8,6 @@ namespace ScreenShare.Plugin.Rendering;
 
 public sealed class Nv12Converter : IDisposable
 {
-    // BT.709, studio range. The coefficients are the usual full-range BT.709 matrix scaled by
-    // 219/255 for luma and 224/255 for chroma, with the 16/255 and 128/255 offsets folded in - the
-    // encoder is told the same convention (BT.709, 16-235) so the two cannot disagree.
     private const string ShaderSource = """
         struct VSOutput
         {
@@ -173,8 +170,6 @@ public sealed class Nv12Converter : IDisposable
         context.PixelShader.Set(chromaShader);
         context.Draw(3, 0);
 
-        // Unbound for the same reason GpuDownscaler does it: the source wraps the capture's
-        // persistent texture, which the capture thread keeps writing to under this same context.
         context.PixelShader.SetShaderResource(0, null);
         context.OutputMerger.SetRenderTargets((RenderTargetView)null!);
     }

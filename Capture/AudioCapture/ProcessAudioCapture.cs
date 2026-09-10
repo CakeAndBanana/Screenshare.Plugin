@@ -3,6 +3,7 @@ using System.Threading.Channels;
 using NAudio.CoreAudioApi;
 using NAudio.CoreAudioApi.Interfaces;
 using NAudio.Wave;
+using ScreenShare.Plugin.Capture.AudioCapture.Interfaces;
 using ScreenShare.Plugin.Capture.AudioCapture.Interop;
 
 namespace ScreenShare.Plugin.Capture.AudioCapture;

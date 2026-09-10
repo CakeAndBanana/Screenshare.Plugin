@@ -12,10 +12,6 @@ public sealed class WorldPanelDispatch : IDisposable
 {
     private readonly WorldPanelRenderer renderer;
     private readonly DeviceContext context;
-
-    // Held in a field for the object's whole life, not built per call: the delegate has to outlive
-    // every frame it was handed to ImGui for, and reusing one instance also reuses the single
-    // native thunk the marshaller creates for it.
     private readonly ImDrawCallback callback;
 
     private WorldPanelDraw pending;
@@ -36,9 +32,6 @@ public sealed class WorldPanelDispatch : IDisposable
 
     private unsafe void OnRenderCallback(ImDrawList* parentList, ImDrawCmd* cmd)
     {
-        // This runs on the far side of a native call boundary: an exception escaping here doesn't
-        // become a caught .NET error, it takes the game's process with it. Nothing in the draw is
-        // worth that, so everything is swallowed and reported once.
         try
         {
             DrawWithStateRestored();
@@ -55,8 +48,6 @@ public sealed class WorldPanelDispatch : IDisposable
 
     private void DrawWithStateRestored()
     {
-        // Every one of these getters hands back an AddRef'd COM object (or an array of them), so
-        // each has to be released again below or the plugin leaks a reference per frame.
         InputLayout? inputLayout = context.InputAssembler.InputLayout;
         PrimitiveTopology topology = context.InputAssembler.PrimitiveTopology;
         VertexShader? vertexShader = context.VertexShader.Get();
@@ -80,8 +71,6 @@ public sealed class WorldPanelDispatch : IDisposable
             context.PixelShader.SetConstantBuffers(0, pixelConstantBuffers);
             context.PixelShader.SetSamplers(0, pixelSamplers);
 
-            // ImGui rebinds this before each of its own draws anyway, so restoring it is about not
-            // surprising whatever else might run between here and then.
             if (scissors.Length > 0)
             {
                 RawRectangle previous = scissors[0];

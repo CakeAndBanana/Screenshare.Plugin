@@ -1,12 +1,7 @@
-﻿using ScreenShare.Plugin.Rendering;
+﻿using ScreenShare.Plugin.Encoding.Enums;
+using ScreenShare.Plugin.Rendering;
 
 namespace ScreenShare.Plugin.Encoding;
-
-public enum VideoCodec
-{
-    H264,
-    Hevc,
-}
 
 public static class VideoEncoderSelector
 {

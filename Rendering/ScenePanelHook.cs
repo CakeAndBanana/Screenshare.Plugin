@@ -17,24 +17,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
     private const int MissedFramesBeforeEscalating = 30;
 
     private const long StaleAfterMs = 200;
-
-    // Missed frames tolerated before the hook stops insisting on the exact back-buffer pointer.
-    //
-    // Normally the game binds the very texture RenderTargetManager reports as the swap chain's back
-    // buffer, and matching it by pointer is precise. A post-processing overlay that redirects the
-    // final composite into a texture of its own breaks that: on the frames its passes run, the
-    // pointer never appears, no pass matches, and the panel is simply absent - which is the
-    // flickering reported with ReShade loaded, only for the in-world panel and never for the popout
-    // (which draws through ImGui at present time and cannot be affected).
-    //
-    // Drawing in every pass does not help there, because the problem is not WHICH bind was chosen -
-    // it is that no bind was recognised at all. So after enough misses the hook widens the test to
-    // any target the same size as the back buffer.
-    //
-    // Deliberately gated on real misses rather than on detecting an overlay. Widening the test is a
-    // genuine risk - a full-resolution intermediate target would then match, and the panel would be
-    // drawn into something the game later overwrites or uses elsewhere - so it is only worth taking
-    // for someone whose panel is already not being drawn.
     private const int MatchBySizeAfterMisses = 60;
 
     private delegate void DoSetTargetCommandDelegate(ImmediateContext* context, RenderCommandSetTarget* command);
@@ -48,43 +30,25 @@ public sealed unsafe class ScenePanelHook : IDisposable
 
     private long pendingAtMs;
 
-    // Set once the panel has been missing often enough that pointer-matching the swap chain's back
-    // buffer is clearly not finding it - see MatchBySizeAfterMisses.
     private bool matchTargetsBySize;
     private int backBufferSwitches;
     private int depthBoundSwitches;
     private bool loggedFailure;
 
     private int framesWithoutScenePass;
-
-    // Per-frame, both reset in EndFrame: whether the 3D scene has been seen yet, and whether the
-    // panel has already been drawn at the transition out of it.
     private bool sawScenePass;
     private bool drewThisFrame;
 
-    // One-shot capture of a single frame's back-buffer binds, so the shape of the frame can be read
-    // instead of inferred. Nameplates sit behind the panel, which means they are drawn inside the
-    // 3D phase rather than with the rest of the interface - and drawing before them needs whatever
-    // distinguishes their pass from the world's, which is not something guessing has found.
     private const int MaxRecordedPasses = 192;
     private readonly (bool Depth, int Width, int Height, int DepthWidth)[] recorded = new (bool, int, int, int)[MaxRecordedPasses];
     private int recordedCount;
-    // Captured automatically, once, on the first frame after the hook installs. No button, because
-    // it is not a thing anyone should have to know to press - it costs one log line per session and
-    // is the difference between reading the frame's shape and guessing at it.
     private bool recordRequested = true;
     private bool recording;
 
     public bool IsActive => hook is { IsEnabled: true };
 
     public int LastFrameBackBufferSwitches { get; private set; }
-
-    // How many of those also had a depth buffer bound. The gap between the two numbers is the
-    // interface: the game binds the back buffer once per HUD element, and none of those bind depth.
     public int LastFrameSceneSwitches { get; private set; }
-
-    // Set when the hook has had to widen how it recognises the back buffer, which is worth
-    // surfacing because it means something unusual is going on with the renderer.
     public string? FallbackReason { get; private set; }
 
     public ScenePanelHook(Device gameDevice)
@@ -99,9 +63,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
                 DoSetTargetCommandDetour);
             hook.Enable();
 
-            // Logged at install rather than on failure: the panel being painted over by an
-            // overlay's own pass looks like a missed pass from in here, so the two are worth being
-            // able to tell apart in a log someone sends later.
             if (OverlayDetector.Detected is { } overlay)
             {
                 ServiceCollector.PluginLog.Information(
@@ -127,10 +88,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
 
     public void EndFrame()
     {
-        // Resuming after the submitting side stopped - the player un-hid the game UI, most likely.
-        // Everything accumulated in between is meaningless: the back-buffer count has been adding
-        // up across however many frames went by, and comparing it to anything would read as a wild
-        // change in the game's pass structure and escalate for no reason. Start clean instead.
         if (PendingIsStale)
         {
             backBufferSwitches = 0;
@@ -141,9 +98,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
             return;
         }
 
-        // Queued but never drawn: the frame never showed a 3D-to-2D transition on the back buffer.
-        // Counted because it is the only way this loop loses the panel on its own, and because
-        // enough of them is what justifies the wider match below.
         if (hasPending && !drewThisFrame)
         {
             if (!matchTargetsBySize && ++framesWithoutScenePass >= MatchBySizeAfterMisses)
@@ -167,8 +121,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
         }
         else if (recordRequested)
         {
-            // Started at a frame boundary rather than mid-frame, so the capture covers one whole
-            // frame instead of whatever was left of the current one.
             recordRequested = false;
             recording = true;
             recordedCount = 0;
@@ -185,8 +137,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
 
     private void DoSetTargetCommandDetour(ImmediateContext* immediateContext, RenderCommandSetTarget* command)
     {
-        // Original first: it performs the actual target switch, so the back buffer is only bound
-        // and ready to be drawn into once it has run.
         hook!.Original(immediateContext, command);
 
         try
@@ -207,17 +157,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
                     recordedDepth is null ? 0 : (int)recordedDepth->ActualWidth);
             }
 
-            // A bound depth buffer means this is still the 3D scene; the interface is 2D and binds
-            // none. The game binds the back buffer once per interface element, which is why that
-            // count runs past a hundred while the scene uses a handful.
-            // The FIRST pass of the 3D scene, drawn into as the world itself is about to be, with
-            // depth written so everything the game draws afterwards can see the panel is there.
-            //
-            // Ordering alone could never finish this. Drawing last put the panel over the world but
-            // also over the character nameplates, which are drawn during the 3D phase; drawing
-            // earlier let the world paint over the panel. The panel has to be IN the scene, not
-            // layered on top of it - so it goes in first and the game's depth test does the rest,
-            // exactly as it does for any other solid object.
             if (command->DepthBuffer is null)
                 return;
 
@@ -228,9 +167,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
 
             sawScenePass = true;
 
-            // The submitting side has stopped and this geometry is from whenever it stopped. Drawing
-            // it would pin a stale view-projection to the screen; EndFrame clears the rest of the
-            // state when it next runs.
             if (PendingIsStale)
                 return;
 
@@ -239,9 +175,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
         }
         catch (Exception ex)
         {
-            // Inside the game's render pipeline, across a native boundary: an escaping exception
-            // takes the process down. Disable rather than fail every frame for the rest of the
-            // session - the caller falls back to the ImGui path once IsActive goes false.
             if (!loggedFailure)
             {
                 loggedFailure = true;
@@ -297,9 +230,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
         if (target == backBuffer)
             return true;
 
-        // Only reached once the exact pointer has stopped turning up - see MatchBySizeAfterMisses.
-        // Matching on size alone would otherwise catch full-resolution intermediates and draw the
-        // panel into buffers the game uses for something else entirely.
         return matchTargetsBySize
             && target is not null
             && target->ActualWidth == backBuffer->ActualWidth

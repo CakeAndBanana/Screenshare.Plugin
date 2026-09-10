@@ -4,8 +4,6 @@ namespace ScreenShare.Plugin.Encoding;
 
 public sealed class FfmpegProcessRunner : IDisposable
 {
-    // Bounds how much stderr text ThrowIfFailed's error message can quote - just needs enough to
-    // show the actual ffmpeg error line(s), not the whole log.
     private const int MaxStderrTailChars = 4096;
 
     private readonly Process process;
@@ -34,9 +32,6 @@ public sealed class FfmpegProcessRunner : IDisposable
 
         process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Failed to start '{ffmpegExePath}'.");
 
-        // ffmpeg writes continuously to stderr; if nobody reads it, the pipe buffer fills and
-        // ffmpeg blocks. Drain it unconditionally on a background task - kept (bounded) rather
-        // than discarded so ThrowIfFailed can actually explain WHY ffmpeg died, not just that it did.
         stderrDrainTask = Task.Run(DrainStderrAsync);
     }
 

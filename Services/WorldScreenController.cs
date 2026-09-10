@@ -42,13 +42,8 @@ public sealed class WorldScreenController : IDisposable
         Configuration config = ServiceCollector.Config;
         IsProjecting = false;
 
-        // Unconditional: the hook counts back-buffer switches every frame regardless of whether a
-        // panel was queued, and that counter has to roll over even on frames that draw nothing.
         sceneHook?.EndFrame();
 
-        // Also unconditional, and re-applied every frame rather than on change: the audio decoder
-        // is created lazily when the stream's audio metadata arrives, which is long after the user
-        // last touched the slider, so a one-shot apply would be lost for every session.
         mediaSession.SetViewerVolume(config.ViewerVolume);
 
         if (!TryResolveVisible(config, roomSession, mediaSession, videoTexture, out ScreenPlacementInfo? placement)
@@ -62,8 +57,6 @@ public sealed class WorldScreenController : IDisposable
         SceneView? view = GameSceneCamera.TryGetView();
         if (view is not { } scene)
         {
-            // No camera means a loading screen or character select - not an error, just nothing to
-            // project onto. Audio still needs resetting, or it stays stuck at the last mix.
             mediaSession.SetViewerSpeakerGains(SpeakerGains.Identity);
             return;
         }
@@ -130,8 +123,6 @@ public sealed class WorldScreenController : IDisposable
         if (!config.ProjectInWorld || !mediaSession.IsViewing || videoTexture is null || placement is null)
             return false;
 
-        // A world position from another zone is meaningless here - the coordinates would land
-        // somewhere arbitrary in whatever map the player is standing in now.
         return placement.TerritoryType == ServiceCollector.ClientState.TerritoryType;
     }
 
@@ -175,8 +166,6 @@ public sealed class WorldScreenController : IDisposable
 
         (Vector3 left, Vector3 right) = SpeakerPositions(placement, frame);
 
-        // The camera, not the character, is the listener: it's what the player is looking through,
-        // so panning that ignored a swung camera would disagree with what's on screen.
         SpeakerGains gains = SpeakerMix.Compute(
             scene.CameraPosition,
             scene.CameraForward,
@@ -198,21 +187,8 @@ public sealed class WorldScreenController : IDisposable
         if (!TryGetDispatch(device, out WorldPanelDispatch? panelDispatch))
             return;
 
-        // Always asked for. Occlusion is what makes the panel read as an object standing in the
-        // world rather than a picture pasted over it, so it is not a preference - the only reason
-        // to go without is the game not handing over a usable depth buffer, which is handled below.
         SceneDepthBuffer? depth = GameSceneCamera.TryGetSceneDepth();
 
-        // Falling back to an unoccluded overlay rather than refusing to draw: a panel that shows
-        // through walls is a far better failure than no panel at all, and it's the same path the
-        // depth-test toggle takes deliberately.
-        // The scene hook now draws the panel INTO the scene with depth written, so the hardware
-        // depth test decides occlusion and the shader must not also clip against a sampled copy -
-        // at the point it draws, that copy is the previous frame's, and clipping against it would
-        // punch holes wherever the world has since moved.
-        //
-        // The ImGui fallback still needs the shader test: it composites after the whole frame, long
-        // past any chance of the depth buffer accepting a write.
         bool drawsIntoScene = config.WorldScreenDrawUnderUi
             && TryGetSceneHook(device, out ScenePanelHook? sceneHookForMode)
             && sceneHookForMode!.IsActive;
@@ -233,9 +209,6 @@ public sealed class WorldScreenController : IDisposable
             (nint)videoTexture.Handle.Handle,
             depth?.ShaderResourceView ?? nint.Zero);
 
-        // Under the UI when the hook is up and wanted, over it otherwise. The fallback matters:
-        // a hook that failed to install, or disabled itself after a draw failure, must not take
-        // the whole feature down with it.
         if (config.WorldScreenDrawUnderUi && TryGetSceneHook(device, out ScenePanelHook? hook) && hook!.IsActive)
         {
             hook.Submit(in draw);
@@ -316,8 +289,6 @@ public sealed class WorldScreenController : IDisposable
         if (ServiceCollector.Objects.LocalPlayer is not { } player)
             return null;
 
-        // FFXIV's object rotation is a yaw about Y with 0 facing +Z, so this is the direction the
-        // player is looking.
         float facing = player.Rotation;
         var forward = new Vector3(MathF.Sin(facing), 0f, MathF.Cos(facing));
         Vector3 position = player.Position + (forward * PlaceDistanceMeters);
@@ -327,10 +298,6 @@ public sealed class WorldScreenController : IDisposable
             position.X,
             player.Position.Y + PlaceHeightMeters,
             position.Z,
-            // Yaw equal to the player's own rotation is what orients the panel's +X axis along the
-            // player's right, which is what makes the picture read the right way round rather than
-            // mirrored. Worth re-checking by eye if the game's handedness ever surprises us: the
-            // symptom would be mirrored text on the stream, not a missing panel.
             facing,
             Pitch: 0f,
             WidthMeters: existing?.WidthMeters ?? 6f,

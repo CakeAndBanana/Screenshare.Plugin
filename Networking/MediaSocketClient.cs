@@ -1,6 +1,6 @@
 ﻿using System.Net.WebSockets;
 using System.Threading.Channels;
-using ScreenShare.Plugin.Encoding;
+using ScreenShare.Plugin.Encoding.Enums;
 
 namespace ScreenShare.Plugin.Networking;
 

@@ -93,6 +93,9 @@ public sealed class AudioPlaybackDecoder : IDisposable
 
             try
             {
+                // Raw on purpose: WaveOutEvent hands back waveOutGetPosition's 32-bit byte
+                // count widened to long, wraps included. GetPtsAtPlayedBytes is the one
+                // that holds the unwrapped counter to reconcile it against.
                 return playbackBuffer.GetPtsAtPlayedBytes(output.GetPosition());
             }
             catch (Exception)

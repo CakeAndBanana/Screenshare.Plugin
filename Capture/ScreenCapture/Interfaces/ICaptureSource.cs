@@ -1,6 +1,6 @@
 ﻿using SharpDX.Direct3D11;
 
-namespace ScreenShare.Plugin.Capture.ScreenCapture;
+namespace ScreenShare.Plugin.Capture.ScreenCapture.Interfaces;
 
 public interface ICaptureSource : IDisposable
 {

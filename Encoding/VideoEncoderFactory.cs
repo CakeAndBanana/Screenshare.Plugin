@@ -1,5 +1,7 @@
 ﻿using System.Diagnostics;
-using ScreenShare.Plugin.Capture.ScreenCapture;
+using ScreenShare.Plugin.Capture.ScreenCapture.Interfaces;
+using ScreenShare.Plugin.Encoding.Enums;
+using ScreenShare.Plugin.Encoding.Interfaces;
 using ScreenShare.Plugin.Encoding.Interop;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
@@ -35,8 +37,6 @@ public static class VideoEncoderFactory
             }
             catch (Exception ex)
             {
-                // Warning rather than error: the stream is about to start anyway, on a path that
-                // has been in use far longer than this one.
                 ServiceCollector.PluginLog.Warning(
                     ex, $"ScreenShare could not start a Media Foundation encoder for {codec}; falling back to ffmpeg.");
             }

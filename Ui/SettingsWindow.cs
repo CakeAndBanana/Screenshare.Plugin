@@ -2,7 +2,7 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
-using ScreenShare.Plugin.Encoding;
+using ScreenShare.Plugin.Encoding.Enums;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 

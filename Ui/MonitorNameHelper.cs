@@ -26,8 +26,6 @@ internal static class MonitorNameHelper
         public uint id;
     }
 
-    // CCHDEVICENAME (32 WCHARs) - matches the GDI device name buffer size used throughout the
-    // Win32 display APIs (e.g. DISPLAY_DEVICE.DeviceName).
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct DISPLAYCONFIG_SOURCE_DEVICE_NAME
     {
@@ -40,12 +38,6 @@ internal static class MonitorNameHelper
     private struct DISPLAYCONFIG_TARGET_DEVICE_NAME
     {
         public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
-
-        // DISPLAYCONFIG_TARGET_DEVICE_NAME_FLAGS - a bitfield (friendlyNameFromEdid/
-        // friendlyNameForced/edidIdsValid/reserved), not interpreted here. Whether
-        // monitorFriendlyDeviceName is non-empty is a simpler, equally reliable signal for
-        // whether it's actually usable, so the individual bits are never read - only this
-        // field's overall 4-byte size matters for correct marshaling of what follows it.
         public uint flags;
 
         public uint outputTechnology;
@@ -63,7 +55,7 @@ internal static class MonitorNameHelper
     {
         public LUID adapterId;
         public uint id;
-        public uint modeInfoIdx; // union with cloneGroupId/sourceModeInfoIdx bitfields - only the plain index form is used
+        public uint modeInfoIdx;
         public uint statusFlags;
     }
 

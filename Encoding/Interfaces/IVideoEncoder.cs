@@ -1,4 +1,6 @@
-﻿namespace ScreenShare.Plugin.Encoding;
+﻿using ScreenShare.Plugin.Encoding.Enums;
+
+namespace ScreenShare.Plugin.Encoding.Interfaces;
 
 public interface IVideoEncoder : IDisposable
 {

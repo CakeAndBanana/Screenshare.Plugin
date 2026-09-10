@@ -13,8 +13,6 @@ public sealed class Configuration : IPluginConfiguration
 
     public string DisplayName { get; set; } = "Guest";
 
-    // Streaming settings - persisted so they don't reset to defaults every plugin reload/game
-    // restart. Defaults match ShareWindow's original hardcoded field initializers.
     public int VideoResolutionIndex { get; set; } = 1; // 720p
 
     public int VideoBitrateKbps { get; set; } = 1500;
@@ -30,10 +28,6 @@ public sealed class Configuration : IPluginConfiguration
     public int MonitorIndex { get; set; }
 
     public bool CaptureWindowMode { get; set; }
-
-    // In-world screen ("beamer"). Every field here is new with a default, so a config written
-    // before this feature existed deserializes unchanged and Version stays at 1 - there's nothing
-    // to migrate, only fields to start absent.
 
     public bool ProjectInWorld { get; set; }
 
