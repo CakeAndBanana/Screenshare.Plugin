@@ -1,7 +1,7 @@
 ﻿using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using ScreenShare.Plugin.Encoding;
-using ScreenShare.Plugin.Encoding.Interop;
+using ScreenShare.Plugin.Encoding.Enums;
 using ScreenShare.Plugin.Rendering;
 using SharpDX.DXGI;
 using SharpDX.Direct3D11;

@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using ScreenShare.Plugin.Encoding;
+using ScreenShare.Plugin.Encoding.Enums;
 using Device = SharpDX.Direct3D11.Device;
 
 namespace MediaProbe;
