@@ -1,4 +1,5 @@
 using ScreenShare.Plugin.Encoding;
+using ScreenShare.Plugin.Encoding.Enums;
 using ScreenShare.Plugin.Rendering;
 
 namespace ScreenShare.Plugin.Tests.Encoding;
