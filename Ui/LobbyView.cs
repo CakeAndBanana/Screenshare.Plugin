@@ -38,7 +38,7 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
     {
         float width = UiTheme.Px(300);
 
-        UiTheme.Heading("Screen Share");
+        UiTheme.Heading("Cake's Screen Share Plugin");
         ImGui.TextDisabled("Connect to a relay to create or join rooms.");
         ImGui.Dummy(new Vector2(width, UiTheme.Px(6)));
 
@@ -142,8 +142,8 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
     private void DrawCreateJoinButtons()
     {
         float spacing = ImGui.GetStyle().ItemSpacing.X;
-        float half = (ImGui.GetContentRegionAvail().X - spacing) / 2;
-        var size = new Vector2(half, ImGui.GetFrameHeight() * 1.4f);
+        float half = (ImGui.GetContentRegionAvail().X - spacing) / 2.32f;
+        var size = new Vector2(half, ImGui.GetFrameHeight() * 1.5f);
 
         if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Plus, "Create room", UiTheme.PublicGreen with { W = 0.55f }, UiTheme.PublicGreen, UiTheme.PublicGreen with { W = 0.8f }, size))
         {

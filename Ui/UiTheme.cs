@@ -155,7 +155,7 @@ internal static class UiTheme
         ImGui.TextDisabled(text.ToUpperInvariant());
     }
 
-    public static void Heading(string text, float scale = 1.35f, Vector4? color = null)
+    public static void Heading(string text, float scale = 1.5f, Vector4? color = null)
     {
         float fontSize = ImGui.GetFontSize() * scale;
         Vector2 size = ImGui.CalcTextSize(text) * scale;
