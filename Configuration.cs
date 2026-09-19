@@ -1,17 +1,18 @@
-﻿using Dalamud.Configuration;
-using ScreenShare.Plugin.Networking;
+using Dalamud.Configuration;
 
 namespace ScreenShare.Plugin;
 
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 1;
+    public const string LegacyDefaultRelayUrl = "http://localhost:5178/hubs/room";
 
-    public string RelayUrl { get; set; } = "http://localhost:5178/hubs/room";
+    public int Version { get; set; } = 2;
+
+    public string RelayUrl { get; set; } = string.Empty;
 
     public string ClientId { get; set; } = Guid.NewGuid().ToString("N");
 
-    public string DisplayName { get; set; } = "Guest";
+    public string DisplayName { get; set; } = string.Empty;
 
     public int VideoResolutionIndex { get; set; } = 1; // 720p
 
@@ -28,8 +29,6 @@ public sealed class Configuration : IPluginConfiguration
     public int MonitorIndex { get; set; }
 
     public bool CaptureWindowMode { get; set; }
-
-    public bool ProjectInWorld { get; set; }
 
     public float WorldScreenOpacity { get; set; } = 1f;
 
@@ -53,7 +52,17 @@ public sealed class Configuration : IPluginConfiguration
 
     public bool SpatialAudio { get; set; } = true;
 
-    public ScreenPlacementInfo? LocalScreenPlacement { get; set; }
+    public bool Migrate()
+    {
+        if (Version >= 2)
+            return false;
+
+        if (string.Equals(RelayUrl, LegacyDefaultRelayUrl, StringComparison.OrdinalIgnoreCase))
+            RelayUrl = string.Empty;
+
+        Version = 2;
+        return true;
+    }
 }
 
 public sealed class RecentRoom
@@ -61,6 +70,12 @@ public sealed class RecentRoom
     public string RelayUrl { get; set; } = string.Empty;
 
     public string RoomId { get; set; } = string.Empty;
+
+    public string? Name { get; set; }
+
+    public bool IsPublic { get; set; }
+
+    public bool HasPassword { get; set; } = true;
 
     public string? Password { get; set; }
 

@@ -16,6 +16,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         pi.Create<ServiceCollector>();
         ServiceCollector.Config = pi.GetPluginConfig() as Configuration ?? new Configuration();
+        ServiceCollector.Config.Migrate();
 
         pi.SavePluginConfig(ServiceCollector.Config);
 

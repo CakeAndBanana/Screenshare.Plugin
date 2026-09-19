@@ -46,7 +46,7 @@ public sealed class WorldScreenController : IDisposable
 
         mediaSession.SetViewerVolume(config.ViewerVolume);
 
-        if (!TryResolveVisible(config, roomSession, mediaSession, videoTexture, out ScreenPlacementInfo? placement)
+        if (!TryResolveVisible(roomSession, mediaSession, videoTexture, out ScreenPlacementInfo? placement)
             || videoTexture is null
             || device is null)
         {
@@ -97,30 +97,23 @@ public sealed class WorldScreenController : IDisposable
         return result.Placement;
     }
 
-    public static bool CanPlace(RoomSessionService roomSession) => !roomSession.InRoom || roomSession.CanPlaceScreen;
+    public static bool CanPlace(RoomSessionService roomSession) => roomSession.InRoom && roomSession.CanPlaceScreen;
 
     public static void ApplyPlacement(RoomSessionService roomSession, ScreenPlacementInfo? placement)
     {
-        if (roomSession.InRoom)
-        {
+        if (CanPlace(roomSession))
             roomSession.UpdateScreenPlacement(placement);
-            return;
-        }
-
-        ServiceCollector.Config.LocalScreenPlacement = placement;
-        ServiceCollector.PI.SavePluginConfig(ServiceCollector.Config);
     }
 
     private static bool TryResolveVisible(
-        Configuration config,
         RoomSessionService roomSession,
         MediaSessionService mediaSession,
         RawTextureWrap? videoTexture,
         out ScreenPlacementInfo? placement)
     {
-        placement = roomSession.ScreenPlacement ?? config.LocalScreenPlacement;
+        placement = roomSession.ScreenPlacement;
 
-        if (!config.ProjectInWorld || !mediaSession.IsViewing || videoTexture is null || placement is null)
+        if (!mediaSession.IsViewing || videoTexture is null || placement is null)
             return false;
 
         return placement.TerritoryType == ServiceCollector.ClientState.TerritoryType;

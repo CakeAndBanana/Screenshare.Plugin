@@ -35,6 +35,8 @@ public sealed class RoomHubClient : IAsyncDisposable
 
     public event Action<ScreenPlacementInfo?>? ScreenPlacementChanged;
 
+    public event Action<string, string>? MemberRenamed;
+
     public event Action? Reconnecting;
 
     public event Action? Reconnected;
@@ -59,6 +61,7 @@ public sealed class RoomHubClient : IAsyncDisposable
         newConnection.On<IReadOnlyCollection<WatcherInfo>>("WatchersChanged", watchers => WatchersChanged?.Invoke(watchers));
         newConnection.On<string, bool>("ViewerStreamPermissionChanged", (id, granted) => ViewerStreamPermissionChanged?.Invoke(id, granted));
         newConnection.On<ScreenPlacementInfo?>("ScreenPlacementChanged", placement => ScreenPlacementChanged?.Invoke(placement));
+        newConnection.On<string, string>("MemberRenamed", (id, name) => MemberRenamed?.Invoke(id, name));
 
         newConnection.Reconnecting += _ =>
         {
@@ -76,10 +79,22 @@ public sealed class RoomHubClient : IAsyncDisposable
         this.relayUrl = relayUrl;
     }
 
-    public async Task<CreateRoomResult> CreateRoomAsync(string password, int maxViewers, string clientId, string displayName)
+    public async Task DisconnectAsync()
+    {
+        if (connection is null)
+            return;
+
+        HubConnection closing = connection;
+        connection = null;
+        relayUrl = null;
+        InstanceId = null;
+        await closing.DisposeAsync().ConfigureAwait(false);
+    }
+
+    public async Task<CreateRoomResult> CreateRoomAsync(CreateRoomRequest request, string clientId, string displayName)
     {
         CreateRoomResult result = await RequireConnection()
-            .InvokeAsync<CreateRoomResult>("CreateRoom", password, maxViewers, clientId, displayName).ConfigureAwait(false);
+            .InvokeAsync<CreateRoomResult>("CreateRoom", request, clientId, displayName).ConfigureAwait(false);
         if (result.Success)
             InstanceId = result.InstanceId;
 
@@ -103,6 +118,12 @@ public sealed class RoomHubClient : IAsyncDisposable
 
         return result;
     }
+
+    public Task<RoomDirectory> ListRoomsAsync(string clientId)
+        => RequireConnection().InvokeAsync<RoomDirectory>("ListRooms", clientId);
+
+    public Task UpdateDisplayNameAsync(string roomId, string displayName)
+        => RequireConnection().InvokeAsync("UpdateDisplayName", roomId, displayName);
 
     public Task LeaveRoomAsync(string roomId)
         => RequireConnection().InvokeAsync("LeaveRoom", roomId);

@@ -1,6 +1,9 @@
-﻿using System.Numerics;
+using System.Collections.Concurrent;
+using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
+using Dalamud.Interface.Components;
+using Dalamud.Interface.ImGuiNotification;
 using Dalamud.Interface.Windowing;
 using Microsoft.AspNetCore.SignalR.Client;
 using ScreenShare.Plugin.Capture.AudioCapture;
@@ -15,12 +18,14 @@ namespace ScreenShare.Plugin.Ui;
 
 public sealed class ShareWindow : Window, IDisposable
 {
-    private static readonly Vector4 ErrorColor = new(1f, 0.4f, 0.4f, 1f);
-    private static readonly Vector4 WarnColor = new(1f, 0.7f, 0.2f, 1f);
-    private static readonly Vector4 CrownColor = new(1f, 0.85f, 0.2f, 1f);
-    private static readonly Vector4 StreamingColor = new(1f, 0.35f, 0.35f, 1f);
-    private static readonly Vector4 PermittedColor = new(0.4f, 0.85f, 0.45f, 1f);
-    private static readonly Vector4 WatchingColor = new(0.4f, 0.75f, 1f, 1f);
+    private enum Screen
+    {
+        Connect,
+        Lobby,
+        Room,
+    }
+
+    private static readonly Vector2 ConnectedSize = new(560, 540);
 
     private GameAdapterDevice? device;
     private ICaptureSource? screenCapture;
@@ -36,12 +41,11 @@ public sealed class ShareWindow : Window, IDisposable
     private readonly MediaSessionService mediaSession = new();
 
     private readonly WorldScreenController worldScreen = new();
-    private string relayUrlInput = ServiceCollector.Config.RelayUrl;
-    private string displayNameInput = ServiceCollector.Config.DisplayName;
-    private string createPasswordInput = "";
-    private int maxViewersInput = 4;
-    private string joinRoomIdInput = "";
-    private string joinPasswordInput = "";
+    private readonly IdentityChip identity;
+    private readonly LobbyView lobby;
+    private readonly ConcurrentQueue<ActiveStreamerInfo> wentLive = new();
+    private Screen lastScreen = Screen.Connect;
+    private bool releaseForcedSize;
     private bool wasViewerInRoom;
     private nint? lastOpenedViewerVideoHandle;
     private Exception? lastHandledHostMediaException;
@@ -53,8 +57,6 @@ public sealed class ShareWindow : Window, IDisposable
 
     public ShareWindow() : base("Screen Share###ScreenShareMainWindow")
     {
-        Size = new Vector2(560, 560);
-        SizeCondition = ImGuiCond.FirstUseEver;
         StreamView = new StreamViewWindow(roomSession, mediaSession, () => previewTexture, () => worldScreen, StopWatching);
         Settings = new SettingsWindow(
             isStreaming: () => screenCapture is not null,
@@ -64,186 +66,147 @@ public sealed class ShareWindow : Window, IDisposable
                 if (audioCapture is not null)
                     mediaSession.UpdateAudioSource(audioCapture, bps);
             });
+
+        identity = new IdentityChip(roomSession, () => mediaSession.IsHosting);
+        lobby = new LobbyView(roomSession, identity, Disconnect);
+        roomSession.StreamerWentLive += streamer => wentLive.Enqueue(streamer);
+
+        TitleBarButtons =
+        [
+            new TitleBarButton
+            {
+                Icon = FontAwesomeIcon.Cog,
+                IconOffset = new Vector2(2, 1),
+                Click = _ =>
+                {
+                    Settings.IsOpen = true;
+                    Settings.BringToFront();
+                },
+                ShowTooltip = () => ImGui.SetTooltip("Settings"),
+            },
+        ];
     }
 
-    public void TickFrame() => HandleViewerMediaLifecycle();
+    public void TickFrame()
+    {
+        HandleViewerMediaLifecycle();
+
+        // Raised on a SignalR thread; the toast and its click handler belong on this one.
+        while (wentLive.TryDequeue(out ActiveStreamerInfo? streamer))
+            NotifyWentLive(streamer);
+    }
+
+    // Reconnecting keeps the current screen: flipping to the connect card mid-room would shrink the
+    // window for what is usually a couple of seconds.
+    private Screen CurrentScreen => roomSession.State is HubConnectionState.Connected or HubConnectionState.Reconnecting
+        ? roomSession.InRoom ? Screen.Room : Screen.Lobby
+        : Screen.Connect;
+
+    public override void PreDraw()
+    {
+        Screen screen = CurrentScreen;
+
+        WindowName = screen == Screen.Room && roomSession.RoomName is { } roomName
+            ? $"Screen Share · {roomName}{(mediaSession.IsHosting ? " · LIVE" : string.Empty)}###ScreenShareMainWindow"
+            : "Screen Share###ScreenShareMainWindow";
+
+        // The connect card sizes itself. Leaving it forces a normal size for one frame, then hands
+        // the size back to the user.
+        if (screen == Screen.Connect)
+            Flags |= ImGuiWindowFlags.AlwaysAutoResize;
+        else
+            Flags &= ~ImGuiWindowFlags.AlwaysAutoResize;
+
+        if (releaseForcedSize)
+        {
+            Size = null;
+            releaseForcedSize = false;
+        }
+
+        if (lastScreen == Screen.Connect && screen != Screen.Connect)
+        {
+            Size = ConnectedSize;
+            SizeCondition = ImGuiCond.Always;
+            releaseForcedSize = true;
+        }
+
+        lastScreen = screen;
+    }
 
     public override void Draw()
     {
-        if (ImGui.Button("Settings"))
+        switch (CurrentScreen)
         {
-            Settings.IsOpen = true;
-            Settings.BringToFront();
-        }
-
-        ImGui.Separator();
-
-        if (roomSession.State != HubConnectionState.Connected)
-        {
-            DrawConnectScreen();
-            return;
-        }
-
-        if (!roomSession.InRoom)
-        {
-            DrawLobbyScreen();
-            return;
-        }
-
-        DrawRoomScreen();
-    }
-
-    private void DrawConnectScreen()
-    {
-        ImGui.TextUnformatted("Connect to a relay server to start or join a share.");
-        ImGui.Spacing();
-
-        ImGui.SetNextItemWidth(220);
-        if (ImGui.InputText("Display name", ref displayNameInput, 64))
-        {
-            ServiceCollector.Config.DisplayName = displayNameInput;
-            ServiceCollector.PI.SavePluginConfig(ServiceCollector.Config);
-        }
-
-        ImGui.SetNextItemWidth(320);
-        ImGui.InputText("Relay URL", ref relayUrlInput, 256);
-
-        if (ImGui.Button("Connect"))
-        {
-            ServiceCollector.Config.RelayUrl = relayUrlInput;
-            ServiceCollector.PI.SavePluginConfig(ServiceCollector.Config);
-            roomSession.Connect(relayUrlInput);
-        }
-
-        ImGui.SameLine();
-        ImGui.TextUnformatted(roomSession.ConnectionStatus);
-
-        if (roomSession.LastError is not null)
-            ImGui.TextColored(ErrorColor, $"Relay error: {roomSession.LastError}");
-    }
-
-    private void DrawLobbyScreen()
-    {
-        ImGui.TextUnformatted($"Connected as \"{ServiceCollector.Config.DisplayName}\" - {relayUrlInput}");
-        ImGui.Separator();
-
-        ImGui.TextUnformatted("Create a room");
-        ImGui.SetNextItemWidth(150);
-        ImGui.InputText("Password##create", ref createPasswordInput, 128, ImGuiInputTextFlags.Password);
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(80);
-        ImGui.InputInt("Max viewers", ref maxViewersInput);
-        ImGui.SameLine();
-        if (ImGui.Button("Create Room"))
-            roomSession.CreateRoom(createPasswordInput, Math.Max(1, maxViewersInput));
-
-        ImGui.Spacing();
-        ImGui.TextUnformatted("Join a room");
-        ImGui.SetNextItemWidth(100);
-        ImGui.InputText("Room code##join", ref joinRoomIdInput, 16);
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(150);
-        ImGui.InputText("Password##join", ref joinPasswordInput, 128, ImGuiInputTextFlags.Password);
-        ImGui.SameLine();
-        if (ImGui.Button("Join Room"))
-            roomSession.JoinRoom(joinRoomIdInput, joinPasswordInput);
-
-        DrawRecentRooms();
-
-        if (roomSession.LastEvent is not null)
-            ImGui.TextUnformatted($"Last event: {roomSession.LastEvent}");
-        if (roomSession.LastError is not null)
-            ImGui.TextColored(ErrorColor, $"Relay error: {roomSession.LastError}");
-    }
-
-    private void DrawRecentRooms()
-    {
-        Configuration config = ServiceCollector.Config;
-        List<RecentRoom> onThisRelay = config.RecentRooms
-            .Where(r => string.Equals(r.RelayUrl, roomSession.RelayUrl ?? relayUrlInput, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-
-        ImGui.Spacing();
-        if (!ImGui.CollapsingHeader($"Recent rooms ({onThisRelay.Count})"))
-            return;
-
-        bool remember = config.RememberRoomPasswords;
-        if (ImGui.Checkbox("Remember room passwords", ref remember))
-        {
-            config.RememberRoomPasswords = remember;
-
-            if (!remember)
-            {
-                foreach (RecentRoom room in config.RecentRooms)
-                    room.Password = null;
-            }
-
-            ServiceCollector.PI.SavePluginConfig(config);
-        }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "Stores room passwords in the plugin's config file");
-        }
-
-        if (onThisRelay.Count == 0)
-        {
-            ImGui.TextDisabled("No rooms joined on this relay yet.");
-            return;
-        }
-
-        foreach (RecentRoom room in onThisRelay)
-        {
-            string age = DescribeAge(DateTime.UtcNow - room.LastJoinedUtc);
-            string role = room.WasHost ? "hosted" : "joined";
-
-            if (ImGui.Button($"Rejoin##recent_{room.RoomId}"))
-            {
-                joinRoomIdInput = room.RoomId;
-                if (!string.IsNullOrEmpty(room.Password))
-                {
-                    joinPasswordInput = room.Password;
-                    roomSession.JoinRoom(room.RoomId, room.Password);
-                }
-            }
-
-            ImGui.SameLine();
-            ImGui.TextUnformatted($"{room.RoomId}");
-            ImGui.SameLine();
-            ImGui.TextDisabled($"- {role} {age}{(string.IsNullOrEmpty(room.Password) ? ", password needed" : string.Empty)}");
-
-            ImGui.SameLine();
-            if (ImGui.SmallButton($"Forget##recent_{room.RoomId}"))
-            {
-                config.RecentRooms.RemoveAll(r =>
-                    string.Equals(r.RoomId, room.RoomId, StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(r.RelayUrl, room.RelayUrl, StringComparison.OrdinalIgnoreCase));
-                ServiceCollector.PI.SavePluginConfig(config);
+            case Screen.Connect:
+                lobby.DrawConnect();
                 break;
-            }
+            case Screen.Lobby:
+                lobby.DrawLobby();
+                break;
+            default:
+                DrawRoomScreen();
+                break;
         }
     }
 
-    private static string DescribeAge(TimeSpan age) => age switch
+    private void Disconnect()
     {
-        { TotalMinutes: < 1 } => "just now",
-        { TotalHours: < 1 } => $"{(int)age.TotalMinutes}m ago",
-        { TotalDays: < 1 } => $"{(int)age.TotalHours}h ago",
-        _ => $"{(int)age.TotalDays}d ago",
-    };
+        if (roomSession.InRoom)
+            LeaveRoom();
+
+        roomSession.Disconnect();
+    }
+
+    private void NotifyWentLive(ActiveStreamerInfo streamer)
+    {
+        if (!roomSession.InRoom)
+            return;
+
+        string streamerId = streamer.ConnectionId;
+        IActiveNotification toast = ServiceCollector.Notifications.AddNotification(new Notification
+        {
+            Title = $"{streamer.DisplayName} is live",
+            Content = $"Streaming in {roomSession.RoomName ?? "your room"}. Click to watch.",
+            Type = NotificationType.Info,
+            InitialDuration = TimeSpan.FromSeconds(12),
+        });
+
+        toast.Click += args =>
+        {
+            WatchFromNotification(streamerId);
+            args.Notification.DismissNow();
+        };
+
+        toast.DrawActions += args =>
+        {
+            if (!ImGui.Button("Watch"))
+                return;
+
+            WatchFromNotification(streamerId);
+            args.Notification.DismissNow();
+        };
+    }
+
+    private void WatchFromNotification(string streamerId)
+    {
+        // The toast can outlive the stream, or the room.
+        if (!roomSession.InRoom || !roomSession.ActiveStreamers.Any(s => s.ConnectionId == streamerId))
+            return;
+
+        IsOpen = true;
+        if (mediaSession.IsViewing && mediaSession.ViewingStreamerConnectionId == streamerId)
+        {
+            StreamView.IsOpen = true;
+            StreamView.BringToFront();
+            return;
+        }
+
+        StartWatching(streamerId);
+    }
 
     private void DrawRoomScreen()
     {
-        // Room identity and Leave stay ABOVE the tab bar: they're navigation rather than content,
-        // and putting "Leave Room" inside a tab would hide it behind whichever one is selected.
-        ImGui.TextUnformatted($"Room {roomSession.RoomId} - {(roomSession.IsHost ? "Hosting" : "Viewing")}");
-        ImGui.SameLine();
-        if (ImGui.Button("Leave Room"))
-            LeaveRoom();
-
-        if (roomSession.InstanceId is { } instanceId)
-            ImGui.TextDisabled($"Relay instance: {instanceId} ({roomSession.RelayUrl})");
+        DrawRoomHeader();
 
         if (!ImGui.BeginTabBar("##roomTabs"))
             return;
@@ -263,21 +226,83 @@ public sealed class ShareWindow : Window, IDisposable
         ImGui.EndTabBar();
     }
 
+    /// <summary>The room's name, code and visibility on a gradient in the room's colour, with who
+    /// you are and Leave on the right. Sits above the tabs: it's navigation, not content.</summary>
+    private void DrawRoomHeader()
+    {
+        RoomKind kind = UiTheme.KindOf(roomSession.RoomIsPublic, roomSession.RoomHasPassword);
+        Vector4 color = UiTheme.ColorOf(kind);
+        ImGuiStylePtr style = ImGui.GetStyle();
+
+        float width = ImGui.GetContentRegionAvail().X;
+        float lineHeight = ImGui.GetFrameHeight();
+        float padding = UiTheme.Px(6);
+        float secondLineY = padding + lineHeight + style.ItemSpacing.Y;
+        Vector2 min = ImGui.GetCursorScreenPos();
+        Vector2 max = min + new Vector2(width, secondLineY + lineHeight + padding);
+
+        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+        uint strong = UiTheme.Color(color, 0.5f);
+        uint faint = UiTheme.Color(color, 0.04f);
+        drawList.AddRectFilledMultiColor(min, max, strong, faint, faint, strong);
+        drawList.AddRectFilled(min, new Vector2(min.X + UiTheme.Px(4), max.Y), UiTheme.Color(color));
+
+        float left = min.X + UiTheme.Px(14);
+        ImGui.SetCursorScreenPos(new Vector2(left, min.Y + padding));
+        ImGui.AlignTextToFramePadding();
+        UiTheme.Icon(UiTheme.IconOf(kind), color);
+        ImGui.SameLine();
+        ImGui.TextUnformatted(roomSession.RoomName ?? $"Room {roomSession.RoomId}");
+
+        ImGui.SetCursorScreenPos(new Vector2(left, min.Y + secondLineY));
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextDisabled($"#{roomSession.RoomId}");
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Room code. Click to copy it.");
+        if (ImGui.IsItemClicked() && roomSession.RoomId is { } roomId)
+            ImGui.SetClipboardText(roomId);
+
+        ImGui.SameLine();
+        UiTheme.Pill(roomSession.RoomIsPublic ? "Public" : "Private", roomSession.RoomIsPublic ? UiTheme.PublicGreen : UiTheme.PrivatePurple);
+        if (roomSession.RoomHasPassword)
+        {
+            ImGui.SameLine();
+            UiTheme.Pill("Password", UiTheme.LockedBlue);
+        }
+
+        if (mediaSession.IsHosting)
+        {
+            ImGui.SameLine();
+            UiTheme.Pill("You're live", UiTheme.LiveRed);
+        }
+
+        float right = max.X - padding;
+        ImGui.SetCursorScreenPos(new Vector2(right - identity.Width, min.Y + padding));
+        identity.Draw();
+
+        float leaveWidth = UiTheme.Px(100);
+        ImGui.SetCursorScreenPos(new Vector2(right - leaveWidth, min.Y + secondLineY));
+        if (UiTheme.ColoredButton("Leave room", UiTheme.LiveRed, new Vector2(leaveWidth, 0)))
+            LeaveRoom();
+
+        ImGui.SetCursorScreenPos(new Vector2(min.X, max.Y + style.ItemSpacing.Y));
+        ImGui.Dummy(Vector2.Zero);
+    }
+
     private void DrawRoomTab()
     {
-        DrawMemberList();
         DrawWatchingStatus();
-        ImGui.Separator();
+        DrawMemberList();
 
         // mediaSession.IsHosting is included on its own (not just CanStartStreaming) so the
         // section never disappears out from under an already-running stream - e.g. if the host
         // revokes a co-streamer's permission mid-stream, that streamer can still see and click
         // "Stop", rather than losing the only way to stop what's still actively running.
         if (roomSession.CanStartStreaming || mediaSession.IsHosting)
-        {
             DrawStreamingSection();
-            ImGui.Separator();
-        }
+
+        if (roomSession.CanPlaceScreen)
+            DrawScreenPlacement();
 
         DrawMediaStreamStatus();
 
@@ -285,7 +310,7 @@ public sealed class ShareWindow : Window, IDisposable
         // thing the user may need to act on, and burying them behind a tab switch would mean a
         // failed room action could go unnoticed entirely.
         if (roomSession.LastError is not null)
-            ImGui.TextColored(ErrorColor, $"Relay error: {roomSession.LastError}");
+            ImGui.TextColored(UiTheme.ErrorColor, $"Relay error: {roomSession.LastError}");
     }
 
     private void DrawEventLog()
@@ -328,120 +353,198 @@ public sealed class ShareWindow : Window, IDisposable
 
     private void DrawMemberList()
     {
-        ImGui.TextUnformatted("Members:");
-        foreach (RoomMemberInfo member in roomSession.Members)
+        IReadOnlyList<RoomMemberInfo> members = roomSession.Members;
+        IReadOnlyList<ActiveStreamerInfo> streamers = roomSession.ActiveStreamers;
+        IReadOnlyList<WatcherInfo> watchers = roomSession.Watchers;
+
+        UiTheme.SectionLabel($"Members · {members.Count}");
+
+        // Whoever is live first - they're who people are looking for - then the host.
+        IEnumerable<RoomMemberInfo> ordered = members
+            .OrderByDescending(m => streamers.Any(s => s.ConnectionId == m.ConnectionId))
+            .ThenByDescending(m => m.IsHost);
+
+        foreach (RoomMemberInfo member in ordered)
+            DrawMemberRow(member, members, streamers, watchers);
+    }
+
+    /// <summary>
+    /// One member. A streamer's row gets the red line down its left edge and a red tint, their name
+    /// turns green and carries a LIVE badge, and clicking the name watches them. Hovering the name
+    /// shows their ID. The host's controls sit at the right end.
+    /// </summary>
+    private void DrawMemberRow(
+        RoomMemberInfo member,
+        IReadOnlyList<RoomMemberInfo> members,
+        IReadOnlyList<ActiveStreamerInfo> streamers,
+        IReadOnlyList<WatcherInfo> watchers)
+    {
+        bool isSelf = member.ConnectionId == roomSession.ConnectionId;
+        bool isStreaming = streamers.Any(s => s.ConnectionId == member.ConnectionId);
+        bool isWatchingThis = isStreaming && mediaSession.IsViewing && mediaSession.ViewingStreamerConnectionId == member.ConnectionId;
+        string? watchingName = watchers.FirstOrDefault(w => w.WatcherConnectionId == member.ConnectionId) is { } watching
+            ? members.FirstOrDefault(m => m.ConnectionId == watching.StreamerConnectionId)?.DisplayName ?? "someone"
+            : null;
+        bool showHostActions = roomSession.IsHost && !isSelf;
+
+        ImGui.PushID(member.ConnectionId);
+
+        ImGuiStylePtr style = ImGui.GetStyle();
+        float rowHeight = ImGui.GetFrameHeight() + UiTheme.Px(6);
+        float width = ImGui.GetContentRegionAvail().X;
+        float centerOffset = (rowHeight - ImGui.GetFrameHeight()) / 2;
+        Vector2 min = ImGui.GetCursorScreenPos();
+        Vector2 max = min + new Vector2(width, rowHeight);
+
+        if (isStreaming)
         {
-            bool isSelf = member.ConnectionId == roomSession.ConnectionId;
-            bool isStreaming = roomSession.ActiveStreamers.Any(s => s.ConnectionId == member.ConnectionId);
+            ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+            drawList.AddRectFilled(min, max, UiTheme.Color(UiTheme.LiveRed, 0.12f), UiTheme.Px(4));
+            drawList.AddRectFilled(min, new Vector2(min.X + UiTheme.Px(3), max.Y), UiTheme.Color(UiTheme.LiveRed));
+        }
 
-            // Your own stream is watchable too, as a self-preview: it loops out to the relay and
-            // back exactly like anyone else's, so it's the only way to see what you're actually
-            // sending - and the only way to exercise the whole viewer path (decode, popout,
-            // in-world panel) without a second game client. The relay never restricted this; it
-            // was only ever this line.
-            bool isWatchable = isStreaming;
+        ImGui.SetCursorScreenPos(new Vector2(min.X + UiTheme.Px(10), min.Y + centerOffset));
+        ImGui.AlignTextToFramePadding();
+        DrawMemberIcons(member, isStreaming, watchingName is not null);
 
-            string? watchingDisplayName = null;
-            if (roomSession.Watchers.FirstOrDefault(w => w.WatcherConnectionId == member.ConnectionId) is { } watching)
+        string label = isSelf ? $"{member.DisplayName} (you)" : member.DisplayName;
+        if (isStreaming)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, UiTheme.StreamingGreen);
+            if (ImGui.Selectable($"{label}##name", isWatchingThis, ImGuiSelectableFlags.None, new Vector2(ImGui.CalcTextSize(label).X, 0)))
             {
-                watchingDisplayName = roomSession.Members.FirstOrDefault(m => m.ConnectionId == watching.StreamerConnectionId)?.DisplayName ?? "someone";
+                if (isWatchingThis)
+                    StopWatching();
+                else
+                    StartWatching(member.ConnectionId);
             }
 
-            DrawMemberIcons(member, isStreaming, watchingDisplayName);
+            ImGui.PopStyleColor();
+        }
+        else
+        {
+            ImGui.TextUnformatted(label);
+        }
 
-            if (isWatchable)
+        if (ImGui.IsItemHovered())
+            DrawMemberTooltip(member, isSelf, isStreaming, isWatchingThis, watchingName);
+
+        if (isStreaming)
+        {
+            ImGui.SameLine();
+            UiTheme.Pill("LIVE", UiTheme.LiveRed);
+            if (isWatchingThis)
             {
-                bool isWatchingThis = mediaSession.IsViewing && mediaSession.ViewingStreamerConnectionId == member.ConnectionId;
-                if (ImGui.Selectable($"{member.DisplayName}##member_{member.ConnectionId}", isWatchingThis, ImGuiSelectableFlags.None, new Vector2(150, 0)))
-                {
-                    if (isWatchingThis)
-                        StopWatching();
-                    else
-                        StartWatching(member.ConnectionId);
-                }
-
-                if (ImGui.IsItemHovered())
-                {
-                    ImGui.SetTooltip(
-                        isWatchingThis ? "Click to stop watching"
-                        : isSelf ? "Click to preview your own stream.\n" +
-                                   "Turn audio capture off first - system loopback would record " +
-                                   "this preview's own playback and feed it back into the stream."
-                        : "Click to watch");
-                }
+                ImGui.SameLine();
+                UiTheme.Pill("Watching", UiTheme.WatchingColor);
             }
+        }
+
+        if (showHostActions)
+        {
+            FontAwesomeIcon streamIcon = member.CanStream ? FontAwesomeIcon.VideoSlash : FontAwesomeIcon.Video;
+            float actionsWidth = UiTheme.IconButtonWidth(streamIcon) + UiTheme.IconButtonWidth(FontAwesomeIcon.UserSlash) + style.ItemSpacing.X + UiTheme.Px(6);
+            ImGui.SetCursorScreenPos(new Vector2(max.X - actionsWidth, min.Y + centerOffset));
+            DrawHostActions(member, streamIcon);
+        }
+
+        ImGui.SetCursorScreenPos(min);
+        ImGui.Dummy(new Vector2(width, rowHeight));
+        ImGui.PopID();
+    }
+
+    private void DrawHostActions(RoomMemberInfo member, FontAwesomeIcon streamIcon)
+    {
+        if (ImGuiComponents.IconButton("##streamPermission", streamIcon))
+        {
+            if (member.CanStream)
+                roomSession.RevokeStreamPermission(member.ConnectionId);
             else
-            {
-                ImGui.TextUnformatted(member.DisplayName);
-            }
+                roomSession.GrantStreamPermission(member.ConnectionId);
+        }
 
-            if (roomSession.IsHost && !isSelf)
-            {
-                ImGui.SameLine();
-                if (ImGui.Button($"Kick##{member.ConnectionId}"))
-                    roomSession.KickViewer(member.ConnectionId);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(member.CanStream ? "Take away streaming" : "Allow streaming");
 
-                ImGui.SameLine();
-                if (member.CanStream)
-                {
-                    if (ImGui.Button($"Revoke streaming##{member.ConnectionId}"))
-                        roomSession.RevokeStreamPermission(member.ConnectionId);
-                }
-                else if (ImGui.Button($"Allow streaming##{member.ConnectionId}"))
-                {
-                    roomSession.GrantStreamPermission(member.ConnectionId);
-                }
-            }
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButton("##kick", FontAwesomeIcon.UserSlash))
+            ImGui.OpenPopup("##confirmKick");
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Remove from the room");
+
+        // A kick is a ban - they can't come back and the room disappears from their lists - so it
+        // gets a second click rather than firing on a stray one.
+        if (!ImGui.BeginPopup("##confirmKick"))
+            return;
+
+        ImGui.TextUnformatted($"Remove {member.DisplayName}?");
+        ImGui.TextDisabled("They won't be able to rejoin this room.");
+        if (UiTheme.ColoredButton("Remove", UiTheme.LiveRed))
+        {
+            roomSession.KickViewer(member.ConnectionId);
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Cancel"))
+            ImGui.CloseCurrentPopup();
+
+        ImGui.EndPopup();
+    }
+
+    private static void DrawMemberIcons(RoomMemberInfo member, bool isStreaming, bool isWatching)
+    {
+        if (member.IsHost)
+        {
+            UiTheme.Icon(FontAwesomeIcon.Crown, UiTheme.CrownColor);
+            ImGui.SameLine(0, UiTheme.Px(6));
+        }
+        else if (member.CanStream && !isStreaming)
+        {
+            UiTheme.Icon(FontAwesomeIcon.UserCheck, UiTheme.PublicGreen);
+            ImGui.SameLine(0, UiTheme.Px(6));
+        }
+
+        if (isWatching)
+        {
+            UiTheme.Icon(FontAwesomeIcon.Eye, UiTheme.WatchingColor);
+            ImGui.SameLine(0, UiTheme.Px(6));
         }
     }
 
-    private static void DrawMemberIcons(RoomMemberInfo member, bool isStreaming, string? watchingDisplayName)
+    private void DrawMemberTooltip(RoomMemberInfo member, bool isSelf, bool isStreaming, bool isWatchingThis, string? watchingName)
     {
-        bool any = false;
+        ImGui.BeginTooltip();
+        if (isStreaming)
+            ImGui.TextColored(UiTheme.StreamingGreen, member.DisplayName);
+        else
+            ImGui.TextUnformatted(member.DisplayName);
 
-        // Whether the eye icon is hovered is noted here but acted on AFTER the icon font is popped.
-        // A tooltip shown inside that scope is drawn in FontAwesome, which has no Latin glyphs, so
-        // "Watching: Ashley" came out as blanks and boxes.
-        bool watchingHovered = false;
+        ImGui.TextDisabled(member.IsHost ? "Host" : member.CanStream ? "Allowed to stream" : "Viewer");
+        ImGui.Separator();
+        ImGui.TextDisabled("ID");
+        ImGui.TextUnformatted(member.UserId);
 
-        using (ServiceCollector.PI.UiBuilder.IconFontHandle.Push())
+        if (isStreaming)
+            ImGui.TextColored(UiTheme.LiveRed, "Live now");
+        if (watchingName is not null)
+            ImGui.TextDisabled($"Watching {watchingName}");
+
+        // Your own stream is watchable too, as a self-preview: it loops out to the relay and back
+        // exactly like anyone else's, so it's the only way to see what you're actually sending.
+        if (isStreaming)
         {
-            if (member.IsHost)
-            {
-                ImGui.TextColored(CrownColor, FontAwesomeIcon.Crown.ToIconString());
-                any = true;
-            }
-
-            if (isStreaming)
-            {
-                if (any)
-                    ImGui.SameLine(0, 4);
-                ImGui.TextColored(StreamingColor, FontAwesomeIcon.Camera.ToIconString());
-                any = true;
-            }
-            else if (member.CanStream && !member.IsHost)
-            {
-                if (any)
-                    ImGui.SameLine(0, 4);
-                ImGui.TextColored(PermittedColor, FontAwesomeIcon.UserCheck.ToIconString());
-                any = true;
-            }
-
-            if (watchingDisplayName is not null)
-            {
-                if (any)
-                    ImGui.SameLine(0, 4);
-                ImGui.TextColored(WatchingColor, FontAwesomeIcon.Eye.ToIconString());
-                any = true;
-                watchingHovered = ImGui.IsItemHovered();
-            }
+            ImGui.Spacing();
+            ImGui.TextDisabled(
+                isWatchingThis ? "Click to stop watching."
+                : isSelf ? "Click to preview your own stream.\n" +
+                           "Turn audio capture off first - system loopback would record\n" +
+                           "this preview's own playback and feed it back into the stream."
+                : "Click to watch.");
         }
 
-        if (watchingHovered)
-            ImGui.SetTooltip($"Watching: {watchingDisplayName}");
-
-        if (any)
-            ImGui.SameLine(0, 6);
+        ImGui.EndTooltip();
     }
 
     private void DrawWatchingStatus()
@@ -450,6 +553,10 @@ public sealed class ShareWindow : Window, IDisposable
             return;
 
         string displayName = roomSession.Members.FirstOrDefault(m => m.ConnectionId == mediaSession.ViewingStreamerConnectionId)?.DisplayName ?? "someone";
+
+        ImGui.AlignTextToFramePadding();
+        UiTheme.Icon(FontAwesomeIcon.Eye, UiTheme.WatchingColor);
+        ImGui.SameLine();
 
         // Says where the stream actually is, because with the popout closed and the panel in the
         // world this line is the only thing left explaining why audio is still playing.
@@ -463,6 +570,7 @@ public sealed class ShareWindow : Window, IDisposable
             StreamView.IsOpen = true;
             StreamView.BringToFront();
         }
+
         ImGui.SameLine();
         if (ImGui.Button("Stop watching##stopFromStatus"))
             StopWatching();
@@ -470,20 +578,46 @@ public sealed class ShareWindow : Window, IDisposable
 
     private void DrawStreamingSection()
     {
-        if (ImGui.Button(mediaSession.IsHosting ? "Stop streaming to room" : "Start streaming to room"))
+        UiTheme.SectionLabel("Your stream");
+
+        bool live = mediaSession.IsHosting;
+        var size = new Vector2(UiTheme.Px(150), ImGui.GetFrameHeight() * 1.3f);
+        Vector4 liveColor = live ? UiTheme.LiveRed : UiTheme.PublicGreen;
+        if (ImGuiComponents.IconButtonWithText(
+                live ? FontAwesomeIcon.Stop : FontAwesomeIcon.BroadcastTower,
+                live ? "Stop streaming" : "Go live",
+                liveColor with { W = 0.6f },
+                liveColor,
+                liveColor with { W = 0.85f },
+                size))
+        {
             ToggleMediaStreaming();
+        }
 
         ImGui.SameLine();
-        if (ImGui.Button(audioCapture is null ? "Start audio capture" : "Stop audio capture"))
+        bool audioOn = audioCapture is not null;
+        if (ImGuiComponents.IconButtonWithText(audioOn ? FontAwesomeIcon.VolumeUp : FontAwesomeIcon.VolumeMute, audioOn ? "Stop audio" : "Capture audio", size))
             ToggleAudioCapture();
 
+        if (audioCapture is not null)
+        {
+            ImGui.SameLine();
+            ImGui.ProgressBar(Math.Clamp(audioCapture.CurrentPeak, 0f, 1f), new Vector2(UiTheme.Px(90), size.Y), string.Empty);
+            if (ImGui.IsItemHovered())
+            {
+                NAudio.Wave.WaveFormat format = audioCapture.WaveFormat;
+                ImGui.SetTooltip($"Audio level - {format.SampleRate} Hz, {format.Channels}ch");
+            }
+        }
+
         if (audioError is not null)
-            ImGui.TextColored(ErrorColor, $"Audio capture failed: {audioError}");
+            ImGui.TextColored(UiTheme.ErrorColor, $"Audio capture failed: {audioError}");
         if (streamSetupError is not null)
-            ImGui.TextColored(ErrorColor, streamSetupError);
+            ImGui.TextColored(UiTheme.ErrorColor, streamSetupError);
+        if (audioCapture?.LastError is { } audioCaptureError)
+            ImGui.TextColored(UiTheme.WarnColor, $"Audio capture error: {audioCaptureError.Message}");
 
         DrawScreenCaptureStatus();
-        DrawAudioStatus();
     }
 
     private void DrawScreenCaptureStatus()
@@ -492,32 +626,42 @@ public sealed class ShareWindow : Window, IDisposable
             return;
 
         if (screenCapture.LastError is { } captureError)
-            ImGui.TextColored(WarnColor, $"Screen capture error: {captureError.Message}");
+            ImGui.TextColored(UiTheme.WarnColor, $"Screen capture error: {captureError.Message}");
 
         if (screenCapture.FramesCaptured == 0)
         {
-            ImGui.TextColored(WarnColor,
+            ImGui.TextColored(UiTheme.WarnColor,
                 "No frames captured yet - if this doesn't move, the selected monitor isn't producing frames.");
-        }
-        else
-        {
-            ImGui.TextDisabled($"{screenCapture.FramesCaptured} frames captured ({screenCapture.Width}x{screenCapture.Height})");
         }
     }
 
-    private void DrawAudioStatus()
+    /// <summary>For the host and anyone allowed to stream. Everyone else never places anything:
+    /// the screen just appears for them once it's here.</summary>
+    private void DrawScreenPlacement()
     {
-        if (audioCapture is null)
-            return;
+        UiTheme.SectionLabel("In-world screen");
 
-        NAudio.Wave.WaveFormat format = audioCapture.WaveFormat;
-        ImGui.TextUnformatted($"System audio: {format.SampleRate} Hz, {format.Channels}ch");
-        ImGui.TextUnformatted("Level:");
+        ScreenPlacementInfo? placement = roomSession.ScreenPlacement;
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Tv, placement is null ? "Place screen here" : "Move here")
+            && WorldScreenController.PlaceInFrontOfPlayer(placement) is { } placed)
+        {
+            WorldScreenController.ApplyPlacement(roomSession, placed);
+        }
+
+        if (placement is not null)
+        {
+            ImGui.SameLine();
+            if (ImGui.Button("Remove screen"))
+                WorldScreenController.ApplyPlacement(roomSession, null);
+        }
+
         ImGui.SameLine();
-        ImGui.ProgressBar(Math.Clamp(audioCapture.CurrentPeak, 0f, 1f), new Vector2(200, 0), "");
-
-        if (audioCapture.LastError is not null)
-            ImGui.TextColored(WarnColor, $"Audio capture error: {audioCapture.LastError.Message}");
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextDisabled(placement is null
+            ? "Everyone watching sees it once it's placed."
+            : placement.TerritoryType != ServiceCollector.ClientState.TerritoryType
+                ? "Placed in another zone."
+                : "Shown to everyone watching. Fine-tune it from the stream window.");
     }
 
     private void HandleViewerMediaLifecycle()
@@ -579,10 +723,10 @@ public sealed class ShareWindow : Window, IDisposable
             device ??= new GameAdapterDevice(ServiceCollector.PI.UiBuilder);
             string ffmpegPath = Path.Combine(ServiceCollector.PI.AssemblyLocation.DirectoryName!, "ffmpeg", "ffmpeg.exe");
             // Use roomSession.RelayUrl (the instance the SignalR connection is ACTUALLY on right
-            // now), not relayUrlInput (what the user originally typed) - a cross-instance redirect
+            // now), not the configured relay URL (what the user typed) - a cross-instance redirect
             // during JoinRoom can leave those pointing at different relays, and the media WebSocket
             // has to hit the same instance that owns the room's live connections.
-            mediaSession.StartViewing(roomSession.RelayUrl ?? relayUrlInput, roomSession.RoomId!, roomSession.ConnectionId!, streamerConnectionId, device, ffmpegPath);
+            mediaSession.StartViewing(roomSession.RelayUrl ?? ServiceCollector.Config.RelayUrl, roomSession.RoomId!, roomSession.ConnectionId!, streamerConnectionId, device, ffmpegPath);
             previewTexture?.Dispose();
             previewTexture = null;
             lastOpenedViewerVideoHandle = null;
@@ -608,38 +752,49 @@ public sealed class ShareWindow : Window, IDisposable
     private void DrawMediaStreamStatus()
     {
         if (mediaSession.HostLastError is not null)
-            ImGui.TextColored(ErrorColor, $"Media stream error: {mediaSession.HostLastError}");
+            ImGui.TextColored(UiTheme.ErrorColor, $"Media stream error: {mediaSession.HostLastError}");
 
         if (mediaSession.IsHosting)
         {
-            ImGui.TextUnformatted(
-                $"Streaming: {mediaSession.HostFramesEncoded} encoded / {mediaSession.HostFramesSkipped} skipped " +
-                $"({mediaSession.HostAverageFps:F1} fps avg), {mediaSession.HostEncodedBytes} bytes sent " +
-                $"({mediaSession.HostAverageBitrateKbps:F0}kbps avg, target {mediaSession.HostCurrentBitrateKbps}) " +
-                $"({mediaSession.HostEncoderName}, {mediaSession.HostCodec})");
+            ImGui.Spacing();
+            ImGui.AlignTextToFramePadding();
+            UiTheme.Pill("LIVE", UiTheme.LiveRed);
+            ImGui.SameLine();
+            string resolution = screenCapture is { FramesCaptured: > 0 } capture ? $"{capture.Width}x{capture.Height} · " : string.Empty;
+            ImGui.TextDisabled(
+                $"{resolution}{mediaSession.HostAverageFps:F1} fps · {mediaSession.HostAverageBitrateKbps:F0} kbps · {mediaSession.HostEncoderName}");
+
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(
+                    $"{mediaSession.HostFramesEncoded} frames encoded, {mediaSession.HostFramesSkipped} skipped\n" +
+                    $"{mediaSession.HostEncodedBytes} bytes sent\n" +
+                    $"Bitrate target {mediaSession.HostCurrentBitrateKbps} kbps\n" +
+                    $"{mediaSession.HostEncoderName}, {mediaSession.HostCodec}");
+            }
 
             // Shown only when adaptation has actually pulled the bitrate down, so quality dropping
             // reads as a deliberate response to the uplink rather than as something going wrong.
             if (mediaSession.HostBitrateReduced)
             {
-                ImGui.TextColored(WarnColor,
+                ImGui.TextColored(UiTheme.WarnColor,
                     $"Bitrate reduced to {mediaSession.HostCurrentBitrateKbps}kbps - the upload can't carry the configured rate.");
             }
 
             if (mediaSession.HostQueueDrops > 0)
             {
-                ImGui.TextColored(WarnColor,
+                ImGui.TextColored(UiTheme.WarnColor,
                     $"{mediaSession.HostQueueDrops} video chunks dropped before sending - upload can't keep up with the configured bitrate.");
             }
 
             if (mediaSession.HostQueueAudioDrops > 0)
             {
-                ImGui.TextColored(WarnColor,
+                ImGui.TextColored(UiTheme.WarnColor,
                     $"{mediaSession.HostQueueAudioDrops} audio packets dropped before sending - upload can't keep up even with audio's own queue.");
             }
 
             if (mediaSession.HostVideoError is { } hostVideoError)
-                ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), $"Video encoder died mid-stream: {hostVideoError.Message}");
+                ImGui.TextColored(UiTheme.ErrorColor, $"Video encoder died mid-stream: {hostVideoError.Message}");
         }
     }
 
@@ -776,7 +931,7 @@ public sealed class ShareWindow : Window, IDisposable
         // See the matching comment in StartWatching - roomSession.RelayUrl reflects wherever the
         // control-plane connection actually ended up, which is what the media WebSocket must match.
         mediaSession.StartHosting(
-            roomSession.RelayUrl ?? relayUrlInput, roomId, connectionId, device, screenCapture, audioCapture, ffmpegPath,
+            roomSession.RelayUrl ?? ServiceCollector.Config.RelayUrl, roomId, connectionId, device, screenCapture, audioCapture, ffmpegPath,
             Settings.TargetHeight, Settings.VideoBitrateKbps, Settings.VideoFpsTarget, Settings.Codec, Settings.AudioBitrateKbps * 1000);
 
         // Deliberately AFTER StartHosting. Starting audio first would hand StartHosting a snapshot

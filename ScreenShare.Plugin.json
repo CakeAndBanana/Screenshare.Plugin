@@ -1,8 +1,8 @@
 ﻿{
   "Author": "CakeAndBanana",
   "Name": "ScreenShare",
-  "Punchline": "Share your screen, a window, or your audio with others in a password-protected room.",
-  "Description": "Create or join a password-protected room to share a monitor or a specific window - plus system or per-application audio - with other players, rendered directly in-game.",
+  "Punchline": "Share your screen, a window, or your audio with others in a public or private room.",
+  "Description": "Create or join a public or private room (optionally password protected) to share a monitor or a specific window - plus system or per-application audio - with other players, rendered directly in-game.",
   "ApplicableVersion": "any",
   "Tags": [
     "screenshare",

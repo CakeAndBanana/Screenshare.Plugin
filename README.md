@@ -2,13 +2,15 @@
 
 A [Dalamud](https://github.com/goatcorp/Dalamud) plugin for FFXIV that lets you share your screen (or just one window) and audio with other players, rendered directly inside their game client - no external stream, no separate app to alt-tab to.
 
-Create or join a password-protected room, then either watch someone else's stream in a popout window or start streaming yourself. Needs a running [ScreenShare.Relay](https://github.com/CakeAndBanana/Screenshare.Relay) instance to connect to - self-host your own, or use one someone's shared with you.
+Create or join a room - public or private, with or without a password - then either watch someone else's stream in a popout window or start streaming yourself. Needs a running [ScreenShare.Relay](https://github.com/CakeAndBanana/Screenshare.Relay) instance to connect to - self-host your own, or use one someone's shared with you.
 
 ## Features
 
-- **Password-protected rooms** - create a room with a password and a viewer cap, or join one with a room code
+- **Public and private rooms** - give a room a name and make it public (listed for everyone on the relay) or private (joined by its code); either can have a password. Public rooms show in green, password-protected ones in blue, private ones in purple - hover a room to see its host and who's in it
+- **Recent rooms** - every room you've been in on the relay, live or closed, one click to rejoin
+- **Go-live notifications** - when someone in your room starts streaming you get a notification; click it to watch
 - **Multi-streamer rooms** - the room owner can grant other members permission to stream too, simultaneously; viewers pick which stream to watch (like changing a channel) rather than everyone always watching the owner
-- **Durable kicks** - a kick survives the kicked player reconnecting, relaunching the game, or reloading the plugin, for as long as the room exists
+- **Durable kicks** - a kick survives the kicked player reconnecting, relaunching the game, or reloading the plugin, for as long as the room exists - and the room disappears from their room lists
 - **Flexible capture** - share a specific monitor, or one specific window instead of your whole screen
 - **Flexible audio** - share your whole system's audio, or just one application's (and its child processes - useful for browsers, where audio usually renders in a subprocess)
 - **Hardware video encoding** - NVENC (NVIDIA) / AMF (AMD) / QSV (Intel) with automatic detection, H.264 or HEVC, falling back to software encoding if no hardware encoder is available
@@ -59,11 +61,11 @@ It generates its own test stream with the bundled ffmpeg, and calls the plugin's
 
 ## Using it
 
-1. Open the plugin window (`/screenshare`), enter a display name and your relay's URL, and connect.
-2. **Create a room** (pick a password and a viewer cap) or **join one** with a room code and password.
-3. In the room, everyone's listed with icon badges: 👑 the owner, 📷 whoever's currently live, and a person-check badge for anyone else who's been granted permission to stream.
+1. Open the plugin window (`/screenshare`), enter your relay's URL (just the address is enough, e.g. `relay.example.com`), then a display name, and connect. Hover your name later to see your ID and the relay you're on; the pencil renames you.
+2. **Create a room** (name, public or private, optional password, viewer cap), pick one from **Public rooms** or **Recent**, or **join by code**.
+3. In the room, everyone's listed with badges: 👑 the owner, a person-check for anyone allowed to stream, and a red line with a LIVE badge (and a green name) for whoever's streaming. Hover a name to see that person's ID.
 4. **To watch someone**, click their name - their stream opens in its own popout window. Click a different streaming member's name to switch.
-5. **To stream**, open the collapsed "Streaming settings" panel to pick your capture source (monitor or window), audio source (system or one app), resolution/bitrate/fps/codec, then hit Start.
+5. **To stream**, pick your capture source, audio and quality in Settings (the cog in the window's title bar), then hit **Go live**. The owner and anyone allowed to stream can place the in-world screen; everyone watching sees it there automatically.
 6. As the owner, grant/revoke streaming permission or kick people directly from the member list.
 
 ## Configuration

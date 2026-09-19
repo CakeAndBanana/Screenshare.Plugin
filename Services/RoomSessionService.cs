@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.SignalR.Client;
+﻿using System.Collections.Concurrent;
+using Microsoft.AspNetCore.SignalR.Client;
 using ScreenShare.Plugin.Networking;
 
 namespace ScreenShare.Plugin.Services;
@@ -7,7 +8,14 @@ public readonly record struct RoomEvent(DateTime TimestampLocal, string Message)
 
 public sealed class RoomSessionService : IDisposable
 {
+    private const int MaxRememberedRooms = 20;
+    private static readonly TimeSpan DirectoryRefreshInterval = TimeSpan.FromSeconds(5);
     private readonly RoomHubClient client = new();
+    private readonly Lock recentRoomsLock = new();
+    private readonly ConcurrentDictionary<string, byte> bannedRoomIds = new(StringComparer.OrdinalIgnoreCase);
+    private RoomDirectory? directory;
+    private DateTime lastDirectoryRefreshUtc;
+    private int directoryRefreshInFlight;
     private readonly Lock membersLock = new();
     private readonly List<RoomMemberInfo> members = [];
     private readonly Lock activeStreamersLock = new();
@@ -36,6 +44,12 @@ public sealed class RoomSessionService : IDisposable
 
     public string? RoomId { get; private set; }
 
+    public string? RoomName { get; private set; }
+
+    public bool RoomIsPublic { get; private set; }
+
+    public bool RoomHasPassword { get; private set; }
+
     public bool IsHost { get; private set; }
 
     public bool InRoom => RoomId is not null;
@@ -51,6 +65,71 @@ public sealed class RoomSessionService : IDisposable
     public string? LastError { get; private set; }
 
     public string? LastEvent { get; private set; }
+
+    public string? DirectoryError { get; private set; }
+
+    public bool HasDirectory => directory is not null;
+
+    public bool IsRefreshingDirectory => Volatile.Read(ref directoryRefreshInFlight) == 1;
+
+    public event Action<ActiveStreamerInfo>? StreamerWentLive;
+
+    public IReadOnlyList<RoomListing> PublicRooms
+        => directory is { } current
+            ? [.. current.Rooms.Where(r => r.IsPublic && !IsBannedFrom(r.RoomId))]
+            : [];
+
+    public RoomListing? FindListing(string roomId)
+    {
+        if (IsBannedFrom(roomId) || directory is not { } current)
+            return null;
+
+        return current.Rooms.FirstOrDefault(r => string.Equals(r.RoomId, roomId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public bool IsBannedFrom(string roomId) => bannedRoomIds.ContainsKey(roomId);
+
+    public IReadOnlyList<RecentRoom> RecentRooms
+    {
+        get
+        {
+            string relayUrl = ServiceCollector.Config.RelayUrl;
+            lock (recentRoomsLock)
+            {
+                return [.. ServiceCollector.Config.RecentRooms.Where(r =>
+                    string.Equals(r.RelayUrl, relayUrl, StringComparison.OrdinalIgnoreCase) && !IsBannedFrom(r.RoomId))];
+            }
+        }
+    }
+
+    public void ForgetRoom(string roomId)
+    {
+        Configuration config = ServiceCollector.Config;
+        lock (recentRoomsLock)
+        {
+            config.RecentRooms.RemoveAll(r =>
+                string.Equals(r.RoomId, roomId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(r.RelayUrl, config.RelayUrl, StringComparison.OrdinalIgnoreCase));
+        }
+
+        ServiceCollector.PI.SavePluginConfig(config);
+    }
+
+    public void SetRememberRoomPasswords(bool remember)
+    {
+        Configuration config = ServiceCollector.Config;
+        lock (recentRoomsLock)
+        {
+            config.RememberRoomPasswords = remember;
+            if (!remember)
+            {
+                foreach (RecentRoom room in config.RecentRooms)
+                    room.Password = null;
+            }
+        }
+
+        ServiceCollector.PI.SavePluginConfig(config);
+    }
 
     public IReadOnlyList<RoomEvent> Events
     {
@@ -77,6 +156,9 @@ public sealed class RoomSessionService : IDisposable
             RecordEvent(hasStreamerBaseline
                 ? $"{streamer.DisplayName} started streaming"
                 : $"{streamer.DisplayName} is already streaming");
+
+            if (hasStreamerBaseline && streamer.ConnectionId != ConnectionId)
+                StreamerWentLive?.Invoke(streamer);
         }
 
         foreach (ActiveStreamerInfo streamer in previous)
@@ -118,30 +200,54 @@ public sealed class RoomSessionService : IDisposable
             return members.FirstOrDefault(m => m.ConnectionId == connectionId)?.DisplayName ?? "someone";
     }
 
-    private static void RememberRoom(string roomId, string password, bool wasHost)
+    private void RememberRoom(string roomId, string password, bool wasHost)
     {
-        const int maxRemembered = 8;
-
         Configuration config = ServiceCollector.Config;
-        string relayUrl = ServiceCollector.Config.RelayUrl;
+        string relayUrl = config.RelayUrl;
 
-        config.RecentRooms.RemoveAll(r =>
-            string.Equals(r.RoomId, roomId, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(r.RelayUrl, relayUrl, StringComparison.OrdinalIgnoreCase));
-
-        config.RecentRooms.Insert(0, new RecentRoom
+        lock (recentRoomsLock)
         {
-            RelayUrl = relayUrl,
-            RoomId = roomId,
-            Password = config.RememberRoomPasswords ? password : null,
-            WasHost = wasHost,
-            LastJoinedUtc = DateTime.UtcNow,
-        });
+            config.RecentRooms.RemoveAll(r =>
+                string.Equals(r.RoomId, roomId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(r.RelayUrl, relayUrl, StringComparison.OrdinalIgnoreCase));
 
-        if (config.RecentRooms.Count > maxRemembered)
-            config.RecentRooms.RemoveRange(maxRemembered, config.RecentRooms.Count - maxRemembered);
+            config.RecentRooms.Insert(0, new RecentRoom
+            {
+                RelayUrl = relayUrl,
+                RoomId = roomId,
+                Name = RoomName,
+                IsPublic = RoomIsPublic,
+                HasPassword = RoomHasPassword,
+                Password = config.RememberRoomPasswords && RoomHasPassword ? password : null,
+                WasHost = wasHost,
+                LastJoinedUtc = DateTime.UtcNow,
+            });
+
+            if (config.RecentRooms.Count > MaxRememberedRooms)
+                config.RecentRooms.RemoveRange(MaxRememberedRooms, config.RecentRooms.Count - MaxRememberedRooms);
+        }
 
         ServiceCollector.PI.SavePluginConfig(config);
+    }
+
+    private void MarkBanned(IEnumerable<string> roomIds)
+    {
+        bool forgotAny = false;
+        Configuration config = ServiceCollector.Config;
+
+        foreach (string roomId in roomIds)
+        {
+            bannedRoomIds[roomId] = 0;
+            lock (recentRoomsLock)
+            {
+                forgotAny |= config.RecentRooms.RemoveAll(r =>
+                    string.Equals(r.RoomId, roomId, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(r.RelayUrl, config.RelayUrl, StringComparison.OrdinalIgnoreCase)) > 0;
+            }
+        }
+
+        if (forgotAny)
+            ServiceCollector.PI.SavePluginConfig(config);
     }
 
     private void RecordEvent(string message)
@@ -216,7 +322,29 @@ public sealed class RoomSessionService : IDisposable
         client.Kicked += () =>
         {
             RecordEvent("You were removed from the room by the host.");
+            if (RoomId is { } kickedFrom)
+                MarkBanned([kickedFrom]);
             ResetRoomState();
+        };
+
+        client.MemberRenamed += (connectionId, displayName) =>
+        {
+            string? previousName = null;
+            lock (membersLock)
+            {
+                int index = members.FindIndex(m => m.ConnectionId == connectionId);
+                if (index >= 0)
+                {
+                    previousName = members[index].DisplayName;
+                    members[index] = members[index] with { DisplayName = displayName };
+                }
+            }
+
+            lock (activeStreamersLock)
+                activeStreamers = [.. activeStreamers.Select(s => s.ConnectionId == connectionId ? s with { DisplayName = displayName } : s)];
+
+            if (previousName is not null && previousName != displayName)
+                RecordEvent($"{previousName} is now {displayName}");
         };
 
         client.RoomClosed += () =>
@@ -308,10 +436,15 @@ public sealed class RoomSessionService : IDisposable
         }
     }
 
+    public bool IsConnecting { get; private set; }
+
     public void Connect(string relayUrl)
     {
         LastError = null;
         ConnectionStatus = "Connecting...";
+        IsConnecting = true;
+        ResetRoomState();
+        ClearDirectory();
         _ = ConnectCoreAsync(relayUrl);
     }
 
@@ -321,39 +454,139 @@ public sealed class RoomSessionService : IDisposable
         {
             await client.ConnectAsync(relayUrl).ConfigureAwait(false);
             ConnectionStatus = "Connected";
+            RefreshDirectory(force: true);
         }
         catch (Exception ex)
         {
             ConnectionStatus = "Disconnected";
             LastError = ex.Message;
         }
+        finally
+        {
+            IsConnecting = false;
+        }
     }
 
-    public void CreateRoom(string password, int maxViewers)
+    public void Disconnect()
     {
         LastError = null;
-        lastRoomPassword = password;
-        _ = CreateRoomCoreAsync(password, maxViewers);
+        ResetRoomState();
+        ClearDirectory();
+        ConnectionStatus = "Disconnected";
+        _ = client.DisconnectAsync();
     }
 
-    private async Task CreateRoomCoreAsync(string password, int maxViewers)
+    private void ClearDirectory()
+    {
+        directory = null;
+        DirectoryError = null;
+        bannedRoomIds.Clear();
+        lastDirectoryRefreshUtc = default;
+    }
+
+    public void RefreshDirectory(bool force = false)
+    {
+        if (State != HubConnectionState.Connected)
+            return;
+
+        if (!force && DateTime.UtcNow - lastDirectoryRefreshUtc < DirectoryRefreshInterval)
+            return;
+
+        if (Interlocked.Exchange(ref directoryRefreshInFlight, 1) == 1)
+            return;
+
+        lastDirectoryRefreshUtc = DateTime.UtcNow;
+        _ = RefreshDirectoryCoreAsync();
+    }
+
+    private async Task RefreshDirectoryCoreAsync()
     {
         try
         {
-            CreateRoomResult result = await client.CreateRoomAsync(
-                password, maxViewers, ServiceCollector.Config.ClientId, ServiceCollector.Config.DisplayName).ConfigureAwait(false);
+            RoomDirectory result = await client.ListRoomsAsync(ServiceCollector.Config.ClientId).ConfigureAwait(false);
+            if (result.BannedRoomIds.Count > 0)
+                MarkBanned(result.BannedRoomIds);
+
+            directory = result;
+            DirectoryError = null;
+        }
+        catch (Exception ex)
+        {
+            DirectoryError = ex.Message;
+        }
+        finally
+        {
+            Volatile.Write(ref directoryRefreshInFlight, 0);
+        }
+    }
+
+    /// <summary>Saves the new name and, in a room, tells everyone there. Your ID doesn't change.</summary>
+    public void UpdateDisplayName(string displayName)
+    {
+        Configuration config = ServiceCollector.Config;
+        if (displayName == config.DisplayName)
+            return;
+
+        config.DisplayName = displayName;
+        ServiceCollector.PI.SavePluginConfig(config);
+
+        if (RoomId is not { } roomId || ConnectionId is not { } self)
+            return;
+
+        lock (membersLock)
+        {
+            int index = members.FindIndex(m => m.ConnectionId == self);
+            if (index >= 0)
+                members[index] = members[index] with { DisplayName = displayName };
+        }
+
+        RecordEvent($"You are now {displayName}");
+        _ = UpdateDisplayNameCoreAsync(roomId, displayName);
+    }
+
+    private async Task UpdateDisplayNameCoreAsync(string roomId, string displayName)
+    {
+        try
+        {
+            await client.UpdateDisplayNameAsync(roomId, displayName).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+        }
+    }
+
+    public void CreateRoom(string name, bool isPublic, string password, int maxViewers)
+    {
+        LastError = null;
+        lastRoomPassword = password;
+        _ = CreateRoomCoreAsync(new CreateRoomRequest(name, isPublic, string.IsNullOrEmpty(password) ? null : password, maxViewers));
+    }
+
+    private async Task CreateRoomCoreAsync(CreateRoomRequest request)
+    {
+        try
+        {
+            Configuration config = ServiceCollector.Config;
+            CreateRoomResult result = await client.CreateRoomAsync(request, config.ClientId, config.DisplayName).ConfigureAwait(false);
             if (result.Success)
             {
+                RoomName = result.RoomName ?? request.Name;
+                RoomIsPublic = request.IsPublic;
+                RoomHasPassword = request.Password is not null;
                 RoomId = result.RoomId;
                 IsHost = true;
                 CanStream = true;
+
+                hasStreamerBaseline = true;
+                hasWatcherBaseline = true;
                 lock (membersLock)
                 {
                     members.Clear();
-                    members.Add(new RoomMemberInfo(ConnectionId!, ServiceCollector.Config.DisplayName, IsHost: true, CanStream: true));
+                    members.Add(new RoomMemberInfo(ConnectionId!, config.DisplayName, IsHost: true, CanStream: true, ClientIdentity.ToPublicId(config.ClientId)));
                 }
-                RecordEvent($"Room created: {result.RoomId}");
-                RememberRoom(result.RoomId!, password, wasHost: true);
+                RecordEvent($"Room created: {RoomName} ({result.RoomId})");
+                RememberRoom(result.RoomId!, request.Password ?? string.Empty, wasHost: true);
             }
             else
             {
@@ -381,9 +614,12 @@ public sealed class RoomSessionService : IDisposable
                 roomId, password, ServiceCollector.Config.ClientId, ServiceCollector.Config.DisplayName).ConfigureAwait(false);
             if (result.Success)
             {
+                RoomName = result.RoomName ?? $"Room {roomId}";
+                RoomIsPublic = result.IsPublic;
+                RoomHasPassword = result.HasPassword;
                 RoomId = roomId;
                 IsHost = false;
-                RecordEvent($"Joined room {roomId}");
+                RecordEvent($"Joined {RoomName} ({roomId})");
                 RememberRoom(roomId, password, wasHost: false);
             }
             else
@@ -502,12 +738,16 @@ public sealed class RoomSessionService : IDisposable
     private void ResetRoomState()
     {
         RoomId = null;
+        RoomName = null;
+        RoomIsPublic = false;
+        RoomHasPassword = false;
         IsHost = false;
         CanStream = false;
         lastRoomPassword = null;
         ScreenPlacement = null;
         hasStreamerBaseline = false;
         hasWatcherBaseline = false;
+        lastDirectoryRefreshUtc = default;
         lock (membersLock)
             members.Clear();
         lock (activeStreamersLock)

@@ -19,7 +19,6 @@ public sealed class StreamViewWindow : Window
     private readonly Func<WorldScreenController> worldScreen;
     private readonly Action onClosed;
 
-    private bool projectInWorld = ServiceCollector.Config.ProjectInWorld;
     private bool spatialAudio = ServiceCollector.Config.SpatialAudio;
     private bool standardDepth = ServiceCollector.Config.WorldScreenStandardDepth;
     private bool drawUnderUi = ServiceCollector.Config.WorldScreenDrawUnderUi;
@@ -234,59 +233,30 @@ public sealed class StreamViewWindow : Window
             return;
 
         Configuration config = ServiceCollector.Config;
-
-        if (ImGui.Checkbox("Project in world", ref projectInWorld))
-        {
-            config.ProjectInWorld = projectInWorld;
-            ServiceCollector.PI.SavePluginConfig(config);
-        }
-
-        ScreenPlacementInfo? placement = roomSession.ScreenPlacement ?? config.LocalScreenPlacement;
-
+        ScreenPlacementInfo? placement = roomSession.ScreenPlacement;
         bool canPlace = WorldScreenController.CanPlace(roomSession);
 
-        ImGui.BeginDisabled(!canPlace);
-        if (ImGui.Button(placement is null ? "Place here" : "Move here"))
-            ApplyPlacement(WorldScreenController.PlaceInFrontOfPlayer(placement));
-
-        if (placement is not null)
-        {
-            ImGui.SameLine();
-
-            if (ImGui.Button("Reset shape"))
-            {
-                ScreenPlacementInfo reset = placement with
-                {
-                    WidthMeters = 6f,
-                    Pitch = 0f,
-                    Version = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                };
-
-                SeedSliders(reset);
-                ApplyPlacement(reset);
-            }
-
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Back to a 6m wide, untilted screen, without moving it.");
-
-            ImGui.SameLine();
-            if (ImGui.Button("Clear"))
-                ApplyPlacement(null);
-        }
-
-        ImGui.EndDisabled();
-
-        if (!canPlace)
-            ImGui.TextColored(WarnColor, "Only the host, or someone they've allowed to stream, can move the screen.");
+        if (canPlace)
+            DrawPlacementButtons(placement);
 
         if (placement is null)
-            ImGui.TextUnformatted("No screen placed yet.");
+        {
+            ImGui.TextDisabled(canPlace
+                ? "No screen placed yet. Everyone watching sees it as soon as you place one."
+                : "No screen placed yet. It appears here by itself once the host places one.");
+        }
         else if (placement.TerritoryType != ServiceCollector.ClientState.TerritoryType)
+        {
             ImGui.TextColored(WarnColor, "The screen is placed in another zone, so it isn't being drawn here.");
-        else
+        }
+        else if (canPlace)
         {
             DrawGizmoControls(canPlace);
             DrawPlacementSliders(placement, canPlace);
+        }
+        else
+        {
+            ImGui.TextDisabled("Showing the room's screen in the world. The host and streamers decide where it goes.");
         }
 
         ImGui.Separator();
@@ -353,6 +323,36 @@ public sealed class StreamViewWindow : Window
 #endif
     }
 
+    private void DrawPlacementButtons(ScreenPlacementInfo? placement)
+    {
+        if (ImGui.Button(placement is null ? "Place here" : "Move here"))
+            ApplyPlacement(WorldScreenController.PlaceInFrontOfPlayer(placement));
+
+        if (placement is null)
+            return;
+
+        ImGui.SameLine();
+        if (ImGui.Button("Reset shape"))
+        {
+            ScreenPlacementInfo reset = placement with
+            {
+                WidthMeters = 6f,
+                Pitch = 0f,
+                Version = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            };
+
+            SeedSliders(reset);
+            ApplyPlacement(reset);
+        }
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Back to a 6m wide, untilted screen, without moving it.");
+
+        ImGui.SameLine();
+        if (ImGui.Button("Clear"))
+            ApplyPlacement(null);
+    }
+
 #if DEBUG
     private void DrawDepthDiagnostics(Configuration config)
     {
@@ -415,7 +415,7 @@ public sealed class StreamViewWindow : Window
 
     private void DrawDepthNumbers(in SceneView view)
     {
-        ScreenPlacementInfo? placement = roomSession.ScreenPlacement ?? ServiceCollector.Config.LocalScreenPlacement;
+        ScreenPlacementInfo? placement = roomSession.ScreenPlacement;
         if (placement is null || getPreviewTexture() is not { } texture)
             return;
 

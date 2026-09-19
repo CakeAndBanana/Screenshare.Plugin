@@ -19,5 +19,7 @@ internal class ServiceCollector
 
     [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
 
+    [PluginService] internal static INotificationManager Notifications { get; private set; } = null!;
+
     internal static Configuration Config { get; set; } = null!;
 }
