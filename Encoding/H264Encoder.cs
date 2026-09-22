@@ -6,6 +6,7 @@ using ScreenShare.Plugin.Encoding.Interfaces;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 using SharpDX.Direct3D11;
+using SharpDX.DXGI;
 using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Encoding;
@@ -13,10 +14,9 @@ namespace ScreenShare.Plugin.Encoding;
 public sealed class H264Encoder : IVideoEncoder
 {
     private readonly GameAdapterDevice gameAdapterDevice;
-    private readonly GpuDownscaler downscaler;
+    private readonly ICaptureSource source;
+    private readonly Nv12Converter converter;
     private readonly ShaderResourceView sourceSrv;
-    private readonly Texture2D downscaledTexture;
-    private readonly RenderTargetView downscaledRtv;
     private readonly AsyncTextureReadback readback;
     private readonly FfmpegProcessRunner encoderProcess;
     private readonly Thread writerThread;
@@ -75,6 +75,7 @@ public sealed class H264Encoder : IVideoEncoder
         VideoCodec codec = VideoCodec.H264)
     {
         this.gameAdapterDevice = gameAdapterDevice;
+        this.source = source;
         this.sessionClock = sessionClock;
         frameIntervalMs = 1000 / fps;
         maxPendingTimestamps = Math.Max(8, fps * 2);
@@ -85,19 +86,19 @@ public sealed class H264Encoder : IVideoEncoder
         Device device = gameAdapterDevice.Device;
         Vendor = GpuVendorDetector.Detect(device);
 
-        downscaler = new GpuDownscaler(device);
+        // Downscale and convert to NV12 on the GPU, so the readback and the pipe carry 1.5 bytes
+        // per pixel instead of 4 and ffmpeg never does an RGB->YUV conversion on the CPU.
+        converter = new Nv12Converter(device, Width, Height);
         sourceSrv = new ShaderResourceView(device, source.CaptureTexture);
-        downscaledTexture = SharedTextureFactory.CreateRenderTarget(device, Width, Height);
-        downscaledRtv = new RenderTargetView(device, downscaledTexture);
-        readback = new AsyncTextureReadback(device, Width, Height);
+        readback = new AsyncTextureReadback(device, Width, Height, Format.NV12);
 
         string encoderArgs = VideoEncoderSelector.BuildEncoderArgs(
             Vendor, codec, bitrateKbps, bitrateKbps * 4 / 3, bitrateKbps * 2, fps * 2);
         string rawFormat = VideoEncoderSelector.RawFormatName(codec);
 
         string encodeArgs =
-            $"-hide_banner -loglevel error -f rawvideo -pix_fmt bgra -s {Width}x{Height} -r {fps} -i - " +
-            $"-an {encoderArgs} -pix_fmt yuv420p -f {rawFormat} -";
+            $"-hide_banner -loglevel error -f rawvideo -pix_fmt nv12 -s {Width}x{Height} -r {fps} -i - " +
+            $"-an {encoderArgs} {VideoEncoderSelector.BuildOutputPixelFormatArgs(Vendor)} -f {rawFormat} -";
 
         encoderProcess = new FfmpegProcessRunner(ffmpegExePath, encodeArgs);
 
@@ -119,7 +120,7 @@ public sealed class H264Encoder : IVideoEncoder
 
     private void WriteLoop()
     {
-        byte[] frame = new byte[Width * Height * 4];
+        byte[] frame = new byte[readback.FrameSize];
         var clock = Stopwatch.StartNew();
         long frameIndex = 0;
 
@@ -132,10 +133,10 @@ public sealed class H264Encoder : IVideoEncoder
                 long capturedAtMs;
                 lock (gameAdapterDevice.ImmediateContextLock)
                 {
-                    downscaler.Blit(gameAdapterDevice.Device.ImmediateContext, sourceSrv, downscaledRtv, Width, Height);
+                    converter.Convert(gameAdapterDevice.Device.ImmediateContext, sourceSrv, source.Width, source.Height);
 
                     gotFrame = readback.TryReadPrevious(
-                        downscaledTexture, sessionClock.ElapsedMilliseconds, frame, out capturedAtMs);
+                        converter.Target, sessionClock.ElapsedMilliseconds, frame, out capturedAtMs);
                 }
 
                 if (gotFrame)
@@ -248,9 +249,7 @@ public sealed class H264Encoder : IVideoEncoder
         }
 
         readback.Dispose();
-        downscaledRtv.Dispose();
-        downscaledTexture.Dispose();
         sourceSrv.Dispose();
-        downscaler.Dispose();
+        converter.Dispose();
     }
 }

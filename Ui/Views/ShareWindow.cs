@@ -70,7 +70,9 @@ public sealed class ShareWindow : Window, IDisposable
             {
                 if (audioCapture is not null)
                     mediaSession.UpdateAudioSource(audioCapture, bps);
-            });
+            },
+            canApplyLiveVideoBitrate: () => mediaSession.HostSupportsLiveVideoBitrate,
+            applyLiveVideoBitrate: kbps => mediaSession.UpdateVideoBitrate(kbps));
 
         identity = new IdentityChip(roomSession, () => mediaSession.IsHosting);
         lobby = new LobbyView(roomSession, identity, Disconnect);

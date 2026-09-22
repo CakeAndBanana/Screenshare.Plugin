@@ -56,6 +56,49 @@ public class VideoEncoderSelectorTests
     }
 
     [Theory]
+    [InlineData(GpuVendor.Nvidia, VideoCodec.H264, "h264_nvenc")]
+    [InlineData(GpuVendor.Amd, VideoCodec.Hevc, "hevc_amf")]
+    [InlineData(GpuVendor.Intel, VideoCodec.H264, "h264_qsv")]
+    [InlineData(GpuVendor.Unknown, VideoCodec.Hevc, "libx265")]
+    [InlineData((GpuVendor)999, VideoCodec.H264, "libx264")]
+    public void EncoderName_MatchesTheEncoderTheCommandLineSelects(GpuVendor vendor, VideoCodec codec, string expected)
+    {
+        Assert.Equal(expected, VideoEncoderSelector.EncoderName(vendor, codec));
+        Assert.Contains($"-c:v {expected} ", VideoEncoderSelector.BuildEncoderArgs(vendor, codec, 1500, 2000, 3000, 60));
+    }
+
+    [Fact]
+    public void EncoderOptions_NvencUsesTheVerifiedLowLatencyCbrSettings()
+    {
+        Assert.Equal(
+            [("preset", "p1"), ("tune", "ll"), ("rc", "cbr")],
+            VideoEncoderSelector.EncoderOptions(GpuVendor.Nvidia));
+    }
+
+    [Theory]
+    [InlineData("h264_nvenc", true)]
+    [InlineData("hevc_nvenc", true)]
+    [InlineData("libx264", true)]
+    [InlineData("h264_amf", false)]
+    [InlineData("hevc_qsv", false)]
+    [InlineData("libx265", false)]
+    public void SupportsLiveBitrate_OnlyForEncodersVerifiedToRetune(string encoderName, bool expected)
+    {
+        Assert.Equal(expected, VideoEncoderSelector.SupportsLiveBitrate(encoderName));
+    }
+
+    [Theory]
+    [InlineData(GpuVendor.Nvidia, "")]
+    [InlineData(GpuVendor.Amd, "")]
+    [InlineData(GpuVendor.Intel, "")]
+    [InlineData(GpuVendor.Unknown, "-pix_fmt yuv420p")]
+    [InlineData((GpuVendor)999, "-pix_fmt yuv420p")]
+    public void BuildOutputPixelFormatArgs_PassesNv12ThroughOnlyForHardwareEncoders(GpuVendor vendor, string expected)
+    {
+        Assert.Equal(expected, VideoEncoderSelector.BuildOutputPixelFormatArgs(vendor));
+    }
+
+    [Theory]
     [InlineData(VideoCodec.H264, "h264")]
     [InlineData(VideoCodec.Hevc, "hevc")]
     public void RawFormatName_ReturnsFfmpegFormatNameForCodec(VideoCodec codec, string expected)

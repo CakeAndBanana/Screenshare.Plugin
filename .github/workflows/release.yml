@@ -30,7 +30,7 @@ on:
         type: boolean
         default: false
       ffmpeg_url:
-        description: "ffmpeg win64-gpl build to bundle. Leave empty for the pinned, tested n7.1 build."
+        description: "ffmpeg win64-gpl-shared build to bundle (must be n7.1). Leave empty for the pinned, tested build."
         required: false
         default: ""
 
@@ -38,13 +38,15 @@ env:
   # The public repository that serves repo.json and hosts the release zips.
   RELEASE_REPO: CakeAndBanana/Screenshare
 
-  # BtbN's ffmpeg-n7.1 GPL static build - the exact source revision this plugin was developed and
+  # BtbN's ffmpeg-n7.1 GPL *shared* build - the exact source revision this plugin was developed and
   # tested against (see README, "Building from source"). Pinned rather than tracking "latest"
   # because the hardware encoder paths (NVENC/AMF/QSV) are sensitive to the ffmpeg version, and
-  # BtbN's `latest` tag has already moved on to n8.1/n9.0. BtbN does eventually prune old autobuild
-  # releases; if this starts 404ing, pick a current n7.1 asset from
-  # https://github.com/BtbN/FFmpeg-Builds/releases and pass it as the ffmpeg_url input.
-  DEFAULT_FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n7.1.5-12-g1fdbca85aa-win64-gpl-7.1.zip
+  # because the plugin loads these DLLs in-process through FFmpeg.AutoGen 7.1.1, which only binds to
+  # the 7.1 line (avcodec-61). BtbN's `latest` tag has already moved on to n8.1/n9.0. BtbN does
+  # eventually prune old autobuild releases; if this starts 404ing, pick a current n7.1
+  # `-win64-gpl-shared-7.1` asset from https://github.com/BtbN/FFmpeg-Builds/releases and pass it
+  # as the ffmpeg_url input.
+  DEFAULT_FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n7.1.5-12-g1fdbca85aa-win64-gpl-shared-7.1.zip
 
 jobs:
   release:
@@ -66,10 +68,11 @@ jobs:
         with:
           branch: release
 
-      # ffmpeg.exe is not committed (~132MB, over GitHub's 100MB push limit) but a release build
-      # has to bundle it - it is what NVENC/AMF/QSV encoding and viewer-side decoding actually run
-      # through. Extracted under RUNNER_TEMP so the extra ~500MB of the archive never sits inside
-      # the working tree that DalamudPackager later walks.
+      # ffmpeg is not committed (~156MB) but a release build has to bundle it: the DLLs are what
+      # the in-process NVENC/AMF/QSV/x264 fallback encoder loads, and ffmpeg.exe (which runs
+      # against the same DLLs) handles viewer-side decoding. Extracted under RUNNER_TEMP so the
+      # rest of the archive (headers, import libs, ffplay/ffprobe) never sits inside the working
+      # tree that DalamudPackager later walks.
       - name: Fetch ffmpeg
         shell: pwsh
         env:
@@ -88,8 +91,16 @@ jobs:
           $exe = Get-ChildItem -LiteralPath $dist -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
           if (-not $exe) { throw "No ffmpeg.exe inside $url" }
 
+          # A static build has no DLLs, and another major version ships differently named ones the
+          # bindings won't load - either way the plugin would quietly fall back to ffmpeg.exe for encoding.
+          $bin = $exe.Directory.FullName
+          if (-not (Test-Path -LiteralPath (Join-Path $bin 'avcodec-61.dll'))) {
+            throw "No avcodec-61.dll next to ffmpeg.exe in $url - it must be an n7.1 -win64-gpl-shared build."
+          }
+
           New-Item -ItemType Directory -Force -Path 'ffmpeg' | Out-Null
           Copy-Item -LiteralPath $exe.FullName -Destination 'ffmpeg/ffmpeg.exe' -Force
+          Get-ChildItem -LiteralPath $bin -Filter '*.dll' | Copy-Item -Destination 'ffmpeg' -Force
 
           # Parenthesised so ffmpeg runs to completion before Select-Object trims the output -
           # piping into "-First 1" directly would stop the pipeline early and kill the process.
@@ -178,7 +189,7 @@ jobs:
             $env:CHANGELOG
             ''
             "Built from $env:GITHUB_REPOSITORY@$env:GITHUB_SHA."
-            'Bundles ffmpeg (BtbN win64-gpl static build) for hardware encoding and viewer-side decoding.'
+            'Bundles ffmpeg (BtbN win64-gpl shared build) for fallback encoding and viewer-side decoding.'
             ''
             'Installing: you do not need this zip by hand. Add the plugin repository to Dalamud instead -'
             '/xlsettings -> Experimental -> Custom Plugin Repositories ->'

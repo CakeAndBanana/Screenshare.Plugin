@@ -38,6 +38,7 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
     private long framesEncoded;
     private long framesSkipped;
     private long encodedBytes;
+    private int pendingBitrateKbps;
 
     public int Width => converter.Width;
 
@@ -253,14 +254,26 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
     }
 
+    // Only records the request; the pump thread applies it before its next frame. ICodecAPI can't
+    // be called from just any thread: its RCW belongs to the MTA it was created in, and the MFT
+    // isn't marshallable, so a call from the game's UI thread (STA) - the settings slider - fails
+    // with E_NOINTERFACE. The pump thread is MTA.
     public void SetBitrate(int bitrateKbps)
     {
-        if (codecApi is null)
+        if (codecApi is not null)
+            Interlocked.Exchange(ref pendingBitrateKbps, bitrateKbps);
+    }
+
+    private void ApplyPendingBitrate()
+    {
+        int bitrateKbps = Interlocked.Exchange(ref pendingBitrateKbps, 0);
+        if (bitrateKbps <= 0 || codecApi is null)
             return;
 
         try
         {
-            TrySetCodecProperty(codecApi, AvEncCommonMeanBitRate, (uint)(bitrateKbps * 1000));
+            if (!TrySetCodecProperty(codecApi, AvEncCommonMeanBitRate, (uint)(bitrateKbps * 1000)))
+                ServiceCollector.PluginLog.Warning($"ScreenShare: {EncoderName} refused a bitrate change to {bitrateKbps}kbps.");
         }
         catch (Exception ex)
         {
@@ -332,6 +345,8 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
 
         nextFrameIndex++;
+
+        ApplyPendingBitrate();
 
         long ptsMs = sessionClock.ElapsedMilliseconds;
         Interlocked.Exchange(ref lastFedPtsMs, ptsMs);

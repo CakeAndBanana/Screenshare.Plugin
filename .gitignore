@@ -4,5 +4,6 @@ obj/
 *.user
 
 # Bundled at build time, not committed - see README ("Building from source"). GitHub rejects
-# files over 100MB via plain git anyway; this binary is ~132MB.
+# files over 100MB via plain git anyway; the shared build is ~156MB in total.
 ffmpeg/ffmpeg.exe
+ffmpeg/*.dll

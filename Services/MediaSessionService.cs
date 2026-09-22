@@ -289,6 +289,33 @@ public sealed class MediaSessionService : IDisposable
         }
     }
 
+    public bool HostSupportsLiveVideoBitrate => videoEncoder is { SupportsLiveBitrate: true };
+
+    // The settings slider, mid-stream. Only retunes an encoder that can do it in place; one that
+    // would need a rebuild keeps the new value for the next stream instead. Returns whether it
+    // was applied now.
+    public bool UpdateVideoBitrate(int bitrateKbps)
+    {
+        if (hostEncodeSettings is not { } settings || videoEncoder is not { SupportsLiveBitrate: true } encoder)
+            return false;
+
+        // If adaptation has already pulled the rate down, the upload still can't carry more, so
+        // the new setting only caps it; otherwise the stream moves straight to the new setting.
+        // Adaptation then works against the new ceiling from here.
+        bool reduced = currentBitrateKbps < settings.ConfiguredBitrateKbps;
+        int targetKbps = reduced ? Math.Min(currentBitrateKbps, bitrateKbps) : bitrateKbps;
+
+        hostEncodeSettings = settings with { ConfiguredBitrateKbps = bitrateKbps };
+        cleanAdaptWindows = 0;
+
+        encoder.SetBitrate(targetKbps);
+        currentBitrateKbps = targetKbps;
+
+        ServiceCollector.PluginLog.Information(
+            $"ScreenShare video bitrate setting changed to {bitrateKbps}kbps mid-stream; now encoding at {targetKbps}kbps.");
+        return true;
+    }
+
     private async Task RestartEncoderAsync(HostEncodeSettings settings, int bitrateKbps, CancellationToken cancellationToken)
     {
         if (hostSessionClock is not { } sessionClock)
@@ -298,10 +325,10 @@ public sealed class MediaSessionService : IDisposable
 
         try
         {
-            // Deliberately the ffmpeg encoder rather than the factory: this path only runs when the
-            // encoder in use cannot retune, which means Media Foundation was already unavailable or
-            // declined. Going back through the factory would retry it on every adaptation step.
-            var encoder = new H264Encoder(
+            // Deliberately skips Media Foundation: this path only runs when the encoder in use
+            // cannot retune, which means Media Foundation was already unavailable or declined.
+            // Going back through it would retry it on every adaptation step.
+            IVideoEncoder encoder = VideoEncoderFactory.CreateWithoutMediaFoundation(
                 settings.Device, settings.Capture, settings.FfmpegExePath, sessionClock,
                 settings.TargetHeight, bitrateKbps, settings.Fps, settings.Codec);
             WireVideoChunks(encoder);

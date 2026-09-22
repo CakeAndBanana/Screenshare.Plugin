@@ -44,6 +44,7 @@
 
   <ItemGroup>
     <PackageReference Include="Concentus" Version="2.2.2" />
+    <PackageReference Include="FFmpeg.AutoGen" Version="7.1.1" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.7" />
     <PackageReference Include="NAudio" Version="2.3.0" />
     <PackageReference Include="SharpDX" Version="4.2.0" />
@@ -59,16 +60,22 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Bundled directly rather than via NuGet: the only current NuGet-distributed static
-         builds we found were either too old (NVENC SDK version rejected by modern drivers,
-         confirmed by testing) or compiled without any hardware encoders at all. This is
-         BtbN's official ffmpeg-n7.1 Windows GPL static build (ffmpeg.org-recommended source),
-         confirmed working with NVENC/AMF/QSV via direct testing.
+    <!-- Bundled directly rather than via NuGet: the only current NuGet-distributed builds we
+         found were either too old (NVENC SDK version rejected by modern drivers, confirmed by
+         testing) or compiled without any hardware encoders at all. This is BtbN's official
+         ffmpeg-n7.1 Windows GPL *shared* build (ffmpeg.org-recommended source), confirmed
+         working with NVENC/AMF/QSV via direct testing. The DLLs are what LibavVideoEncoder loads
+         in-process, so they must stay on the 7.1 / avcodec-61 line that FFmpeg.AutoGen 7.1.1
+         binds to. ffmpeg.exe runs against the same DLLs and is kept for decoding and as the
+         last-resort encoder.
 
-         Gitignored (132MB, over GitHub's 100MB push limit - see README for where to get it), so
-         Condition="Exists(...)" keeps a fresh clone without it (e.g. CI) buildable - CI only
-         needs to compile and run the unit tests, never actually launch ffmpeg. -->
+         Gitignored (~156MB in total - see README for where to get it). The Exists condition and
+         a wildcard that matches nothing keep a fresh clone without it (e.g. CI) buildable - CI
+         only needs to compile and run the unit tests, never actually load ffmpeg. -->
     <None Include="ffmpeg\ffmpeg.exe" Condition="Exists('ffmpeg\ffmpeg.exe')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="ffmpeg\*.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

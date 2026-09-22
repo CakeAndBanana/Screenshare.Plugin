@@ -28,11 +28,15 @@ if (command is "help" or "-h" or "--help")
                                            how much work the viewer path needs. Default adapter 0.
           soak [frames] [WxH] [slots]      Decode for a long time; watch slots, handles, memory.
                                            Default 54000 frames (30 min of video), 1280x720, 17 slots.
+          encode [frames] [WxH]            Which in-process libavcodec encoders (the fallback when
+                                           Media Foundation has none) work here, how fast, and
+                                           whether live bitrate changes take. Default 300, 1280x720.
 
         Examples:
           dotnet run --project ScreenShare.Plugin/tools/MediaProbe -- mft
           dotnet run --project ScreenShare.Plugin/tools/MediaProbe -- soak
           dotnet run --project ScreenShare.Plugin/tools/MediaProbe -- soak 200000 1920x1080
+          dotnet run --project ScreenShare.Plugin/tools/MediaProbe -- encode 600 1920x1080
           wine MediaProbe.exe sharedtex
 
         Exits non-zero when a soak finds something, so it can gate a release.
@@ -51,6 +55,16 @@ if (command == "sharedtex")
 {
     int adapterIndex = args.Length > 1 && int.TryParse(args[1], out int parsedAdapter) ? parsedAdapter : 0;
     return SharedTexture.Run(adapterIndex);
+}
+
+// Needs neither Media Foundation nor a D3D device - just the shared ffmpeg libraries.
+if (command == "encode")
+{
+    int encodeFrames = args.Length > 1 && int.TryParse(args[1], out int parsedEncodeFrames) ? parsedEncodeFrames : 300;
+    (int encodeWidth, int encodeHeight) = args.Length > 2 ? ParseSize(args[2]) : (1280, 720);
+    string encodeWorkDirectory = Path.Combine(Path.GetTempPath(), "ScreenShareMediaProbe");
+    Directory.CreateDirectory(encodeWorkDirectory);
+    return Encode.Run(FindFfmpeg(), encodeWorkDirectory, encodeWidth, encodeHeight, encodeFrames);
 }
 
 MediaFoundationInterop.EnsureStarted();

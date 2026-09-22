@@ -23,6 +23,8 @@ public sealed class SettingsWindow : Window, IDisposable
     private readonly Func<bool> isStreaming;
     private readonly Func<bool> isAudioCapturing;
     private readonly Action<int> applyLiveAudioBitrate;
+    private readonly Func<bool> canApplyLiveVideoBitrate;
+    private readonly Func<int, bool> applyLiveVideoBitrate;
 
     // Monitor enumeration needs a live D3D11 device on the same adapter DesktopDuplicationCapture
     // will actually use, so indices line up - but this is a SEPARATE device instance from
@@ -98,12 +100,19 @@ public sealed class SettingsWindow : Window, IDisposable
         ? "(no window selected)"
         : windowCandidates.Find(c => c.Handle == selectedWindowHandle).Label ?? "(window no longer open)";
 
-    public SettingsWindow(Func<bool> isStreaming, Func<bool> isAudioCapturing, Action<int> applyLiveAudioBitrate)
+    public SettingsWindow(
+        Func<bool> isStreaming,
+        Func<bool> isAudioCapturing,
+        Action<int> applyLiveAudioBitrate,
+        Func<bool> canApplyLiveVideoBitrate,
+        Func<int, bool> applyLiveVideoBitrate)
         : base("Screen Share Settings###ScreenShareSettingsWindow")
     {
         this.isStreaming = isStreaming;
         this.isAudioCapturing = isAudioCapturing;
         this.applyLiveAudioBitrate = applyLiveAudioBitrate;
+        this.canApplyLiveVideoBitrate = canApplyLiveVideoBitrate;
+        this.applyLiveVideoBitrate = applyLiveVideoBitrate;
         Size = new Vector2(460, 420);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
@@ -150,7 +159,9 @@ public sealed class SettingsWindow : Window, IDisposable
         if (isStreaming())
         {
             ImGui.Spacing();
-            ImGui.TextDisabled("(resolution/bitrate/fps/codec changes apply next time you start streaming)");
+            ImGui.TextDisabled(canApplyLiveVideoBitrate()
+                ? "(resolution/fps/codec changes apply next time you start streaming)"
+                : "(resolution/bitrate/fps/codec changes apply next time you start streaming)");
         }
     }
 
@@ -182,6 +193,11 @@ public sealed class SettingsWindow : Window, IDisposable
         if (UiTheme.ValueSlider("##videoBitrate", "Video bitrate (kbps)", ref videoBitrateKbps,
                 MinVideoBitrateKbps, MaxVideoBitrateKbps, labelWidth).Committed)
         {
+            // On release rather than every drag step, unlike audio: each video retune is a real
+            // rate-control change in the encoder, not just a number the next packet picks up.
+            if (isStreaming())
+                applyLiveVideoBitrate(videoBitrateKbps);
+
             SaveStreamingSettings();
         }
 

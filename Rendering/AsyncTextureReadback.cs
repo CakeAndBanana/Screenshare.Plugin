@@ -11,6 +11,7 @@ public sealed class AsyncTextureReadback : IDisposable
     private const int BufferDepth = 2;
 
     private readonly Device device;
+    private readonly Format format;
     private readonly Texture2D[] stagingTextures;
     private readonly long[] stagingTimestamps;
     private int writeIndex;
@@ -20,18 +21,26 @@ public sealed class AsyncTextureReadback : IDisposable
 
     public int Height { get; }
 
-    public AsyncTextureReadback(Device device, int width, int height)
+    // Tightly packed size of one frame in the destination buffer: 4 bytes per pixel for BGRA,
+    // or a full-size Y plane followed by a half-height interleaved UV plane for NV12.
+    public int FrameSize => format == Format.NV12 ? Width * Height * 3 / 2 : Width * Height * 4;
+
+    public AsyncTextureReadback(Device device, int width, int height, Format format = Format.B8G8R8A8_UNorm)
     {
+        if (format != Format.B8G8R8A8_UNorm && format != Format.NV12)
+            throw new ArgumentOutOfRangeException(nameof(format), format, "Only BGRA and NV12 readback are supported.");
+
         this.device = device;
+        this.format = format;
         Width = width;
         Height = height;
         stagingTextures = new Texture2D[BufferDepth];
         stagingTimestamps = new long[BufferDepth];
         for (int i = 0; i < BufferDepth; i++)
-            stagingTextures[i] = CreateStaging(device, width, height);
+            stagingTextures[i] = CreateStaging(device, width, height, format);
     }
 
-    private static Texture2D CreateStaging(Device device, int width, int height)
+    private static Texture2D CreateStaging(Device device, int width, int height, Format format)
     {
         var desc = new Texture2DDescription
         {
@@ -39,7 +48,7 @@ public sealed class AsyncTextureReadback : IDisposable
             Height = height,
             MipLevels = 1,
             ArraySize = 1,
-            Format = Format.B8G8R8A8_UNorm,
+            Format = format,
             SampleDescription = new SampleDescription(1, 0),
             Usage = ResourceUsage.Staging,
             BindFlags = BindFlags.None,
@@ -84,15 +93,16 @@ public sealed class AsyncTextureReadback : IDisposable
 
         try
         {
-            int rowBytes = Width * 4;
-            if (box.RowPitch == rowBytes)
+            if (format == Format.NV12)
             {
-                Marshal.Copy(box.DataPointer, destination, 0, rowBytes * Height);
+                // A mapped NV12 surface is one allocation: the UV plane starts straight after
+                // Height rows of the Y plane and shares its row pitch.
+                CopyPlane(box.DataPointer, box.RowPitch, destination, 0, Width, Height);
+                CopyPlane(box.DataPointer + box.RowPitch * Height, box.RowPitch, destination, Width * Height, Width, Height / 2);
             }
             else
             {
-                for (int y = 0; y < Height; y++)
-                    Marshal.Copy(box.DataPointer + y * box.RowPitch, destination, y * rowBytes, rowBytes);
+                CopyPlane(box.DataPointer, box.RowPitch, destination, 0, Width * 4, Height);
             }
 
             return true;
@@ -101,6 +111,18 @@ public sealed class AsyncTextureReadback : IDisposable
         {
             device.ImmediateContext.UnmapSubresource(staging, 0);
         }
+    }
+
+    private static void CopyPlane(IntPtr source, int rowPitch, byte[] destination, int destinationOffset, int rowBytes, int rows)
+    {
+        if (rowPitch == rowBytes)
+        {
+            Marshal.Copy(source, destination, destinationOffset, rowBytes * rows);
+            return;
+        }
+
+        for (int y = 0; y < rows; y++)
+            Marshal.Copy(source + y * rowPitch, destination, destinationOffset + y * rowBytes, rowBytes);
     }
 
     public void Dispose()
