@@ -1,7 +1,7 @@
 ﻿using System.Runtime.InteropServices;
 using ScreenShare.Plugin.Services;
 
-namespace ScreenShare.Plugin.Ui;
+namespace ScreenShare.Plugin.Ui.Helpers;
 
 internal static class MonitorNameHelper
 {

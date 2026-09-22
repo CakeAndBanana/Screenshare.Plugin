@@ -23,6 +23,9 @@ if (command is "help" or "-h" or "--help")
 
           mft                              What encoder and decoder MFTs this machine has.
           duplication                      Which monitors Desktop Duplication will actually capture.
+          sharedtex [adapter]              Whether a D3D11 texture shared from one device opens on
+                                           another. Only interesting under Wine, where it decides
+                                           how much work the viewer path needs. Default adapter 0.
           soak [frames] [WxH] [slots]      Decode for a long time; watch slots, handles, memory.
                                            Default 54000 frames (30 min of video), 1280x720, 17 slots.
 
@@ -30,10 +33,24 @@ if (command is "help" or "-h" or "--help")
           dotnet run --project ScreenShare.Plugin/tools/MediaProbe -- mft
           dotnet run --project ScreenShare.Plugin/tools/MediaProbe -- soak
           dotnet run --project ScreenShare.Plugin/tools/MediaProbe -- soak 200000 1920x1080
+          wine MediaProbe.exe sharedtex
 
         Exits non-zero when a soak finds something, so it can gate a release.
         """);
     return 0;
+}
+
+// Deliberately NOT started before the dispatch below. Media Foundation is one of the things that
+// does not exist under Wine, so starting it up front would take the commands that have nothing to
+// do with it - duplication, sharedtex - down with it on exactly the platform they were added to
+// investigate. Each command that needs it starts it itself.
+if (command == "duplication")
+    return Duplication.Run();
+
+if (command == "sharedtex")
+{
+    int adapterIndex = args.Length > 1 && int.TryParse(args[1], out int parsedAdapter) ? parsedAdapter : 0;
+    return SharedTexture.Run(adapterIndex);
 }
 
 MediaFoundationInterop.EnsureStarted();
@@ -43,9 +60,6 @@ if (command == "mft")
     ReportMfts();
     return 0;
 }
-
-if (command == "duplication")
-    return Duplication.Run();
 
 if (command != "soak")
 {

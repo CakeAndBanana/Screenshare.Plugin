@@ -42,6 +42,8 @@ public sealed class RoomSessionService : IDisposable
 
     public string? RelayUrl => client.RelayUrl;
 
+    public bool IsSwitchingRelay => client.IsSwitchingRelay;
+
     public string? RoomId { get; private set; }
 
     public string? RoomName { get; private set; }
@@ -71,6 +73,21 @@ public sealed class RoomSessionService : IDisposable
     public bool HasDirectory => directory is not null;
 
     public bool IsRefreshingDirectory => Volatile.Read(ref directoryRefreshInFlight) == 1;
+
+    /// <summary>How long until the room list refreshes itself again, for the lobby to count down
+    /// on its Refresh tab. Zero when a refresh is due, has never run, or cannot run because the
+    /// connection is down - all cases where there is no next time worth naming.</summary>
+    public TimeSpan TimeUntilDirectoryRefresh
+    {
+        get
+        {
+            if (lastDirectoryRefreshUtc == default || State != HubConnectionState.Connected)
+                return TimeSpan.Zero;
+
+            TimeSpan remaining = DirectoryRefreshInterval - (DateTime.UtcNow - lastDirectoryRefreshUtc);
+            return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+        }
+    }
 
     public event Action<ActiveStreamerInfo>? StreamerWentLive;
 
@@ -325,6 +342,7 @@ public sealed class RoomSessionService : IDisposable
             if (RoomId is { } kickedFrom)
                 MarkBanned([kickedFrom]);
             ResetRoomState();
+            ReturnToLobby();
         };
 
         client.MemberRenamed += (connectionId, displayName) =>
@@ -351,6 +369,7 @@ public sealed class RoomSessionService : IDisposable
         {
             RecordEvent("Room closed (host disconnected).");
             ResetRoomState();
+            ReturnToLobby();
         };
 
         client.ActiveStreamersChanged += streamers =>
@@ -407,6 +426,51 @@ public sealed class RoomSessionService : IDisposable
             if (RoomId is not null)
                 _ = RejoinAfterReconnectAsync();
         };
+
+        // Automatic reconnect gave up. If that was a room's relay rather than the main one, the
+        // main relay may well still be up - drop back to its lobby instead of the connect card.
+        client.Closed += () =>
+        {
+            bool wasInRoom = InRoom;
+            ResetRoomState();
+            ConnectionStatus = "Disconnected";
+            LastError = wasInRoom ? "Lost the connection to this room's relay." : "Lost the connection to the relay.";
+            ReturnToLobby();
+        };
+    }
+
+    /// <summary>Creating or joining a room can move this client from the main relay (the one the
+    /// user entered) onto the relay hosting that room. Once the room is over, move back, so the
+    /// next Create goes through the main relay's placement again rather than landing wherever
+    /// the last room happened to be. A no-op when already on the main relay.</summary>
+    private void ReturnToLobby()
+    {
+        string lobbyUrl = ServiceCollector.Config.RelayUrl;
+        if (client.RelayUrl is not { } currentUrl || string.Equals(currentUrl, lobbyUrl, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        IsConnecting = true;
+
+        // Off the SignalR callback that got us here: switching disposes the connection that
+        // callback is running on.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await client.SwitchRelayAsync(lobbyUrl).ConfigureAwait(false);
+                ConnectionStatus = "Connected";
+                RefreshDirectory(force: true);
+            }
+            catch (Exception ex)
+            {
+                ConnectionStatus = "Disconnected";
+                LastError = ex.Message;
+            }
+            finally
+            {
+                IsConnecting = false;
+            }
+        });
     }
 
     private async Task RejoinAfterReconnectAsync()
@@ -652,6 +716,8 @@ public sealed class RoomSessionService : IDisposable
         {
             LastError = ex.Message;
         }
+
+        ReturnToLobby();
     }
 
     public void KickViewer(string viewerConnectionId)

@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows7.0</TargetFramework>
+    <Platforms>x64</Platforms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+
+    <!-- In the solution so CI compile-checks it, same reasoning as MediaProbe. -->
+    <IsTestProject>false</IsTestProject>
+    <AssemblyName>WineProbe</AssemblyName>
+    <RootNamespace>WineProbe</RootNamespace>
+
+    <!-- Deliberately NO ProjectReference to the plugin. Every other tool here links the plugin and
+         so drags in SharpDX, Dalamud and (via MediaProbe's startup) Media Foundation - all of which
+         are the very things under question on Wine. This has to be able to run when every one of
+         them is broken, so it depends on nothing but the BCL.
+
+         Equally deliberately, SelfContained/RuntimeIdentifier/PublishSingleFile are NOT set here:
+         as project properties they apply to plain `dotnet build` too, which would pull the whole
+         win-x64 runtime pack into every solution build and CI run for a diagnostic nobody builds
+         on purpose. They belong on the publish command instead - a tester's prefix has Dalamud's
+         private runtime in it rather than an installed one, so the binary they run must carry its
+         own. Publish it with SelfContained=true, RuntimeIdentifier=win-x64 and
+         PublishSingleFile=true (see tools/WineProbe/README.md for the exact command), then copy
+         the single WineProbe.exe to the Linux box and run it with wine. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>

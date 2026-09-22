@@ -4,6 +4,7 @@ using Dalamud.Interface;
 using Dalamud.Interface.Components;
 using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Services;
+using ScreenShare.Plugin.Ui.Helpers;
 
 namespace ScreenShare.Plugin.Ui;
 
@@ -23,6 +24,10 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
 
     private string joinCode = string.Empty;
     private string joinPassword = string.Empty;
+
+    private string search = string.Empty;
+    private int publicPage;
+    private int recentPage;
 
     private string? passwordRoomId;
     private string passwordRoomName = string.Empty;
@@ -142,10 +147,13 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
     private void DrawCreateJoinButtons()
     {
         float spacing = ImGui.GetStyle().ItemSpacing.X;
-        float half = (ImGui.GetContentRegionAvail().X - spacing) / 2.32f;
-        var size = new Vector2(half, ImGui.GetFrameHeight() * 1.5f);
+        float half = (ImGui.GetContentRegionAvail().X - spacing) / 2f;
+        var size = new Vector2(half, ImGui.GetFrameHeight() * 2f);
 
-        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Plus, "Create room", UiTheme.PublicGreen with { W = 0.55f }, UiTheme.PublicGreen, UiTheme.PublicGreen with { W = 0.8f }, size))
+        // The lobby's two primary actions, in boxes half again as tall as a normal button, so the
+        // label is drawn a size up to suit them - see BigActionButton for why it is drawn by hand
+        // rather than with Dalamud's IconButtonWithText.
+        if (UiTheme.BigActionButton("createRoom", FontAwesomeIcon.Plus, "Create room", size, UiTheme.PublicGreen))
         {
             createName = string.Empty;
             createPassword = string.Empty;
@@ -153,7 +161,7 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         }
 
         ImGui.SameLine();
-        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Hashtag, "Join by code", size))
+        if (UiTheme.BigActionButton("joinByCode", FontAwesomeIcon.Hashtag, "Join by code", size))
         {
             joinCode = string.Empty;
             joinPassword = string.Empty;
@@ -166,11 +174,15 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         IReadOnlyList<RoomListing> publicRooms = roomSession.PublicRooms;
         IReadOnlyList<RecentRoom> recentRooms = roomSession.RecentRooms;
 
+        // Captured before the tab bar moves the cursor: the refresh control is placed by hand on
+        // this row, at this right edge. A Trailing tab item only packs against the last tab rather
+        // than the bar's right edge, which is not what "aligned right" looks like once the tabs
+        // are narrow.
+        float rowY = ImGui.GetCursorPosY();
+        float rightEdge = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
+
         if (!ImGui.BeginTabBar("##lobbyTabs"))
             return;
-
-        if (ImGui.TabItemButton(roomSession.IsRefreshingDirectory ? "...##refresh" : "Refresh##refresh", ImGuiTabItemFlags.Trailing))
-            roomSession.RefreshDirectory(force: true);
 
         if (ImGui.BeginTabItem($"Public rooms ({publicRooms.Count})###publicRooms"))
         {
@@ -185,6 +197,49 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         }
 
         ImGui.EndTabBar();
+
+        DrawRefreshButton(rowY, rightEdge);
+    }
+
+    /// <summary>The refresh control, drawn last but placed back up on the tab bar's own row, hard
+    /// against its right edge.</summary>
+    private void DrawRefreshButton(float rowY, float rightEdge)
+    {
+        bool refreshing = roomSession.IsRefreshingDirectory;
+        TimeSpan untilRefresh = roomSession.TimeUntilDirectoryRefresh;
+
+        // "###refresh" rather than "##refresh": the text changes every second, and with a double
+        // hash the whole label is the ID, so this would be a different widget each tick and lose a
+        // press held across one.
+        string label = refreshing ? "Refreshing...###refresh"
+            : untilRefresh > TimeSpan.Zero ? $"Refresh ({(int)Math.Ceiling(untilRefresh.TotalSeconds)}s)###refresh"
+            : "Refresh###refresh";
+
+        // One width for every state, measured from the widest, so the button neither resizes as
+        // the countdown ticks nor shifts away from the edge when it flips to "Refreshing...".
+        float width = MathF.Max(ImGui.CalcTextSize("Refreshing...").X, ImGui.CalcTextSize("Refresh (0s)").X)
+            + (ImGui.GetStyle().FramePadding.X * 2);
+
+        // The tab bar's rect is exactly one frame high and it draws its divider on that rect's last
+        // pixel row - so a default-height button, drawn after the bar, lands on the divider and
+        // breaks the line. One pixel shorter leaves the divider running unbroken beneath it. The 1
+        // is ImGui's own hardcoded separator thickness, not a style value that could be read back.
+        var size = new Vector2(width, ImGui.GetFrameHeight() - 1f);
+
+        Vector2 afterTabs = ImGui.GetCursorPos();
+        ImGui.SetCursorPos(new Vector2(rightEdge - width, rowY));
+
+        if (ImGui.Button(label, size))
+            roomSession.RefreshDirectory(force: true);
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(refreshing
+                ? "Fetching the room list."
+                : "The room list refreshes by itself on this countdown. Click to do it now.");
+        }
+
+        ImGui.SetCursorPos(afterTabs);
     }
 
     private void DrawPublicRooms(IReadOnlyList<RoomListing> rooms)
@@ -195,35 +250,81 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
             return;
         }
 
-        if (rooms.Count == 0)
+        if (rooms.Count == 0 && search.Length == 0)
         {
             ImGui.Spacing();
             ImGui.TextDisabled("No public rooms right now. Create one, or join a private room by its code.");
             return;
         }
 
-        foreach (RoomListing room in rooms)
+        DrawSearchBar();
+
+        List<RoomListing> matches = [.. rooms.Where(room => Matches(room.Name, room.RoomId, room.HostName))];
+        float railY = RailY(ErrorFooter);
+        int perPage = RowsPerPage(railY);
+        int pageCount = PageCount(matches.Count, perPage);
+        publicPage = Math.Clamp(publicPage, 0, pageCount - 1);
+
+        if (matches.Count == 0)
+        {
+            ImGui.Spacing();
+            ImGui.TextDisabled($"No public room matches \"{search.Trim()}\".");
+        }
+
+        foreach (RoomListing room in matches.Skip(publicPage * perPage).Take(perPage))
         {
             RecentRoom? remembered = roomSession.RecentRooms.FirstOrDefault(r => r.RoomId == room.RoomId);
             DrawRoomRow(room.RoomId, room.Name, room, remembered);
         }
+
+        DrawPager(ref publicPage, pageCount, matches.Count, rooms.Count, railY);
     }
 
     private void DrawRecentRooms(IReadOnlyList<RecentRoom> rooms)
     {
-        if (rooms.Count == 0)
+        if (rooms.Count == 0 && search.Length == 0)
         {
             ImGui.Spacing();
             ImGui.TextDisabled("Rooms you create or join on this relay show up here.");
+            ImGui.Spacing();
+            DrawRememberPasswords();
+            return;
         }
 
-        foreach (RecentRoom room in rooms)
+        DrawSearchBar();
+
+        List<RecentRoom> matches =
+        [
+            .. rooms.Where(room => Matches(room.Name ?? $"Room {room.RoomId}", room.RoomId, roomSession.FindListing(room.RoomId)?.HostName)),
+        ];
+
+        // The checkbox keeps the bottom strip of the tab to itself, and the pager rides just above it.
+        float checkbox = ImGui.GetFrameHeight() + ImGui.GetStyle().ItemSpacing.Y;
+        float railY = RailY(ErrorFooter + checkbox);
+        int perPage = RowsPerPage(railY);
+        int pageCount = PageCount(matches.Count, perPage);
+        recentPage = Math.Clamp(recentPage, 0, pageCount - 1);
+
+        if (matches.Count == 0)
+        {
+            ImGui.Spacing();
+            ImGui.TextDisabled($"No recent room matches \"{search.Trim()}\".");
+        }
+
+        foreach (RecentRoom room in matches.Skip(recentPage * perPage).Take(perPage))
         {
             RoomListing? live = roomSession.FindListing(room.RoomId);
             DrawRoomRow(room.RoomId, room.Name ?? $"Room {room.RoomId}", live, room);
         }
 
-        ImGui.Spacing();
+        DrawPager(ref recentPage, pageCount, matches.Count, rooms.Count, railY);
+
+        ImGui.SetCursorPosY(railY + ImGui.GetFrameHeight() + ImGui.GetStyle().ItemSpacing.Y);
+        DrawRememberPasswords();
+    }
+
+    private void DrawRememberPasswords()
+    {
         bool remember = ServiceCollector.Config.RememberRoomPasswords;
         if (ImGui.Checkbox("Remember room passwords", ref remember))
             roomSession.SetRememberRoomPasswords(remember);
@@ -231,6 +332,114 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Stores room passwords in the plugin's config file, so rejoining doesn't ask.");
     }
+
+    // ---------------------------------------------------------------- search and paging
+
+    /// <summary>The filter box at the head of a room list. Both tabs share one query, so a search
+    /// typed on one carries across rather than being silently dropped on the other.</summary>
+    private void DrawSearchBar()
+    {
+        float spacing = ImGui.GetStyle().ItemSpacing.X;
+        float clearWidth = UiTheme.IconButtonWidth(FontAwesomeIcon.Times);
+
+        ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - clearWidth - spacing);
+        if (ImGui.InputTextWithHint("##search", "Search by name, host or code", ref search, 64))
+            publicPage = recentPage = 0;
+
+        ImGui.SameLine();
+        ImGui.BeginDisabled(search.Length == 0);
+        if (ImGuiComponents.IconButton("##clearSearch", FontAwesomeIcon.Times))
+        {
+            search = string.Empty;
+            publicPage = recentPage = 0;
+        }
+
+        ImGui.EndDisabled();
+
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip("Clear the search");
+    }
+
+    private bool Matches(string name, string roomId, string? hostName)
+    {
+        string query = search.Trim();
+        if (query.Length == 0)
+            return true;
+
+        return name.Contains(query, StringComparison.OrdinalIgnoreCase)
+            || roomId.Contains(query, StringComparison.OrdinalIgnoreCase)
+            || (hostName is not null && hostName.Contains(query, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Height DrawLobby wants back for the error line it draws under the tab, so a full
+    /// page stops short of it instead of pushing a scrollbar onto the window.</summary>
+    private float ErrorFooter
+        => roomSession.LastError is null ? 0f : ImGui.GetTextLineHeight() + ImGui.GetStyle().ItemSpacing.Y;
+
+    /// <summary>Y of the pager rail - the last frame-high strip of the tab, less whatever the tab
+    /// parks below it. Call it with the cursor on the first row.</summary>
+    private static float RailY(float footer)
+        => ImGui.GetCursorPosY() + ImGui.GetContentRegionAvail().Y - footer - ImGui.GetFrameHeight();
+
+    /// <summary>How many rows fit between the cursor and the pager rail. Measured every frame
+    /// rather than fixed, because the window is resizable and the UI scale can change under us.
+    /// The rail is reserved whether or not it ends up drawn: dropping it on a single-page list
+    /// would free the height for one more row, which would bring the pager back, and the list
+    /// would sit there flickering between the two.</summary>
+    private static int RowsPerPage(float railY)
+        => Math.Max(1, (int)MathF.Floor((railY - ImGui.GetCursorPosY() - ImGui.GetStyle().ItemSpacing.Y) / RowStride));
+
+    private static int PageCount(int items, int perPage) => Math.Max(1, (int)Math.Ceiling(items / (double)perPage));
+
+    /// <summary>The bottom rail: how much the filter is holding back on the left, the page
+    /// controls on the right. Pinned to <paramref name="railY"/> so it stays put rather than
+    /// riding up the window on a short last page.</summary>
+    private static void DrawPager(ref int page, int pageCount, int matches, int total, float railY)
+    {
+        float rightEdge = ImGui.GetContentRegionMax().X;
+        ImGui.SetCursorPosY(railY);
+
+        if (matches != total)
+        {
+            ImGui.AlignTextToFramePadding();
+            ImGui.TextDisabled($"{matches} of {total}");
+        }
+
+        if (pageCount <= 1)
+            return;
+
+        string label = $"{page + 1} / {pageCount}";
+        float spacing = ImGui.GetStyle().ItemSpacing.X;
+        float prevWidth = UiTheme.IconButtonWidth(FontAwesomeIcon.ChevronLeft);
+        float nextWidth = UiTheme.IconButtonWidth(FontAwesomeIcon.ChevronRight);
+        float labelWidth = ImGui.CalcTextSize(label).X;
+
+        ImGui.SetCursorPos(new Vector2(rightEdge - prevWidth - nextWidth - labelWidth - (spacing * 2), railY));
+
+        ImGui.BeginDisabled(page == 0);
+        if (ImGuiComponents.IconButton("##prevPage", FontAwesomeIcon.ChevronLeft))
+            page--;
+
+        ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextDisabled(label);
+
+        ImGui.SameLine();
+        ImGui.BeginDisabled(page >= pageCount - 1);
+        if (ImGuiComponents.IconButton("##nextPage", FontAwesomeIcon.ChevronRight))
+            page++;
+
+        ImGui.EndDisabled();
+    }
+
+    /// <summary>One room row, and the step from one row's top to the next. DrawRoomRow parks the
+    /// cursor a spacing below the plate before its zero-height dummy, so a row costs its own
+    /// height plus two lots of item spacing.</summary>
+    private static float RowHeight => ImGui.GetFrameHeight() + UiTheme.Px(8);
+
+    private static float RowStride => RowHeight + (ImGui.GetStyle().ItemSpacing.Y * 2);
 
     private void DrawRoomRow(string roomId, string name, RoomListing? live, RecentRoom? recent)
     {
@@ -242,7 +451,7 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         ImGui.PushID(roomId);
 
         float spacing = ImGui.GetStyle().ItemSpacing.X;
-        float rowHeight = ImGui.GetFrameHeight() + UiTheme.Px(8);
+        float rowHeight = RowHeight;
         float buttonOffset = (rowHeight - ImGui.GetFrameHeight()) / 2;
 
         string count = live is not null ? $"{live.MemberNames.Count}/{live.MaxViewers + 1}" : string.Empty;
@@ -401,8 +610,7 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
 
         ImGui.Spacing();
         ImGui.TextUnformatted("Max viewers");
-        ImGui.SetNextItemWidth(width);
-        ImGui.SliderInt("##maxViewers", ref createMaxViewers, 1, 16);
+        UiTheme.ValueSlider("##maxViewers", string.Empty, ref createMaxViewers, 1, 16, 0f);
 
         ImGui.Spacing();
         ImGui.Separator();

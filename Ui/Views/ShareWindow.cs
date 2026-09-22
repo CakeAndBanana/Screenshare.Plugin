@@ -13,6 +13,8 @@ using ScreenShare.Plugin.Capture.ScreenCapture.Interfaces;
 using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
+using ScreenShare.Plugin.Ui.Helpers;
+using ScreenShare.Plugin.Ui.Views;
 
 namespace ScreenShare.Plugin.Ui;
 
@@ -55,9 +57,12 @@ public sealed class ShareWindow : Window, IDisposable
 
     public SettingsWindow Settings { get; }
 
+    public WorldScreenWindow WorldScreen { get; }
+
     public ShareWindow() : base("Screen Share###ScreenShareMainWindow")
     {
         StreamView = new StreamViewWindow(roomSession, mediaSession, () => previewTexture, () => worldScreen, StopWatching);
+        WorldScreen = new WorldScreenWindow(roomSession, () => worldScreen, () => previewTexture);
         Settings = new SettingsWindow(
             isStreaming: () => screenCapture is not null,
             isAudioCapturing: () => audioCapture is not null,
@@ -77,14 +82,26 @@ public sealed class ShareWindow : Window, IDisposable
             {
                 Icon = FontAwesomeIcon.Cog,
                 IconOffset = new Vector2(2, 1),
-                Click = _ =>
-                {
-                    Settings.IsOpen = true;
-                    Settings.BringToFront();
-                },
+                Click = _ => OpenSettings(),
                 ShowTooltip = () => ImGui.SetTooltip("Settings"),
             },
         ];
+    }
+
+    /// <summary>Brings the settings window up, from the title-bar cog, from Dalamud's own plugin
+    /// gear, and from the two places a stream fails to start for want of a capture source.</summary>
+    public void OpenSettings()
+    {
+        Settings.IsOpen = true;
+        Settings.BringToFront();
+    }
+
+    /// <summary>Opens the in-world screen's own window, so its position can be adjusted without
+    /// having to open a stream to get at the controls.</summary>
+    public void OpenWorldScreen()
+    {
+        WorldScreen.IsOpen = true;
+        WorldScreen.BringToFront();
     }
 
     public void TickFrame()
@@ -97,8 +114,9 @@ public sealed class ShareWindow : Window, IDisposable
     }
 
     // Reconnecting keeps the current screen: flipping to the connect card mid-room would shrink the
-    // window for what is usually a couple of seconds.
-    private Screen CurrentScreen => roomSession.State is HubConnectionState.Connected or HubConnectionState.Reconnecting
+    // window for what is usually a couple of seconds. Same for hopping between the main relay and
+    // the relay hosting a room, where the connection is down only for the hop itself.
+    private Screen CurrentScreen => roomSession.State is HubConnectionState.Connected or HubConnectionState.Reconnecting || roomSession.IsSwitchingRelay
         ? roomSession.InRoom ? Screen.Room : Screen.Lobby
         : Screen.Connect;
 
@@ -610,6 +628,8 @@ public sealed class ShareWindow : Window, IDisposable
             }
         }
 
+        DrawCaptureSourceLine();
+
         if (audioError is not null)
             ImGui.TextColored(UiTheme.ErrorColor, $"Audio capture failed: {audioError}");
         if (streamSetupError is not null)
@@ -618,6 +638,24 @@ public sealed class ShareWindow : Window, IDisposable
             ImGui.TextColored(UiTheme.WarnColor, $"Audio capture error: {audioCaptureError.Message}");
 
         DrawScreenCaptureStatus();
+    }
+
+    /// <summary>What "Go live" is about to share. Here rather than only in the settings window so
+    /// an empty window pick is visible before the button is pressed, not after it fails.</summary>
+    private void DrawCaptureSourceLine()
+    {
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextDisabled("Sharing:");
+        ImGui.SameLine();
+
+        if (Settings.HasCaptureSource)
+            ImGui.TextDisabled(Settings.DescribeCaptureSource());
+        else
+            ImGui.TextColored(UiTheme.WarnColor, "nothing selected");
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Change##captureSource"))
+            OpenSettings();
     }
 
     private void DrawScreenCaptureStatus()
@@ -656,12 +694,21 @@ public sealed class ShareWindow : Window, IDisposable
         }
 
         ImGui.SameLine();
-        ImGui.AlignTextToFramePadding();
+        if (ImGui.Button("Adjust##openWorldScreen"))
+            OpenWorldScreen();
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Position, size, tilt and audio falloff for the in-world screen.");
+
+        // Its own line under the buttons rather than trailing them: alongside, the longest of these
+        // three messages ran the row past the window's width.
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X);
         ImGui.TextDisabled(placement is null
             ? "Everyone watching sees it once it's placed."
             : placement.TerritoryType != ServiceCollector.ClientState.TerritoryType
                 ? "Placed in another zone."
-                : "Shown to everyone watching. Fine-tune it from the stream window.");
+                : "Shown to everyone watching. Adjust fine-tunes its position and size.");
+        ImGui.PopTextWrapPos();
     }
 
     private void HandleViewerMediaLifecycle()
@@ -671,6 +718,15 @@ public sealed class ShareWindow : Window, IDisposable
             StopWatching();
 
         wasViewerInRoom = isViewerInRoom;
+
+        // Kicked, room closed, or the relay hosting the room went down - there's nothing left to
+        // stream to, so don't keep capturing and encoding into a dead socket.
+        if (!roomSession.InRoom && mediaSession.IsHosting)
+        {
+            mediaSession.StopHosting();
+            DisposeStreamCapture();
+            StopAutoStartedAudioCapture();
+        }
 
         // The streamer currently being watched stopped, got kicked, or disconnected - don't hang
         // on a now-dead feed.
@@ -899,9 +955,13 @@ public sealed class ShareWindow : Window, IDisposable
         if (roomSession.RoomId is not { } roomId || roomSession.ConnectionId is not { } connectionId)
             return;
 
-        if (Settings.CaptureWindowMode && Settings.SelectedWindowHandle == 0)
+        if (!Settings.HasCaptureSource)
         {
+            // Put the picker in front of them rather than leaving a line of red text to act on -
+            // window mode starts out unselected every session, so this is the ordinary first
+            // "Go live" of a session, not an unusual failure.
             streamSetupError = "Pick a window to capture first.";
+            OpenSettings();
             return;
         }
 
@@ -923,7 +983,13 @@ public sealed class ShareWindow : Window, IDisposable
         {
             streamSetupError = $"Screen capture init failed: {ex.Message}";
             ServiceCollector.PluginLog.Error(ex, "ScreenShare screen capture init failed");
-            TryRecoverFromDeviceRemoved(ex);
+
+            // A device-removed failure is about the GPU, and the reset above is the whole fix.
+            // Anything else here is overwhelmingly the chosen monitor or window having gone away -
+            // DesktopDuplicationCapture's message says as much - so open the picker.
+            if (!TryRecoverFromDeviceRemoved(ex))
+                OpenSettings();
+
             return;
         }
 

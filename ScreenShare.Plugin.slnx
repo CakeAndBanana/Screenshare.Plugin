@@ -5,4 +5,5 @@
   <Project Path="ScreenShare.Plugin.Tests/ScreenShare.Plugin.Tests.csproj" />
   <Project Path="ScreenShare.Plugin.csproj" />
   <Project Path="tools/MediaProbe/MediaProbe.csproj" />
+  <Project Path="tools/WineProbe/WineProbe.csproj" />
 </Solution>

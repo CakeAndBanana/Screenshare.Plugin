@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.SignalR.Client;
 using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Services;
 
-namespace ScreenShare.Plugin.Ui;
+namespace ScreenShare.Plugin.Ui.Helpers;
 
 internal sealed class IdentityChip(RoomSessionService roomSession, Func<bool> isStreaming)
 {

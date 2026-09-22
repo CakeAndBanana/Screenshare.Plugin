@@ -2,6 +2,7 @@
 using Dalamud.Plugin;
 using ScreenShare.Plugin.Services;
 using ScreenShare.Plugin.Ui;
+using ScreenShare.Plugin.Ui.Helpers;
 
 namespace ScreenShare.Plugin;
 
@@ -19,11 +20,13 @@ public sealed class Plugin : IDalamudPlugin
         ServiceCollector.Config.Migrate();
 
         pi.SavePluginConfig(ServiceCollector.Config);
+        PluginFonts.Warm();
 
         shareWindow = new ShareWindow();
         windowSystem.AddWindow(shareWindow);
         windowSystem.AddWindow(shareWindow.StreamView);
         windowSystem.AddWindow(shareWindow.Settings);
+        windowSystem.AddWindow(shareWindow.WorldScreen);
 
         ServiceCollector.Commands.AddHandler("/screenshare",
             new Dalamud.Game.Command.CommandInfo((_, _) => shareWindow.IsOpen = true)
@@ -33,17 +36,15 @@ public sealed class Plugin : IDalamudPlugin
         ServiceCollector.PI.UiBuilder.Draw += shareWindow.TickFrame;
         ServiceCollector.PI.UiBuilder.Draw += DrawWindows;
         ServiceCollector.PI.UiBuilder.OpenMainUi += () => shareWindow.IsOpen = true;
-        ServiceCollector.PI.UiBuilder.OpenConfigUi += () =>
-        {
-            shareWindow.Settings.IsOpen = true;
-            shareWindow.Settings.BringToFront();
-        };
+        ServiceCollector.PI.UiBuilder.OpenConfigUi += shareWindow.OpenSettings;
 
         ServiceCollector.PluginLog.Information("ScreenShare plugin loaded.");
     }
 
     private void DrawWindows()
     {
+        UiTheme.EndFrame();
+
         if (ServiceCollector.GameGui.GameUiHidden)
             return;
 
@@ -57,5 +58,7 @@ public sealed class Plugin : IDalamudPlugin
         ServiceCollector.Commands.RemoveHandler("/screenshare");
         windowSystem.RemoveAllWindows();
         shareWindow.Dispose();
+
+        PluginFonts.DisposeAll();
     }
 }

@@ -2,7 +2,7 @@
 
 public sealed record CreateRoomRequest(string Name, bool IsPublic, string? Password, int MaxViewers);
 
-public sealed record CreateRoomResult(bool Success, string? RoomId, string? HostToken, string? InstanceId, string? Error, string? RoomName = null);
+public sealed record CreateRoomResult(bool Success, string? RoomId, string? HostToken, string? InstanceId, string? Error, string? RoomName = null, string? RedirectUrl = null);
 
 public sealed record JoinRoomResult(
     bool Success,
