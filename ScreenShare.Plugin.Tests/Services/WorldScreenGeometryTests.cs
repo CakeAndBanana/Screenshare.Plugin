@@ -88,8 +88,6 @@ public class WorldScreenGeometryTests
         Assert.True(frame.RightHalf.Length() > 0f, "the panel must keep some width");
     }
 
-    // --- Speakers ---
-
     [Fact]
     public void SpeakerPositions_FlankTheScreenSymmetrically()
     {
@@ -101,7 +99,6 @@ public class WorldScreenGeometryTests
         Vector3 midpoint = (left + right) * 0.5f;
         AssertClose(0f, (midpoint - frame.Center).Length(), "speakers straddle the centre");
 
-        // Half-width 3 plus 1 of spread, on each side.
         AssertClose(8f, (right - left).Length(), "separation is width plus twice the spread");
     }
 
@@ -117,8 +114,6 @@ public class WorldScreenGeometryTests
         AssertClose(0f, (right - (frame.Center - frame.RightHalf)).Length(), "right channel on the -X edge");
     }
 
-    // --- Nudging ---
-
     [Theory]
     [InlineData(0f)]
     [InlineData(1.2f)]
@@ -133,8 +128,6 @@ public class WorldScreenGeometryTests
 
         AssertClose(2f, delta.Length(), "moves by the requested distance");
 
-        // Negated against the panel's +X for the same handedness reason as the speakers: "right"
-        // from the viewer's seat is the panel's -X.
         AssertClose(-1f, Vector3.Dot(Vector3.Normalize(delta), Vector3.Normalize(frame.Right)), "'right' moves along -X");
     }
 

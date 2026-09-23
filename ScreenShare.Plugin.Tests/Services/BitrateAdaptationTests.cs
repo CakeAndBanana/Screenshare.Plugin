@@ -36,7 +36,7 @@ public class BitrateAdaptationTests
             current, Configured, newDrops: 0, cleanWindows, supportsLiveBitrate: false);
 
         Assert.True(probe.ShouldApply);
-        Assert.Equal(1724, probe.TargetKbps);   // 1500 * 1.15, truncated.
+        Assert.Equal(1724, probe.TargetKbps);
         Assert.Equal(0, probe.CleanWindows);
     }
 
@@ -79,8 +79,6 @@ public class BitrateAdaptationTests
     [Fact]
     public void Next_AppliesSmallStepsOnlyWhenTheEncoderRetunesInPlace()
     {
-        // 350 -> 300 is the floor-clamped backoff, a 14% change: over the live threshold, under
-        // the restart one.
         BitrateDecision live = BitrateAdaptation.Next(
             currentKbps: 330, Configured, newDrops: 1, cleanWindows: 0, supportsLiveBitrate: true);
         BitrateDecision restart = BitrateAdaptation.Next(

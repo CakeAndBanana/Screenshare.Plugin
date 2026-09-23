@@ -55,7 +55,7 @@ public sealed class WorldPanelDispatch : IDisposable
         PixelShader? pixelShader = context.PixelShader.Get();
         D3DBuffer[] pixelConstantBuffers = context.PixelShader.GetConstantBuffers(0, 1);
         SamplerState[] pixelSamplers = context.PixelShader.GetSamplers(0, 2);
-        RawRectangle[] scissors = context.Rasterizer.GetScissorRectangles<RawRectangle>();
+        ScissorRects scissors = ScissorRects.Capture(context);
 
         try
         {
@@ -71,11 +71,7 @@ public sealed class WorldPanelDispatch : IDisposable
             context.PixelShader.SetConstantBuffers(0, pixelConstantBuffers);
             context.PixelShader.SetSamplers(0, pixelSamplers);
 
-            if (scissors.Length > 0)
-            {
-                RawRectangle previous = scissors[0];
-                context.Rasterizer.SetScissorRectangle(previous.Left, previous.Top, previous.Right, previous.Bottom);
-            }
+            scissors.Restore(context);
 
             inputLayout?.Dispose();
             vertexShader?.Dispose();

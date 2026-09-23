@@ -86,7 +86,6 @@ public sealed class FfmpegProcessRunner : IDisposable
         }
         catch
         {
-            // best-effort teardown
         }
 
         stderrDrainTask.Wait(TimeSpan.FromSeconds(1));

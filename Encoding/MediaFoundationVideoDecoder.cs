@@ -435,7 +435,6 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         }
         catch (Exception)
         {
-            // Already torn down, or in a bad state - it is being released either way.
         }
 
         transform.Dispose();

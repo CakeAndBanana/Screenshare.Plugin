@@ -294,7 +294,6 @@ public sealed class WindowCapture : ICaptureSource
         }
         catch
         {
-            // Ignore exceptions during close; we're shutting down anyway.
         }
 
         try
@@ -303,7 +302,6 @@ public sealed class WindowCapture : ICaptureSource
         }
         catch
         {
-            // Ignore exceptions during close; we're shutting down anyway.
         }
 
         Marshal.ReleaseComObject(session);

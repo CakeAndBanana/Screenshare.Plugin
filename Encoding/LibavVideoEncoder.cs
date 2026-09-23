@@ -10,10 +10,6 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Encoding;
 
-// The fallback when Media Foundation has no working encoder: the same NVENC/AMF/QSV/x264 encoders
-// ffmpeg.exe would use, but called in-process through libavcodec, so the bitrate can be retuned
-// without a restart. Where the encoder takes D3D11 frames (NVENC, AMF) the NV12 texture goes to it
-// on the GPU like Media Foundation's does; otherwise it's read back to the CPU first.
 public sealed class LibavVideoEncoder : IVideoEncoder
 {
     private readonly GameAdapterDevice gameAdapterDevice;
@@ -122,10 +118,6 @@ public sealed class LibavVideoEncoder : IVideoEncoder
         return (Math.Max(2, width), Math.Max(2, height));
     }
 
-    // Opening the encoder on D3D11 frames isn't the whole test: NVENC only registers the texture
-    // when the first frame arrives. So a throwaway session takes one real frame end to end, and
-    // only if that works does the stream use surfaces - a failure here costs nothing but falling
-    // back to readback, where a failure mid-stream would cost the stream.
     private bool SurfaceInputWorks(
         string encoderName, IReadOnlyList<(string Name, string Value)> options, VideoCodec codec,
         int width, int height, int fps, int bitrateKbps)

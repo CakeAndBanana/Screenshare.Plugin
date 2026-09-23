@@ -18,7 +18,7 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
     private string displayNameInput = ServiceCollector.Config.DisplayName;
 
     private string createName = string.Empty;
-    private int createVisibility; // 0 public, 1 private
+    private int createVisibility;
     private string createPassword = string.Empty;
     private int createMaxViewers = 4;
 
@@ -36,8 +36,6 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
     private bool openCreate;
     private bool openJoin;
     private bool openPassword;
-
-    // ---------------------------------------------------------------- connect
 
     public void DrawConnect()
     {
@@ -96,8 +94,6 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         roomSession.Connect(normalizedUrl);
     }
 
-    // ---------------------------------------------------------------- lobby
-
     public void DrawLobby()
     {
         relayUrlInput = ServiceCollector.Config.RelayUrl;
@@ -150,9 +146,6 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         float half = (ImGui.GetContentRegionAvail().X - spacing) / 2f;
         var size = new Vector2(half, ImGui.GetFrameHeight() * 2f);
 
-        // The lobby's two primary actions, in boxes half again as tall as a normal button, so the
-        // label is drawn a size up to suit them - see BigActionButton for why it is drawn by hand
-        // rather than with Dalamud's IconButtonWithText.
         if (UiTheme.BigActionButton("createRoom", FontAwesomeIcon.Plus, "Create room", size, UiTheme.PublicGreen))
         {
             createName = string.Empty;
@@ -174,10 +167,6 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         IReadOnlyList<RoomListing> publicRooms = roomSession.PublicRooms;
         IReadOnlyList<RecentRoom> recentRooms = roomSession.RecentRooms;
 
-        // Captured before the tab bar moves the cursor: the refresh control is placed by hand on
-        // this row, at this right edge. A Trailing tab item only packs against the last tab rather
-        // than the bar's right edge, which is not what "aligned right" looks like once the tabs
-        // are narrow.
         float rowY = ImGui.GetCursorPosY();
         float rightEdge = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
 
@@ -201,29 +190,18 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         DrawRefreshButton(rowY, rightEdge);
     }
 
-    /// <summary>The refresh control, drawn last but placed back up on the tab bar's own row, hard
-    /// against its right edge.</summary>
     private void DrawRefreshButton(float rowY, float rightEdge)
     {
         bool refreshing = roomSession.IsRefreshingDirectory;
         TimeSpan untilRefresh = roomSession.TimeUntilDirectoryRefresh;
 
-        // "###refresh" rather than "##refresh": the text changes every second, and with a double
-        // hash the whole label is the ID, so this would be a different widget each tick and lose a
-        // press held across one.
         string label = refreshing ? "Refreshing...###refresh"
             : untilRefresh > TimeSpan.Zero ? $"Refresh ({(int)Math.Ceiling(untilRefresh.TotalSeconds)}s)###refresh"
             : "Refresh###refresh";
 
-        // One width for every state, measured from the widest, so the button neither resizes as
-        // the countdown ticks nor shifts away from the edge when it flips to "Refreshing...".
         float width = MathF.Max(ImGui.CalcTextSize("Refreshing...").X, ImGui.CalcTextSize("Refresh (0s)").X)
             + (ImGui.GetStyle().FramePadding.X * 2);
 
-        // The tab bar's rect is exactly one frame high and it draws its divider on that rect's last
-        // pixel row - so a default-height button, drawn after the bar, lands on the divider and
-        // breaks the line. One pixel shorter leaves the divider running unbroken beneath it. The 1
-        // is ImGui's own hardcoded separator thickness, not a style value that could be read back.
         var size = new Vector2(width, ImGui.GetFrameHeight() - 1f);
 
         Vector2 afterTabs = ImGui.GetCursorPos();
@@ -298,7 +276,6 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
             .. rooms.Where(room => Matches(room.Name ?? $"Room {room.RoomId}", room.RoomId, roomSession.FindListing(room.RoomId)?.HostName)),
         ];
 
-        // The checkbox keeps the bottom strip of the tab to itself, and the pager rides just above it.
         float checkbox = ImGui.GetFrameHeight() + ImGui.GetStyle().ItemSpacing.Y;
         float railY = RailY(ErrorFooter + checkbox);
         int perPage = RowsPerPage(railY);
@@ -333,10 +310,6 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
             ImGui.SetTooltip("Stores room passwords in the plugin's config file, so rejoining doesn't ask.");
     }
 
-    // ---------------------------------------------------------------- search and paging
-
-    /// <summary>The filter box at the head of a room list. Both tabs share one query, so a search
-    /// typed on one carries across rather than being silently dropped on the other.</summary>
     private void DrawSearchBar()
     {
         float spacing = ImGui.GetStyle().ItemSpacing.X;
@@ -371,29 +344,17 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
             || (hostName is not null && hostName.Contains(query, StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary>Height DrawLobby wants back for the error line it draws under the tab, so a full
-    /// page stops short of it instead of pushing a scrollbar onto the window.</summary>
     private float ErrorFooter
         => roomSession.LastError is null ? 0f : ImGui.GetTextLineHeight() + ImGui.GetStyle().ItemSpacing.Y;
 
-    /// <summary>Y of the pager rail - the last frame-high strip of the tab, less whatever the tab
-    /// parks below it. Call it with the cursor on the first row.</summary>
     private static float RailY(float footer)
         => ImGui.GetCursorPosY() + ImGui.GetContentRegionAvail().Y - footer - ImGui.GetFrameHeight();
 
-    /// <summary>How many rows fit between the cursor and the pager rail. Measured every frame
-    /// rather than fixed, because the window is resizable and the UI scale can change under us.
-    /// The rail is reserved whether or not it ends up drawn: dropping it on a single-page list
-    /// would free the height for one more row, which would bring the pager back, and the list
-    /// would sit there flickering between the two.</summary>
     private static int RowsPerPage(float railY)
         => Math.Max(1, (int)MathF.Floor((railY - ImGui.GetCursorPosY() - ImGui.GetStyle().ItemSpacing.Y) / RowStride));
 
     private static int PageCount(int items, int perPage) => Math.Max(1, (int)Math.Ceiling(items / (double)perPage));
 
-    /// <summary>The bottom rail: how much the filter is holding back on the left, the page
-    /// controls on the right. Pinned to <paramref name="railY"/> so it stays put rather than
-    /// riding up the window on a short last page.</summary>
     private static void DrawPager(ref int page, int pageCount, int matches, int total, float railY)
     {
         float rightEdge = ImGui.GetContentRegionMax().X;
@@ -434,9 +395,6 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         ImGui.EndDisabled();
     }
 
-    /// <summary>One room row, and the step from one row's top to the next. DrawRoomRow parks the
-    /// cursor a spacing below the plate before its zero-height dummy, so a row costs its own
-    /// height plus two lots of item spacing.</summary>
     private static float RowHeight => ImGui.GetFrameHeight() + UiTheme.Px(8);
 
     private static float RowStride => RowHeight + (ImGui.GetStyle().ItemSpacing.Y * 2);
@@ -563,8 +521,6 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         passwordInput = string.Empty;
         openPassword = true;
     }
-
-    // ---------------------------------------------------------------- popups
 
     private void DrawCreatePopup()
     {

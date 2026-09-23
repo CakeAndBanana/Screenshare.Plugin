@@ -36,10 +36,6 @@ public class VideoEncoderSelectorTests
     [Fact]
     public void BuildEncoderArgs_NvencH264UsesLowLatencyTuneAndConstantBitrate()
     {
-        // These specific option names/values were only trusted after verifying them against the
-        // actual bundled ffmpeg binary via `ffmpeg -h encoder=X` and a real NVENC test - this
-        // test exists to catch an accidental edit drifting away from what was verified, not to
-        // re-verify ffmpeg itself.
         string args = VideoEncoderSelector.BuildEncoderArgs(GpuVendor.Nvidia, VideoCodec.H264, 1500, 2000, 3000, 60);
 
         Assert.Contains("-preset p1", args);

@@ -69,7 +69,7 @@
          binds to. ffmpeg.exe runs against the same DLLs and is kept for decoding and as the
          last-resort encoder.
 
-         Gitignored (~156MB in total - see README for where to get it). The Exists condition and
+         Gitignored (~156MB in total - see BUILDING.md for where to get it). The Exists condition and
          a wildcard that matches nothing keep a fresh clone without it (e.g. CI) buildable - CI
          only needs to compile and run the unit tests, never actually load ffmpeg. -->
     <None Include="ffmpeg\ffmpeg.exe" Condition="Exists('ffmpeg\ffmpeg.exe')">

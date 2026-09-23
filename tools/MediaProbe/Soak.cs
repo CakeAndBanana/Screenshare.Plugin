@@ -34,8 +34,6 @@ internal static class Soak
         {
             foreach (byte[] unit in units)
             {
-                // The stream is replayed end to end; each pass restarts with its own parameter sets
-                // and IDR, which a decoder handles as a new GOP.
                 decoded += harness.SubmitAndDrain(unit, fed * 1000L / 30);
                 fed++;
 
@@ -45,15 +43,10 @@ internal static class Soak
                     long handles = self.HandleCount;
                     long memoryMb = self.PrivateMemorySize64 / 1024 / 1024;
 
-                    // Deliberately NOT forcing a collection first. A soak that collects before every
-                    // reading hides the growth it exists to find; the question is whether the process
-                    // grows without bound, not what it would shrink to if asked nicely.
                     long managedMb = GC.GetTotalMemory(forceFullCollection: false) / 1024 / 1024;
 
                     if (baselineHandles == 0)
                     {
-                        // Taken at the first sample, not at startup: the first few thousand frames
-                        // include one-off allocation that would read as a leak if counted as drift.
                         baselineHandles = handles;
                         baselineMemory = memoryMb;
                         Console.WriteLine($"output shape: {harness.OutputShape}");
@@ -89,9 +82,6 @@ internal static class Soak
         Console.WriteLine($"decoded {decoded} frames in {clock.Elapsed:hh\\:mm\\:ss} " +
             $"({decoded / clock.Elapsed.TotalSeconds:F0} fps), {harness.StreamChanges} stream change(s)");
 
-        // Thresholds, not equality: handle counts move a little on their own, and the GC returns
-        // memory on its own schedule. What matters is whether they TREND, which over tens of
-        // thousands of frames a real per-frame leak certainly would.
         bool slotsHealthy = harness.SlotStarvations == 0 && harness.FreeSlots == harness.SlotCount;
         bool handlesHealthy = finalHandles - baselineHandles < 200;
         bool memoryHealthy = finalMemory - baselineMemory < 100;

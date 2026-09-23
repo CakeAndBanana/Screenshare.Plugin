@@ -16,6 +16,8 @@ public sealed class WorldScreenController : IDisposable
     private bool dispatchFailed;
     private ScenePanelHook? sceneHook;
     private bool sceneHookFailed;
+    private RawTextureWrap? blackTexture;
+    private bool blackTextureFailed;
 
     public int LastFrameBackBufferSwitches => sceneHook?.LastFrameBackBufferSwitches ?? 0;
 
@@ -42,13 +44,32 @@ public sealed class WorldScreenController : IDisposable
         Configuration config = ServiceCollector.Config;
         IsProjecting = false;
 
-        sceneHook?.EndFrame();
-
         mediaSession.SetViewerVolume(config.ViewerVolume);
 
-        if (!TryResolveVisible(roomSession, mediaSession, videoTexture, out ScreenPlacementInfo? placement)
-            || videoTexture is null
-            || device is null)
+        if (!config.ShowWorldScreen)
+        {
+            if (IsDraggingGizmo)
+            {
+                WorldScreenGizmo.Reset();
+                IsDraggingGizmo = false;
+            }
+
+            ReleaseDevice();
+            mediaSession.SetViewerSpeakerGains(SpeakerGains.Identity);
+            return;
+        }
+
+        sceneHook?.EndFrame();
+
+        if (!TryResolvePlacement(roomSession, out ScreenPlacementInfo? placement) || device is null)
+        {
+            mediaSession.SetViewerSpeakerGains(SpeakerGains.Identity);
+            return;
+        }
+
+        bool isLive = mediaSession.IsViewing && videoTexture is not null;
+        RawTextureWrap? panelTexture = isLive ? videoTexture : TryGetBlackTexture(device);
+        if (panelTexture is null)
         {
             mediaSession.SetViewerSpeakerGains(SpeakerGains.Identity);
             return;
@@ -61,13 +82,17 @@ public sealed class WorldScreenController : IDisposable
             return;
         }
 
-        placement = ApplyGizmo(roomSession, placement!, videoTexture, scene);
+        placement = ApplyGizmo(roomSession, placement!, panelTexture, scene);
 
-        PanelFrame frame = BuildFrame(placement!, videoTexture.Width, videoTexture.Height);
+        PanelFrame frame = BuildFrame(placement!, panelTexture.Width, panelTexture.Height);
 
-        UpdateAudio(config, placement!, frame, scene, mediaSession);
-        SubmitDraw(config, frame, scene, videoTexture, device);
-        IsProjecting = true;
+        if (isLive)
+            UpdateAudio(config, placement!, frame, scene, mediaSession);
+        else
+            mediaSession.SetViewerSpeakerGains(SpeakerGains.Identity);
+
+        SubmitDraw(config, frame, scene, panelTexture, device);
+        IsProjecting = isLive;
     }
 
     private ScreenPlacementInfo ApplyGizmo(
@@ -105,15 +130,11 @@ public sealed class WorldScreenController : IDisposable
             roomSession.UpdateScreenPlacement(placement);
     }
 
-    private static bool TryResolveVisible(
-        RoomSessionService roomSession,
-        MediaSessionService mediaSession,
-        RawTextureWrap? videoTexture,
-        out ScreenPlacementInfo? placement)
+    private static bool TryResolvePlacement(RoomSessionService roomSession, out ScreenPlacementInfo? placement)
     {
-        placement = roomSession.ScreenPlacement;
+        placement = roomSession.InRoom ? roomSession.ScreenPlacement : null;
 
-        if (!mediaSession.IsViewing || videoTexture is null || placement is null)
+        if (placement is null)
             return false;
 
         return placement.TerritoryType == ServiceCollector.ClientState.TerritoryType;
@@ -267,8 +288,29 @@ public sealed class WorldScreenController : IDisposable
         }
     }
 
+    private RawTextureWrap? TryGetBlackTexture(GameAdapterDevice device)
+    {
+        if (blackTexture is not null || blackTextureFailed)
+            return blackTexture;
+
+        try
+        {
+            blackTexture = SolidColorTexture.Create(device.GameDevice, 0xFF000000, 16, 9);
+        }
+        catch (Exception ex)
+        {
+            blackTextureFailed = true;
+            ServiceCollector.PluginLog.Error(ex, "ScreenShare could not create the idle in-world screen texture; the screen will only appear while a stream is live.");
+        }
+
+        return blackTexture;
+    }
+
     public void ReleaseDevice()
     {
+        blackTexture?.Dispose();
+        blackTexture = null;
+        blackTextureFailed = false;
         dispatch?.Dispose();
         dispatch = null;
         dispatchFailed = false;

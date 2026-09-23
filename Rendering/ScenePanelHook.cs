@@ -239,7 +239,7 @@ public sealed unsafe class ScenePanelHook : IDisposable
     private void DrawWithStateRestored()
     {
         RawViewportF[] viewports = context.Rasterizer.GetViewports<RawViewportF>();
-        RawRectangle[] scissors = context.Rasterizer.GetScissorRectangles<RawRectangle>();
+        ScissorRects scissors = ScissorRects.Capture(context);
         RasterizerState? rasterizerState = context.Rasterizer.State;
         BlendState? blendState = context.OutputMerger.GetBlendState(out RawColor4 blendFactor, out int sampleMask);
         DepthStencilState? depthStencilState = context.OutputMerger.GetDepthStencilState(out int stencilRef);
@@ -261,11 +261,7 @@ public sealed unsafe class ScenePanelHook : IDisposable
             if (viewports.Length > 0)
                 context.Rasterizer.SetViewports(viewports);
 
-            if (scissors.Length > 0)
-            {
-                RawRectangle previous = scissors[0];
-                context.Rasterizer.SetScissorRectangle(previous.Left, previous.Top, previous.Right, previous.Bottom);
-            }
+            scissors.Restore(context);
 
             context.Rasterizer.State = rasterizerState;
             context.OutputMerger.SetBlendState(blendState, blendFactor, sampleMask);

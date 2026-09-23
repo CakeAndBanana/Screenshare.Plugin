@@ -11,14 +11,8 @@ namespace ScreenShare.Plugin.Services;
 
 public sealed class MediaSessionService : IDisposable
 {
-    // If video's first frame hasn't shown up by the time audio is ready to play, don't hold
-    // audio hostage forever waiting for it (a decode failure or unusually slow start shouldn't
-    // mean the viewer hears nothing at all) - start it anyway after this, accepting whatever
-    // desync results as strictly better than silence.
     private static readonly TimeSpan AudioVideoSyncTimeout = TimeSpan.FromSeconds(10);
 
-    // How often the send queue is sampled. The rule applied to each sample lives in
-    // BitrateAdaptation, where it can be tested without a socket or an encoder.
     private const int AdaptIntervalMs = 3000;
 
     private MediaSocketClient? hostSocket;
@@ -29,6 +23,7 @@ public sealed class MediaSessionService : IDisposable
     private readonly Lock audioWiringLock = new();
     private IAudioSource? pendingAudioCapture;
     private int pendingAudioBitrateBps = 32000;
+    private int hostGeneration;
 
     private Stopwatch? hostSessionClock;
 
@@ -73,7 +68,6 @@ public sealed class MediaSessionService : IDisposable
 
     public Exception? ViewerLastException { get; private set; }
 
-    // Viewer-facing surface for ShareWindow to render/report.
     public nint? ViewerSharedHandle => videoDecoder?.SharedHandle;
 
     public int ViewerWidth => videoDecoder?.Width ?? 0;
@@ -108,7 +102,6 @@ public sealed class MediaSessionService : IDisposable
 
     public long ViewerDisplayDrops => videoDecoder?.DisplayQueueDrops ?? 0;
 
-    // Host-facing surface.
     public long HostFramesEncoded => videoEncoder?.FramesEncoded ?? 0;
 
     public long HostFramesSkipped => videoEncoder?.FramesSkipped ?? 0;
@@ -154,16 +147,19 @@ public sealed class MediaSessionService : IDisposable
         HostLastError = null;
         HostLastException = null;
 
+        int generation;
         lock (audioWiringLock)
         {
             pendingAudioCapture = audioCapture;
             pendingAudioBitrateBps = audioBitrateBps;
+            generation = hostGeneration;
         }
 
-        _ = StartHostingCoreAsync(relayUrl, roomId, connectionId, gameAdapterDevice, screenCapture, ffmpegExePath, targetHeight, bitrateKbps, fps, codec);
+        _ = StartHostingCoreAsync(generation, relayUrl, roomId, connectionId, gameAdapterDevice, screenCapture, ffmpegExePath, targetHeight, bitrateKbps, fps, codec);
     }
 
     private async Task StartHostingCoreAsync(
+        int generation,
         string relayUrl,
         string roomId,
         string connectionId,
@@ -175,49 +171,70 @@ public sealed class MediaSessionService : IDisposable
         int fps,
         VideoCodec codec)
     {
+        // Everything is built into locals and only published under the lock if no StopHosting ran while connecting;
+        // otherwise a stop issued mid-connect would be overwritten and the stream would go live anyway.
+        var newSocket = new MediaSocketClient();
+        IVideoEncoder? encoder = null;
+
         try
         {
-            var newSocket = new MediaSocketClient();
             await newSocket.ConnectAsync(relayUrl, roomId, connectionId, isStreamer: true).ConfigureAwait(false);
-            hostSocket = newSocket;
 
-            var sessionClock = Stopwatch.StartNew();
-            hostSessionClock = sessionClock;
-
-            hostEncodeSettings = new HostEncodeSettings(
-                gameAdapterDevice, screenCapture, ffmpegExePath, targetHeight, fps, codec, bitrateKbps);
-            currentBitrateKbps = bitrateKbps;
-            lastSeenQueueDrops = 0;
-            cleanAdaptWindows = 0;
-
-            IVideoEncoder encoder = VideoEncoderFactory.Create(
-                gameAdapterDevice, screenCapture, ffmpegExePath, sessionClock, targetHeight, bitrateKbps, fps, codec);
-            WireVideoChunks(encoder);
-            videoEncoder = encoder;
-            newSocket.SendVideoMetadata(encoder.Width, encoder.Height, codec, fps);
-
-            adaptCts = new CancellationTokenSource();
-            _ = AdaptBitrateLoopAsync(adaptCts.Token);
-
-            // Read here rather than taken as a parameter, and under the same lock that publishes
-            // IsHosting: the connect above takes long enough that an audio source started in the
-            // same frame (auto-start does exactly that, and process-loopback activation typically
-            // finishes FIRST) would otherwise land in UpdateAudioSource while IsHosting was still
-            // false, be dropped, and leave the stream silent for its whole run.
-            lock (audioWiringLock)
+            if (Volatile.Read(ref hostGeneration) == generation)
             {
-                IsHosting = true;
-                if (pendingAudioCapture is { } readyAudioCapture)
-                    TryWireAudio(newSocket, readyAudioCapture, pendingAudioBitrateBps);
+                var sessionClock = Stopwatch.StartNew();
+
+                encoder = VideoEncoderFactory.Create(
+                    gameAdapterDevice, screenCapture, ffmpegExePath, sessionClock, targetHeight, bitrateKbps, fps, codec);
+                WireVideoChunks(encoder);
+                newSocket.SendVideoMetadata(encoder.Width, encoder.Height, codec, fps);
+
+                lock (audioWiringLock)
+                {
+                    if (hostGeneration == generation)
+                    {
+                        hostSocket = newSocket;
+                        hostSessionClock = sessionClock;
+                        hostEncodeSettings = new HostEncodeSettings(
+                            gameAdapterDevice, screenCapture, ffmpegExePath, targetHeight, fps, codec, bitrateKbps);
+                        currentBitrateKbps = bitrateKbps;
+                        lastSeenQueueDrops = 0;
+                        cleanAdaptWindows = 0;
+                        videoEncoder = encoder;
+
+                        adaptCts = new CancellationTokenSource();
+                        _ = AdaptBitrateLoopAsync(adaptCts.Token);
+
+                        IsHosting = true;
+                        if (pendingAudioCapture is { } readyAudioCapture)
+                            TryWireAudio(newSocket, readyAudioCapture, pendingAudioBitrateBps);
+
+                        return;
+                    }
+                }
             }
+
+            ServiceCollector.PluginLog.Information("ScreenShare hosting was stopped while connecting; discarding the new media stream.");
         }
         catch (Exception ex)
         {
-            HostLastError = ex.Message;
-            HostLastException = ex;
-            ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to start hosting the media stream");
-            StopHosting();
+            if (Volatile.Read(ref hostGeneration) == generation)
+            {
+                HostLastError = ex.Message;
+                HostLastException = ex;
+                ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to start hosting the media stream");
+                StopHosting();
+            }
+            else
+            {
+                ServiceCollector.PluginLog.Verbose(ex, "ScreenShare hosting start failed after it had already been stopped");
+            }
         }
+
+        if (encoder is not null)
+            _ = Task.Run(() => DisposeSafely(encoder, "H264Encoder (stopped while connecting)"));
+
+        await newSocket.DisposeAsync().ConfigureAwait(false);
     }
 
     private void OnHostSamplesAvailable(float[] samples)
@@ -265,9 +282,6 @@ public sealed class MediaSessionService : IDisposable
 
                 if (live)
                 {
-                    // The whole point of the Media Foundation encoder: the running encoder is
-                    // retuned, so adaptation costs nothing visible and can happen in small steps
-                    // instead of the coarse, hitchy jumps a rebuild forces.
                     videoEncoder!.SetBitrate(decision.TargetKbps);
                     currentBitrateKbps = decision.TargetKbps;
                     ServiceCollector.PluginLog.Information(
@@ -281,7 +295,6 @@ public sealed class MediaSessionService : IDisposable
         }
         catch (OperationCanceledException)
         {
-            // Hosting stopped - the ordinary way out of this loop.
         }
         catch (Exception ex)
         {
@@ -291,17 +304,11 @@ public sealed class MediaSessionService : IDisposable
 
     public bool HostSupportsLiveVideoBitrate => videoEncoder is { SupportsLiveBitrate: true };
 
-    // The settings slider, mid-stream. Only retunes an encoder that can do it in place; one that
-    // would need a rebuild keeps the new value for the next stream instead. Returns whether it
-    // was applied now.
     public bool UpdateVideoBitrate(int bitrateKbps)
     {
         if (hostEncodeSettings is not { } settings || videoEncoder is not { SupportsLiveBitrate: true } encoder)
             return false;
 
-        // If adaptation has already pulled the rate down, the upload still can't carry more, so
-        // the new setting only caps it; otherwise the stream moves straight to the new setting.
-        // Adaptation then works against the new ceiling from here.
         bool reduced = currentBitrateKbps < settings.ConfiguredBitrateKbps;
         int targetKbps = reduced ? Math.Min(currentBitrateKbps, bitrateKbps) : bitrateKbps;
 
@@ -325,18 +332,11 @@ public sealed class MediaSessionService : IDisposable
 
         try
         {
-            // Deliberately skips Media Foundation: this path only runs when the encoder in use
-            // cannot retune, which means Media Foundation was already unavailable or declined.
-            // Going back through it would retry it on every adaptation step.
             IVideoEncoder encoder = VideoEncoderFactory.CreateWithoutMediaFoundation(
                 settings.Device, settings.Capture, settings.FfmpegExePath, sessionClock,
                 settings.TargetHeight, bitrateKbps, settings.Fps, settings.Codec);
             WireVideoChunks(encoder);
 
-            // The handover itself: WireVideoChunks mutes whichever encoder is not this field's
-            // value, so the outgoing one stops putting bytes on the wire at exactly the assignment
-            // that makes the new one start. Deliberately still BEFORE the old encoder is disposed,
-            // so a construction failure above leaves the previous encoder both alive and live.
             videoEncoder = encoder;
             currentBitrateKbps = bitrateKbps;
 
@@ -345,7 +345,6 @@ public sealed class MediaSessionService : IDisposable
         }
         catch (Exception ex)
         {
-            // Keep the old encoder running rather than leaving the stream with none at all.
             HostLastError = ex.Message;
             ServiceCollector.PluginLog.Error(ex, "ScreenShare could not restart the encoder at a new bitrate; continuing at the previous one.");
             return;
@@ -355,17 +354,6 @@ public sealed class MediaSessionService : IDisposable
             await Task.Run(() => DisposeSafely(oldEncoder, "H264Encoder (bitrate change)"), cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Sends an encoder's output on the wire for exactly as long as it is the session's encoder.
-    ///
-    /// The identity check is not defensive tidiness. Bitrate adaptation on an encoder that cannot
-    /// retune (ffmpeg always; a Media Foundation encoder whose ICodecAPI was unavailable) replaces
-    /// it outright, and the outgoing encoder keeps producing until its process actually dies -
-    /// which is well after the replacement has started. Without this, two INDEPENDENT streams,
-    /// each with its own SPS/PPS and its own frame numbering, interleave on the one connection for
-    /// the length of the swap, and a viewer's decoder resolves references against whichever
-    /// stream's frames it happened to keep.
-    /// </summary>
     private void WireVideoChunks(IVideoEncoder encoder)
     {
         encoder.ChunkEncoded += (ptsMs, chunk) =>
@@ -402,7 +390,6 @@ public sealed class MediaSessionService : IDisposable
     {
         lock (audioWiringLock)
         {
-            // Recorded even when there's nothing to wire it into yet - see pendingAudioCapture.
             pendingAudioCapture = audioCapture;
             pendingAudioBitrateBps = audioBitrateBps;
 
@@ -457,10 +444,6 @@ public sealed class MediaSessionService : IDisposable
 
         try
         {
-            // The raw audio clock plus the user's offset as a separate provider - the decoder needs
-            // the offset itself, not just a pre-shifted clock, because it also sizes the
-            // presentation queue and the frame-hold cap from it (see H264Decoder). Both read per
-            // call rather than captured, so the slider takes effect on the current stream.
             IVideoDecoder decoder = VideoDecoderFactory.Create(
                 viewerDevice, viewerFfmpegExePath, width, height, fps, codec,
                 () => audioDecoder?.EstimatedCurrentPtsMs,
@@ -484,8 +467,6 @@ public sealed class MediaSessionService : IDisposable
 
         try
         {
-            // The user's latency budget, read at construction: it sets both the device buffer and
-            // the jitter buffer, neither of which can be resized on a live output device.
             var decoder = new AudioPlaybackDecoder(sampleRate, channels, ServiceCollector.Config.PlaybackLatencyMs);
             decoder.ReadyToPlay += OnAudioReadyToPlay;
             audioDecoder = decoder;
@@ -504,9 +485,6 @@ public sealed class MediaSessionService : IDisposable
         if (TryStartSyncedPlayback())
             return;
 
-        // Captured locally (not read back through the videoDecoder field later) so a stale
-        // timeout firing after a newer session has already replaced it can't accidentally
-        // force-start the WRONG session's video; StartDisplay is idempotent regardless.
         IVideoDecoder? decoderAtTimeoutStart = videoDecoder;
         _ = Task.Delay(AudioVideoSyncTimeout).ContinueWith(
             _ => decoderAtTimeoutStart?.StartDisplay(),
@@ -519,7 +497,6 @@ public sealed class MediaSessionService : IDisposable
         if (TryStartSyncedPlayback())
             return;
 
-        // Same reasoning as OnVideoReadyToDisplay's timeout above, mirrored for audio.
         AudioPlaybackDecoder? decoderAtTimeoutStart = audioDecoder;
         _ = Task.Delay(AudioVideoSyncTimeout).ContinueWith(
             _ => decoderAtTimeoutStart?.StartPlayback(),
@@ -543,11 +520,9 @@ public sealed class MediaSessionService : IDisposable
     {
         lock (audioWiringLock)
         {
+            hostGeneration++;
             UnwireAudio();
 
-            // Dropped rather than kept: the caller owns this source and is free to dispose it once
-            // the stream is stopped, so holding it would leave a disposed source to be wired into
-            // the next stream.
             pendingAudioCapture = null;
         }
 
@@ -616,7 +591,11 @@ public sealed class MediaSessionService : IDisposable
 
     public void Dispose()
     {
-        UnwireAudio();
+        lock (audioWiringLock)
+        {
+            hostGeneration++;
+            UnwireAudio();
+        }
 
         videoEncoder?.Dispose();
         videoEncoder = null;

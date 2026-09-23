@@ -20,11 +20,10 @@ public sealed class StreamViewWindow : Window
     private readonly Func<WorldScreenController> worldScreen;
     private readonly Action onClosed;
 
-    // Its own instance rather than the one WorldScreenWindow holds: both can be on screen at once,
-    // and each keeps its own in-progress slider and text-box state.
     private readonly WorldScreenPanel worldScreenPanel;
 
     private float volume = ServiceCollector.Config.ViewerVolume;
+    private bool volumeActive;
     private int avSyncOffsetMs = ServiceCollector.Config.AvSyncOffsetMs;
     private int playbackLatencyMs = ServiceCollector.Config.PlaybackLatencyMs;
 
@@ -182,13 +181,19 @@ public sealed class StreamViewWindow : Window
         Configuration config = ServiceCollector.Config;
         float labelWidth = UiTheme.LabelColumn("Volume", "Playback buffer (ms)", "A/V sync (ms)");
 
+        if (!volumeActive)
+            volume = config.ViewerVolume;
+
         int volumePercent = (int)MathF.Round(volume * 100f);
         SliderEdit volumeEdit = UiTheme.ValueSlider(
             "##viewerVolume", "Volume", ref volumePercent, 0, 100, labelWidth, unit: "%");
+        volumeActive = volumeEdit.Active;
         if (volumeEdit.Changed)
+        {
             volume = Math.Clamp(volumePercent / 100f, 0f, 1f);
+            config.ViewerVolume = volume;
+        }
 
-        ServiceCollector.Config.ViewerVolume = volume;
         if (volumeEdit.Committed)
             ServiceCollector.PI.SavePluginConfig(config);
 
@@ -215,7 +220,7 @@ public sealed class StreamViewWindow : Window
 
     private void DrawWorldScreenSection()
     {
-        if (!ImGui.CollapsingHeader("In-world screen"))
+        if (!ServiceCollector.Config.ShowWorldScreen || !ImGui.CollapsingHeader("In-world screen"))
             return;
 
         worldScreenPanel.Draw();

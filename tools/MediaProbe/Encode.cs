@@ -10,11 +10,6 @@ using MapFlags = SharpDX.Direct3D11.MapFlags;
 
 namespace MediaProbe;
 
-// Drives the plugin's own LibavEncoderSession - the in-process fallback encoder - with synthetic
-// NV12 frames, once per vendor/codec, both ways the plugin can feed it: NV12 bytes from a readback,
-// and (for the hardware encoders) NV12 textures handed over on the GPU. Answers: does the encoder
-// open on this machine, how fast is it, does a mid-stream bitrate change take, and does ffmpeg
-// decode what comes out.
 internal static class Encode
 {
     private const int Fps = 30;
@@ -27,7 +22,6 @@ internal static class Encode
     {
         LibavEncoderSession.EnsureLoaded(Path.GetDirectoryName(ffmpegExePath)!);
 
-        // The plugin keeps libav quiet; here its own error lines are the explanation for a failure.
         FFmpeg.AutoGen.ffmpeg.av_log_set_level(FFmpeg.AutoGen.ffmpeg.AV_LOG_ERROR);
 
         Console.WriteLine($"encode: {frames} frames per encoder, {width}x{height}@{Fps}, " +
@@ -36,7 +30,6 @@ internal static class Encode
 
         byte[][] bytes = BuildFrames(width, height, count: Fps);
 
-        // Same flags and multithread protection as the plugin's GameAdapterDevice.
         using var device = new Device(
             SharpDX.Direct3D.DriverType.Hardware,
             DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport);
@@ -67,7 +60,6 @@ internal static class Encode
                         }
                         catch (Exception ex)
                         {
-                            // An encoder for hardware this machine doesn't have failing to open is expected.
                             Console.WriteLine($"{label,-20} unavailable: {ex.Message}");
                         }
                     }
@@ -106,7 +98,6 @@ internal static class Encode
             units++;
             output.Write(accessUnit);
 
-            // Attributed by timestamp, not arrival, so encoder buffering doesn't smear the halves.
             if (ptsMs < half * 1000L / Fps)
                 firstHalfBytes += accessUnit.Length;
             else
@@ -130,8 +121,6 @@ internal static class Encode
             lock (source.ContextLock)
                 copied = session.TryCopyToSurface(source.Device!.ImmediateContext, source.Textures![sent % source.Textures.Length]);
 
-            // The plugin skips the frame when the pool is full; here that would throw off the
-            // decoded-frame count, and with the encoder drained after every send it shouldn't happen.
             if (!copied)
                 throw new InvalidOperationException($"surface pool exhausted at frame {sent}");
 
@@ -147,7 +136,6 @@ internal static class Encode
         int decoded = CountDecodedFrames(ffmpegExePath, outputPath);
 
         bool decodedAll = decoded == frames && units == frames;
-        // The direction the plugin's adapter moves first when a viewer's connection struggles.
         bool bitrateMoved = secondKbps < firstKbps / 2;
 
         string liveBitrate = session.SupportsLiveBitrate
@@ -161,8 +149,6 @@ internal static class Encode
         return decodedAll && (!session.SupportsLiveBitrate || bitrateMoved);
     }
 
-    // Fine per-pixel noise over a moving gradient: expensive enough to encode that the rate
-    // controller sits at its target, so a bitrate change shows up in the output size.
     private static byte[][] BuildFrames(int width, int height, int count)
     {
         var frames = new byte[count][];
@@ -191,8 +177,6 @@ internal static class Encode
         return frames;
     }
 
-    // The same frames as NV12 textures, shaped like the plugin's Nv12Converter output (default
-    // usage, one slice) so TryCopyToSurface copies from exactly what it copies from in game.
     private static Texture2D[] UploadFrames(Device device, byte[][] frames, int width, int height)
     {
         var description = new Texture2DDescription
@@ -221,7 +205,6 @@ internal static class Encode
             SharpDX.DataBox box = device.ImmediateContext.MapSubresource(staging, 0, MapMode.Write, MapFlags.None);
             try
             {
-                // Y rows, then the UV rows straight after Height rows of Y - the mapped NV12 layout.
                 for (int y = 0; y < height * 3 / 2; y++)
                     Marshal.Copy(frames[f], y * width, box.DataPointer + y * box.RowPitch, width);
             }
@@ -239,7 +222,6 @@ internal static class Encode
 
     private static int CountDecodedFrames(string ffmpegExePath, string streamPath)
     {
-        // framecrc prints one line per decoded frame, so counting lines counts frames.
         var startInfo = new ProcessStartInfo
         {
             FileName = ffmpegExePath,

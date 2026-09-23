@@ -3,19 +3,17 @@ using Dalamud.Bindings.ImGui;
 using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
-using ScreenShare.Plugin.Ui.Helpers;
 
-namespace ScreenShare.Plugin.Ui;
+namespace ScreenShare.Plugin.Ui.Helpers;
 
-/// <summary>Every control for the in-world screen, drawn wherever it is wanted. It lives in its own
-/// window and also inside the stream window, so it exists once as a component rather than as two
-/// copies of the same layout drifting apart.</summary>
 internal sealed class WorldScreenPanel
 {
     private readonly string idPrefix;
     private readonly RoomSessionService roomSession;
     private readonly Func<WorldScreenController> worldScreen;
     private readonly Func<RawTextureWrap?> getPreviewTexture;
+
+    private const float PositionRangeMeters = 15f;
 
     private ScreenPlacementInfo? sliderSource;
     private bool slidersActive;
@@ -26,15 +24,13 @@ internal sealed class WorldScreenPanel
     private float sliderSpread;
     private float sliderFalloffStart;
     private float sliderFalloffEnd;
-    private float nudgeStepMeters = 0.5f;
+    private ScreenPlacementInfo? positionAnchor;
+    private float sliderSideways;
+    private float sliderForward;
 
     private float opacity = ServiceCollector.Config.WorldScreenOpacity;
     private bool opacityActive;
 
-    /// <param name="idPrefix">Distinct per instance. Widget ids are scoped per window by ImGui, but
-    /// the click-to-type slot on <see cref="UiTheme.ValueSlider(string,string,ref float,float,float,float,int,string,float,string)"/>
-    /// is keyed by id alone - so without this, clicking a value in one copy would open the text box
-    /// in both, and the two would fight over the one edit buffer.</param>
     public WorldScreenPanel(
         string idPrefix,
         RoomSessionService roomSession,
@@ -86,9 +82,6 @@ internal sealed class WorldScreenPanel
 
     private void DrawDisplaySettings(Configuration config)
     {
-        // Re-read from config unless this panel's own slider is mid-drag. Two copies of this panel
-        // can be on screen at once, and a value mirrored into a field would leave whichever copy
-        // you are not touching showing a stale number.
         if (!opacityActive)
             opacity = config.WorldScreenOpacity;
 
@@ -102,8 +95,6 @@ internal sealed class WorldScreenPanel
             ServiceCollector.PI.SavePluginConfig(config);
         }
 
-        // Straight off config rather than mirrored into a field: a checkbox commits the instant it
-        // is clicked, so there is no drag state to protect, and both copies stay in agreement.
         bool spatialAudio = config.SpatialAudio;
         if (ImGui.Checkbox("Positional audio", ref spatialAudio))
         {
@@ -122,12 +113,11 @@ internal sealed class WorldScreenPanel
         {
             ImGui.SetTooltip(
                 "Draws the screen inside the game's own render pass so your hotbars and windows sit " +
-                "on top of it, instead of the screen covering them. Needs a hook into the game's " +
-                "renderer, so it may stop working after a game patch - untick it if anything looks wrong.");
+                "on top of it; untick it if anything looks wrong.");
         }
 
         if (drawUnderUi && !worldScreen().IsDrawingUnderUi)
-            ImGui.TextColored(UiTheme.WarnColor, "The render hook isn't running - drawing over the game UI instead.");
+            ImGui.TextColored(UiTheme.WarnColor, "The render hook isn't running.");
 
         if (drawUnderUi)
             DrawRenderPassNotes();
@@ -147,17 +137,14 @@ internal sealed class WorldScreenPanel
         if (scenePasses == 0 && passes > 0)
         {
             ImGui.TextColored(UiTheme.WarnColor,
-                "None of this frame's passes bound a depth buffer, so there is nowhere to draw the " +
-                "screen underneath the interface. Untick \"Draw underneath the game UI\" to draw " +
-                "it over the interface instead.");
+                "None of this frame's passes bound a depth buffer.");
         }
 
         if (OverlayDetector.Detected is { } overlay)
         {
             ImGui.TextColored(UiTheme.WarnColor,
                 $"{overlay} is loaded. If the in-world screen flickers while the popout window " +
-                "doesn't, turn off \"Draw under the game UI\" - the panel then draws over the HUD " +
-                "but stays steady.");
+                "doesn't, turn off \"Draw under the game UI\"");
         }
 
         if (worldScreen().SceneHookFallbackReason is { } fallbackReason)
@@ -204,14 +191,6 @@ internal sealed class WorldScreenPanel
             ServiceCollector.PI.SavePluginConfig(config);
         }
 
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "One setting, because the depth conversion and the comparison direction are two " +
-                "consequences of the same fact - setting them separately can hide the panel entirely. " +
-                "Leave this off unless occlusion comes out inverted: the game renders reversed depth.");
-        }
-
         string[] diagnosticNames = ["Off", "Show depth buffer", "Show depth comparison", "Show occlusion test"];
         int diagnostic = config.WorldScreenDiagnostic;
         ImGui.SetNextItemWidth(220);
@@ -219,19 +198,6 @@ internal sealed class WorldScreenPanel
         {
             config.WorldScreenDiagnostic = diagnostic;
             ServiceCollector.PI.SavePluginConfig(config);
-        }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "Depth buffer: paints the game's depth onto the panel. A recognisable scene means\n" +
-                "there is real data to test against.\n\n" +
-                "Depth comparison: scene depth in RED, the panel's own depth in GREEN. Yellow where\n" +
-                "they nearly agree. A flatly red or flatly green panel means the two are on\n" +
-                "different scales, and no comparison direction will work.\n\n" +
-                "Occlusion test: green where the panel would be kept, red where it would be hidden,\n" +
-                "without actually hiding anything. All green means the test never concludes -\n" +
-                "which is why flipping the sign appears to do nothing.");
         }
 
         if (GameSceneCamera.TryGetSceneDepth() is { } sceneDepth)
@@ -266,9 +232,6 @@ internal sealed class WorldScreenPanel
         float distance = (frame.Center - view.CameraPosition).Length();
         ImGui.TextDisabled($"Panel centre: {distance:F2}m away");
 
-        // Kept after the fix rather than removed: a depth of 0.00000 here is exactly the symptom
-        // that took several rounds to identify, and it costs nothing to leave it visible. At ~9m
-        // this should read about 0.011 for the reversed-Z infinite-far projection the game uses.
         Vector4 clip = Vector4.Transform(new Vector4(frame.Center, 1f), view.ViewProjection);
         float ndcZ = clip.W != 0f ? clip.Z / clip.W : float.NaN;
         ImGui.TextDisabled(
@@ -297,15 +260,13 @@ internal sealed class WorldScreenPanel
             controller.GizmoOperation = (GizmoOperation)operation;
 
         ImGui.TextDisabled(controller.IsDraggingGizmo
-            ? "Dragging - the room sees it when you let go."
-            : "Drag the handle on the screen. Roll and non-uniform stretch aren't stored, so they aren't offered.");
+            ? "Dragging the room sees it when you let go."
+            : "Drag the handle on the screen.");
     }
 
     private void DrawPlacementSliders(ScreenPlacementInfo placement)
     {
 #if DEBUG
-        // The panel's real size in metres and how far away it is. From inside an oversized panel
-        // every failure looks the same, so these separate "it's huge" from "it isn't drawing".
         if (getPreviewTexture() is { } sizeTexture && GameSceneCamera.TryGetView() is { } sizeView)
         {
             PanelFrame sized = WorldScreenController.BuildFrame(placement, sizeTexture.Width, sizeTexture.Height);
@@ -315,47 +276,30 @@ internal sealed class WorldScreenPanel
         }
 #endif
 
-        // Re-seed only when the stored placement has actually changed AND nothing is mid-drag.
-        // See the field declarations for why doing this unconditionally broke every slider.
         if (!slidersActive && !ReferenceEquals(placement, sliderSource))
             SeedSliders(placement);
 
-        // Nudges are buttons rather than sliders: they move the panel along its OWN axes, so an
-        // absolute slider would need an anchor that shifts every time it's used, and would snap
-        // back to centre on release. Buttons just apply a step, which is what "it's not quite in
-        // the right place" actually wants.
-        ImGui.TextUnformatted("Nudge:");
-        ImGui.SameLine();
-        if (ImGui.Button("Left")) ApplyPlacement(WorldScreenController.Nudge(placement, -nudgeStepMeters, 0f));
-        ImGui.SameLine();
-        if (ImGui.Button("Right")) ApplyPlacement(WorldScreenController.Nudge(placement, nudgeStepMeters, 0f));
-        ImGui.SameLine();
-        if (ImGui.Button("Forward")) ApplyPlacement(WorldScreenController.Nudge(placement, 0f, nudgeStepMeters));
-        ImGui.SameLine();
-        if (ImGui.Button("Back")) ApplyPlacement(WorldScreenController.Nudge(placement, 0f, -nudgeStepMeters));
-
-        // One column across both groups below, so the geometry and audio rows line up as one grid
-        // rather than two that happen to sit above each other.
         float labelWidth = UiTheme.LabelColumn(
-            "step (m)", "Width (m)", "Height (m)", "Yaw", "Tilt", "Speaker spread (m)",
-            "Audio full volume within (m)", "Audio silent beyond (m)");
-
-        // Its own row rather than trailing the buttons: with a value box beside it now, keeping it
-        // on that line pushed the row past the window's width.
-        UiTheme.ValueSlider(Id("nudgeStep"), "step (m)", ref nudgeStepMeters, 0.1f, 2f, labelWidth, decimals: 1);
+            "Left / right (m)", "Forward / back (m)", "Width (m)", "Height (m)", "Rotate (left/right)", "Tilt (down/up)",
+            "Speaker spread (m)", "Audio full volume within (m)", "Audio silent beyond (m)");
 
         SliderEdit edit = UiTheme.ValueSlider(
-            Id("placeWidth"), "Width (m)", ref sliderWidth, 1f, 40f, labelWidth, decimals: 1);
+            Id("placeSideways"), "Left / right (m)", ref sliderSideways, -PositionRangeMeters, PositionRangeMeters,
+            labelWidth, decimals: 1, tooltip: "Slides the screen sideways, along its own face.");
         bool changed = edit.Committed;
         bool active = edit.Active;
 
-        // Ranges are anchored to the seeded height, not the live one, so the scale doesn't shift
-        // underneath the handle while it's being dragged.
-        //
-        // Guarded against a non-finite value because a slider whose BOUNDS are NaN throws inside
-        // ImGui, taking the whole window's draw with it. The placement reaching here is not
-        // necessarily one this client produced - it can arrive from the room, from another client's
-        // build - so the value cannot simply be trusted to be sane.
+        edit = UiTheme.ValueSlider(
+            Id("placeForward"), "Forward / back (m)", ref sliderForward, -PositionRangeMeters, PositionRangeMeters,
+            labelWidth, decimals: 1, tooltip: "Pushes the screen away from, or pulls it towards, where it was placed from.");
+        changed |= edit.Committed;
+        active |= edit.Active;
+
+        edit = UiTheme.ValueSlider(
+            Id("placeWidth"), "Width (m)", ref sliderWidth, 1f, 40f, labelWidth, decimals: 1);
+        changed |= edit.Committed;
+        active |= edit.Active;
+
         float heightAnchor = sliderSource?.Y ?? placement.Y;
         if (!float.IsFinite(heightAnchor))
             heightAnchor = 0f;
@@ -365,11 +309,11 @@ internal sealed class WorldScreenPanel
         changed |= edit.Committed;
         active |= edit.Active;
 
-        edit = UiTheme.ValueSlider(Id("placeYaw"), "Yaw", ref sliderYaw, -180f, 180f, labelWidth, decimals: 0);
+        edit = UiTheme.ValueSlider(Id("placeYaw"), "Rotate (left/right)", ref sliderYaw, -180f, 180f, labelWidth, decimals: 0);
         changed |= edit.Committed;
         active |= edit.Active;
 
-        edit = UiTheme.ValueSlider(Id("placeTilt"), "Tilt", ref sliderPitch, -60f, 60f, labelWidth, decimals: 0);
+        edit = UiTheme.ValueSlider(Id("placeTilt"), "Tilt (down/up)", ref sliderPitch, -60f, 60f, labelWidth, decimals: 0);
         changed |= edit.Committed;
         active |= edit.Active;
 
@@ -397,30 +341,42 @@ internal sealed class WorldScreenPanel
         if (!changed)
             return;
 
+        ScreenPlacementInfo anchor = positionAnchor ?? placement;
+        ScreenPlacementInfo moved = WorldScreenController.Nudge(anchor, sliderSideways, sliderForward);
+        float yaw = sliderYaw * MathF.PI / 180f;
+
+        bool turned = MathF.Abs(yaw - anchor.Yaw) > 0.0001f;
+
         ScreenPlacementInfo updated = placement with
         {
+            X = moved.X,
+            Z = moved.Z,
             Y = sliderHeight,
-            Yaw = sliderYaw * MathF.PI / 180f,
+            Yaw = yaw,
             Pitch = sliderPitch * MathF.PI / 180f,
             WidthMeters = sliderWidth,
             SpeakerSpread = sliderSpread,
             FalloffStart = sliderFalloffStart,
 
-            // Keeping end strictly past start avoids a zero-width falloff band, where gain would
-            // step from full to silent at one exact distance and click as you crossed it.
             FalloffEnd = MathF.Max(sliderFalloffEnd, sliderFalloffStart + 1f),
             Version = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         };
 
-        // Adopt the committed value as the new seed straight away. Waiting for the relay's echo
-        // would leave a window where the next frame re-seeds from the pre-edit placement and the
-        // handle visibly snaps back before jumping forward again.
-        SeedSliders(updated);
+        SeedSliders(updated, keepPositionAnchor: !turned);
         ApplyPlacement(updated);
     }
 
-    private void SeedSliders(ScreenPlacementInfo placement)
+    private void SeedSliders(ScreenPlacementInfo placement, bool keepPositionAnchor = false)
     {
+        keepPositionAnchor |= positionAnchor is not null && placement.Version == sliderSource?.Version;
+
+        if (!keepPositionAnchor || positionAnchor is null)
+        {
+            positionAnchor = placement;
+            sliderSideways = 0f;
+            sliderForward = 0f;
+        }
+
         sliderSource = placement;
         sliderWidth = placement.WidthMeters;
         sliderHeight = placement.Y;

@@ -71,7 +71,7 @@ internal static class MonitorNameHelper
         public uint refreshRateNumerator;
         public uint refreshRateDenominator;
         public uint scanLineOrdering;
-        public int targetAvailable; // BOOL
+        public int targetAvailable;
         public uint statusFlags;
     }
 

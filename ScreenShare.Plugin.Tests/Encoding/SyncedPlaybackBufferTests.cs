@@ -8,9 +8,6 @@ public class SyncedPlaybackBufferTests
     private const int SampleRate = 48000;
     private const int Channels = 2;
 
-    // 48000 * 2ch * 4 bytes = 384000 B/s, so exactly 384 bytes per millisecond and 7680 per 20ms
-    // Opus frame. Every figure below is chosen to stay integral, so an assertion that fails is a
-    // real defect rather than rounding.
     private const int BytesPerMs = 384;
     private const int PacketBytes = 20 * BytesPerMs;
 
@@ -69,7 +66,6 @@ public class SyncedPlaybackBufferTests
         for (int i = 0; i < 10; i++)
             buffer.Add(1000 + (i * 20), Packet((byte)i));
 
-        // The device takes 200ms of audio up front but has only played 60ms of it.
         Drain(buffer, 200);
 
         Assert.Equal(1060, buffer.GetPtsAtPlayedBytes(60 * BytesPerMs));
@@ -81,7 +77,6 @@ public class SyncedPlaybackBufferTests
         SyncedPlaybackBuffer buffer = NewBuffer();
         buffer.Add(1000, Packet(1));
 
-        // Asks for 60ms with only 20ms available: 40ms of the result is zero-filled silence.
         Drain(buffer, 60);
 
         Assert.Equal(1020, buffer.GetPtsAtPlayedBytes(20 * BytesPerMs));
@@ -95,9 +90,8 @@ public class SyncedPlaybackBufferTests
     {
         SyncedPlaybackBuffer buffer = NewBuffer();
         buffer.Add(1000, Packet(1));
-        Drain(buffer, 60); // 20ms of content, then 40ms of silence
+        Drain(buffer, 60);
 
-        // Content resumes 500ms later on the sender's timeline - a gap, not a continuation.
         buffer.Add(1500, Packet(2));
         Drain(buffer, 20);
 
@@ -110,7 +104,7 @@ public class SyncedPlaybackBufferTests
     {
         SyncedPlaybackBuffer buffer = NewBuffer();
         buffer.Add(1000, Packet(1));
-        buffer.Add(2000, Packet(2)); // ~1s of packets never arrived
+        buffer.Add(2000, Packet(2));
         Drain(buffer, 40);
 
         Assert.Equal(1010, buffer.GetPtsAtPlayedBytes(10 * BytesPerMs));
@@ -128,7 +122,6 @@ public class SyncedPlaybackBufferTests
         Assert.Equal(40, buffer.BufferedMilliseconds);
         Assert.Equal(20, buffer.DroppedMilliseconds);
 
-        // The survivors are the NEWEST two. BufferedWaveProvider kept the other end.
         byte[] played = Drain(buffer, 40);
         Assert.Equal(2, played[0]);
         Assert.Equal(3, played[^1]);
@@ -143,8 +136,6 @@ public class SyncedPlaybackBufferTests
         buffer.Add(1040, Packet(3));
         Drain(buffer, 40);
 
-        // Playback starts at the second packet, so that is what the clock must report - not the
-        // PTS of audio that was thrown away.
         Assert.Equal(1020, buffer.GetPtsAtPlayedBytes(0));
     }
 
@@ -165,7 +156,6 @@ public class SyncedPlaybackBufferTests
     {
         SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 40);
 
-        // Three seconds of audio arriving while ffmpeg is still starting up.
         for (int i = 0; i < 150; i++)
             buffer.Add(1000 + (i * 20), Packet((byte)(i % 250)));
 
@@ -173,8 +163,6 @@ public class SyncedPlaybackBufferTests
 
         Drain(buffer, 40);
 
-        // 150 packets 20ms apart from 1000 end at 1000 + 149*20 = 3980, so the surviving two are
-        // 3960 and 3980 - the live edge, three seconds past where playback would otherwise start.
         Assert.Equal(3960, buffer.GetPtsAtPlayedBytes(0));
         Assert.Equal(3980, buffer.GetPtsAtPlayedBytes(20 * BytesPerMs));
     }
@@ -191,7 +179,7 @@ public class SyncedPlaybackBufferTests
 
         Assert.Equal(scratch.Length, read);
         Assert.Equal(1, scratch[0]);
-        Assert.Equal(0, scratch[^1]); // the shortfall is zero-filled, not left as stale bytes
+        Assert.Equal(0, scratch[^1]);
     }
 
     [Fact]
@@ -204,7 +192,7 @@ public class SyncedPlaybackBufferTests
         Array.Fill(scratch, (byte)0xEE);
         buffer.Read(scratch, 16, 20 * BytesPerMs);
 
-        Assert.Equal(0xEE, scratch[15]); // untouched
+        Assert.Equal(0xEE, scratch[15]);
         Assert.Equal(7, scratch[16]);
         Assert.Equal(7, scratch[^1]);
     }
@@ -215,7 +203,7 @@ public class SyncedPlaybackBufferTests
         SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 200);
         long playedBytes = 0;
 
-        for (int i = 0; i < 3_000; i++) // 60 seconds of 20ms packets
+        for (int i = 0; i < 3_000; i++)
         {
             buffer.Add(1000 + (i * 20), Packet((byte)(i % 250)));
             Drain(buffer, 20);
@@ -228,10 +216,6 @@ public class SyncedPlaybackBufferTests
         Assert.Equal(0, buffer.DroppedMilliseconds);
     }
 
-    // waveOutGetPosition reports its byte count in an MMTIME DWORD, so the position an output
-    // device gives back rolls over every 2^32 bytes - three hours and six minutes of 48kHz stereo
-    // float. The segment anchors inside the buffer are keyed on a real 64-bit handed-byte counter
-    // that never rolls over, so past this mark a raw device position is ~4GB adrift of them.
     private const long WaveOutPositionPeriod = 1L << 32;
 
     [Fact]
@@ -242,10 +226,6 @@ public class SyncedPlaybackBufferTests
 
         SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 10_000);
 
-        // Both arrays are reused on purpose. Each chunk is fully drained before the next is added,
-        // so nothing aliases, and it keeps a test that has to move 4GB of audio down to memcpy.
-        // ChunkBytes stays under the adaptive target's own floor (half the configured depth) so
-        // nothing is ever trimmed and the PTS timeline below is exactly continuous.
         byte[] pcm = new byte[ChunkBytes];
         byte[] scratch = new byte[ChunkBytes];
 
@@ -259,16 +239,12 @@ public class SyncedPlaybackBufferTests
             ptsMs += ChunkMs;
         }
 
-        // The device sits its own buffer depth behind whatever it has been handed, and reports that
-        // position modulo 2^32 - by now a number in the megabytes against a handedBytes over 4GB.
         long truePlayedBytes = handedBytes - (100 * BytesPerMs);
         long reportedPlayedBytes = truePlayedBytes % WaveOutPositionPeriod;
         Assert.True(reportedPlayedBytes < truePlayedBytes, "the device position has to have wrapped or this proves nothing");
 
         Assert.Equal(1000 + (truePlayedBytes / BytesPerMs), buffer.GetPtsAtPlayedBytes(reportedPlayedBytes));
 
-        // And a wrapped position must still be able to REACH a later anchor, not just extrapolate
-        // from the one already in hand - a jump like this is what an upstream drop looks like.
         long jumpedPtsMs = ptsMs + 60_000;
         buffer.Add(jumpedPtsMs, pcm);
         buffer.Read(scratch, 0, scratch.Length);
@@ -276,8 +252,6 @@ public class SyncedPlaybackBufferTests
         long insideJumpedChunk = handedBytes + (100 * BytesPerMs);
         Assert.Equal(jumpedPtsMs + 100, buffer.GetPtsAtPlayedBytes(insideJumpedChunk % WaveOutPositionPeriod));
     }
-
-    // --- Adaptive depth ---
 
     private static byte[] TonePacket(float amplitude = 0.5f)
     {
@@ -306,7 +280,7 @@ public class SyncedPlaybackBufferTests
     {
         SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 200);
 
-        Drain(buffer, 20); // nothing buffered - underruns
+        Drain(buffer, 20);
 
         Assert.True(buffer.TargetMilliseconds > 200, $"expected growth, got {buffer.TargetMilliseconds}ms");
     }
@@ -329,7 +303,6 @@ public class SyncedPlaybackBufferTests
         Drain(buffer, 20);
         int inflated = buffer.TargetMilliseconds;
 
-        // 6 seconds of clean 20ms reads, past the narrowing interval.
         for (int i = 0; i < 300; i++)
         {
             buffer.Add(1000 + (i * 20), TonePacket());
@@ -339,8 +312,6 @@ public class SyncedPlaybackBufferTests
         Assert.True(buffer.TargetMilliseconds < inflated,
             $"expected narrowing from {inflated}ms, got {buffer.TargetMilliseconds}ms");
     }
-
-    // --- Underrun concealment ---
 
     [Fact]
     public void Underrun_AfterRealAudio_ConcealsWithSignalRatherThanSilence()
@@ -361,7 +332,7 @@ public class SyncedPlaybackBufferTests
         buffer.Add(1000, TonePacket(0.5f));
         Drain(buffer, 20);
 
-        Drain(buffer, 200); // well past the fade window
+        Drain(buffer, 200);
         float[] late = AsSamples(Drain(buffer, 20));
 
         Assert.All(late, sample => Assert.True(MathF.Abs(sample) < 0.001f, $"expected silence, got {sample}"));

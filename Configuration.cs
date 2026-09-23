@@ -14,17 +14,19 @@ public sealed class Configuration : IPluginConfiguration
 
     public string DisplayName { get; set; } = string.Empty;
 
-    public int VideoResolutionIndex { get; set; } = 1; // 720p
+    public int VideoResolutionIndex { get; set; } = 1;
 
     public int VideoBitrateKbps { get; set; } = 1500;
 
     public int VideoFpsTarget { get; set; } = 30;
 
-    public int VideoCodecIndex { get; set; } // H264
+    public int VideoCodecIndex { get; set; }
 
     public int AudioBitrateKbps { get; set; } = 32;
 
     public bool AutoStartAudioWithStream { get; set; } = true;
+
+    public bool MatchAudioToVideoSource { get; set; } = true;
 
     public int MonitorIndex { get; set; }
 
@@ -51,6 +53,10 @@ public sealed class Configuration : IPluginConfiguration
     public bool WorldScreenStandardDepth { get; set; }
 
     public bool SpatialAudio { get; set; } = true;
+
+    public bool AutoWatchStreams { get; set; }
+
+    public bool ShowWorldScreen { get; set; } = true;
 
     public bool Migrate()
     {

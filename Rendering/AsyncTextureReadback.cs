@@ -21,8 +21,6 @@ public sealed class AsyncTextureReadback : IDisposable
 
     public int Height { get; }
 
-    // Tightly packed size of one frame in the destination buffer: 4 bytes per pixel for BGRA,
-    // or a full-size Y plane followed by a half-height interleaved UV plane for NV12.
     public int FrameSize => format == Format.NV12 ? Width * Height * 3 / 2 : Width * Height * 4;
 
     public AsyncTextureReadback(Device device, int width, int height, Format format = Format.B8G8R8A8_UNorm)
@@ -95,8 +93,6 @@ public sealed class AsyncTextureReadback : IDisposable
         {
             if (format == Format.NV12)
             {
-                // A mapped NV12 surface is one allocation: the UV plane starts straight after
-                // Height rows of the Y plane and shares its row pitch.
                 CopyPlane(box.DataPointer, box.RowPitch, destination, 0, Width, Height);
                 CopyPlane(box.DataPointer + box.RowPitch * Height, box.RowPitch, destination, Width * Height, Width, Height / 2);
             }

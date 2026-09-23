@@ -254,10 +254,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
     }
 
-    // Only records the request; the pump thread applies it before its next frame. ICodecAPI can't
-    // be called from just any thread: its RCW belongs to the MTA it was created in, and the MFT
-    // isn't marshallable, so a call from the game's UI thread (STA) - the settings slider - fails
-    // with E_NOINTERFACE. The pump thread is MTA.
     public void SetBitrate(int bitrateKbps)
     {
         if (codecApi is not null)
@@ -413,7 +409,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
         catch (Exception)
         {
-            // Ignore; fall back to last fed PTS.
         }
 
         return Interlocked.Read(ref lastFedPtsMs);
@@ -430,7 +425,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
         catch (Exception)
         {
-            // Already torn down, or in a bad state; the Join below still bounds the wait.
         }
 
         if (!pumpThread.Join(2000))
@@ -447,7 +441,6 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
         catch (Exception)
         {
-            // Best effort; the encoder is being released either way.
         }
 
         events.Dispose();

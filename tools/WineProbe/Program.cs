@@ -3,16 +3,6 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 
-// Settles the assumptions Linux support is built on, from inside a Wine prefix, without the game.
-//
-// Every check here is one the plan depends on and none of which can be answered from Windows. They
-// are deliberately in a binary that links nothing - not the plugin, not SharpDX, not Dalamud -
-// because each of those is itself in question on Wine, and a probe that cannot start tells you
-// nothing.
-//
-// Run it as:  wine WineProbe.exe
-// The loopback check needs a listener on the LINUX side first:  nc -l -p 47823
-
 int failures = 0;
 
 Console.WriteLine("WineProbe - ScreenShare Linux/Wine assumption checks");
@@ -68,14 +58,10 @@ Console.WriteLine(failures == 0 ? "All checks passed." : $"{failures} check(s) F
 
 return failures == 0 ? 0 : 1;
 
-// ---------------------------------------------------------------------------------------------
-
 static bool CheckWine()
 {
     Section("Wine detection");
 
-    // Exactly the check Services/PlatformInfo.IsWine will ship, so a pass here is evidence about
-    // the real thing rather than about some other way of asking the same question.
     nint ntdll = NativeMethods.GetModuleHandleW("ntdll.dll");
     if (ntdll == nint.Zero)
     {
@@ -138,8 +124,6 @@ static bool CheckLoopback(string target)
 
         Line("connect", $"OK in {stopwatch.ElapsedMilliseconds}ms");
 
-        // A recognisable payload so the tester can confirm on the netcat side that the bytes
-        // arrived intact, not merely that a socket opened.
         byte[] payload = Encoding.UTF8.GetBytes("SCREENSHARE-WINEPROBE-HELLO\n");
         NetworkStream stream = client.GetStream();
         stream.Write(payload, 0, payload.Length);
@@ -147,8 +131,6 @@ static bool CheckLoopback(string target)
         Line("write", $"OK, {payload.Length} bytes sent");
         Console.WriteLine("                     (the netcat window should now show SCREENSHARE-WINEPROBE-HELLO)");
 
-        // A reply is optional - plain netcat sends nothing back unless the tester types. Its
-        // absence proves nothing either way, so it must not be able to fail the check.
         client.ReceiveTimeout = 2000;
         try
         {
@@ -266,8 +248,6 @@ internal static class NativeMethods
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern nint GetModuleHandleW(string moduleName);
 
-    // Deliberately Ansi: GetProcAddress takes a char* regardless of the caller's charset, and
-    // declaring it Unicode silently looks up a mangled name and finds nothing.
     [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true, SetLastError = true)]
     internal static extern nint GetProcAddress(nint module, string procName);
 

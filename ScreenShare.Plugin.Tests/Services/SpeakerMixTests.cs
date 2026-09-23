@@ -7,16 +7,12 @@ public class SpeakerMixTests
 {
     private const float Tolerance = 0.001f;
 
-    // A listener standing back from a screen whose speakers flank it, facing it head on. +Z is
-    // "forward" here, matching the convention SpeakerMix falls back to.
     private static readonly Vector3 Forward = new(0f, 0f, 1f);
     private static readonly Vector3 SpeakerLeft = new(-3f, 0f, 10f);
     private static readonly Vector3 SpeakerRight = new(3f, 0f, 10f);
 
     private static void AssertClose(float expected, float actual, string because)
         => Assert.True(MathF.Abs(expected - actual) < Tolerance, $"{because}: expected ~{expected}, got {actual}");
-
-    // --- DistanceGain ---
 
     [Theory]
     [InlineData(0f)]
@@ -52,8 +48,6 @@ public class SpeakerMixTests
         AssertClose(1f, SpeakerMix.DistanceGain(start, start, end), "at the cutoff");
         AssertClose(0f, SpeakerMix.DistanceGain(start + 0.1f, start, end), "past the cutoff");
     }
-
-    // --- Compute ---
 
     [Fact]
     public void Compute_FacingTheScreen_KeepsTheStereoImageTheRightWayRound()

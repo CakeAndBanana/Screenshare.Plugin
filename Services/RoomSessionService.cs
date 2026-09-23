@@ -74,9 +74,6 @@ public sealed class RoomSessionService : IDisposable
 
     public bool IsRefreshingDirectory => Volatile.Read(ref directoryRefreshInFlight) == 1;
 
-    /// <summary>How long until the room list refreshes itself again, for the lobby to count down
-    /// on its Refresh tab. Zero when a refresh is due, has never run, or cannot run because the
-    /// connection is down - all cases where there is no next time worth naming.</summary>
     public TimeSpan TimeUntilDirectoryRefresh
     {
         get
@@ -90,6 +87,8 @@ public sealed class RoomSessionService : IDisposable
     }
 
     public event Action<ActiveStreamerInfo>? StreamerWentLive;
+
+    public event Action<ActiveStreamerInfo>? StreamerAlreadyLive;
 
     public IReadOnlyList<RoomListing> PublicRooms
         => directory is { } current
@@ -174,8 +173,13 @@ public sealed class RoomSessionService : IDisposable
                 ? $"{streamer.DisplayName} started streaming"
                 : $"{streamer.DisplayName} is already streaming");
 
-            if (hasStreamerBaseline && streamer.ConnectionId != ConnectionId)
+            if (streamer.ConnectionId == ConnectionId)
+                continue;
+
+            if (hasStreamerBaseline)
                 StreamerWentLive?.Invoke(streamer);
+            else
+                StreamerAlreadyLive?.Invoke(streamer);
         }
 
         foreach (ActiveStreamerInfo streamer in previous)
@@ -427,8 +431,6 @@ public sealed class RoomSessionService : IDisposable
                 _ = RejoinAfterReconnectAsync();
         };
 
-        // Automatic reconnect gave up. If that was a room's relay rather than the main one, the
-        // main relay may well still be up - drop back to its lobby instead of the connect card.
         client.Closed += () =>
         {
             bool wasInRoom = InRoom;
@@ -439,10 +441,6 @@ public sealed class RoomSessionService : IDisposable
         };
     }
 
-    /// <summary>Creating or joining a room can move this client from the main relay (the one the
-    /// user entered) onto the relay hosting that room. Once the room is over, move back, so the
-    /// next Create goes through the main relay's placement again rather than landing wherever
-    /// the last room happened to be. A no-op when already on the main relay.</summary>
     private void ReturnToLobby()
     {
         string lobbyUrl = ServiceCollector.Config.RelayUrl;
@@ -451,8 +449,6 @@ public sealed class RoomSessionService : IDisposable
 
         IsConnecting = true;
 
-        // Off the SignalR callback that got us here: switching disposes the connection that
-        // callback is running on.
         _ = Task.Run(async () =>
         {
             try
@@ -584,7 +580,6 @@ public sealed class RoomSessionService : IDisposable
         }
     }
 
-    /// <summary>Saves the new name and, in a room, tells everyone there. Your ID doesn't change.</summary>
     public void UpdateDisplayName(string displayName)
     {
         Configuration config = ServiceCollector.Config;

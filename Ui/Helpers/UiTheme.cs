@@ -159,9 +159,6 @@ internal static class UiTheme
 
     public static void Heading(string text, float scale = PluginFonts.HeadingScale, Vector4? color = null)
     {
-        // A font actually built at this size, rather than the old Dummy-plus-AddText-at-a-bigger-
-        // size trick: that stretched glyphs baked at the default size and came out blurry. With a
-        // real font pushed, this is just ordinary text.
         using (PluginFonts.Push(scale))
         {
             if (color is { } c)
@@ -171,12 +168,6 @@ internal static class UiTheme
         }
     }
 
-    /// <summary>A large icon-and-label action button.
-    ///
-    /// Drawn by hand rather than with Dalamud's ImGuiComponents.IconButtonWithText, which pushes
-    /// its own font and draws the label through the draw list at a size it computes from the frame
-    /// height - so it ignores a font pushed around it, and stretches glyphs baked at the default
-    /// size. That is the blur; a font actually built at the label size is the fix.</summary>
     public static bool BigActionButton(
         string id, FontAwesomeIcon icon, string label, Vector2 size,
         Vector4? color = null, float labelScale = PluginFonts.ButtonLabelScale)
@@ -191,7 +182,6 @@ internal static class UiTheme
         using (PluginFonts.Push(labelScale))
             labelSize = ImGui.CalcTextSize(label);
 
-        // Measured with the fonts that actually draw, so the icon and label centre as one unit.
         float gap = Px(8);
         float left = min.X + MathF.Max(Px(6), (size.X - iconSize.X - gap - labelSize.X) / 2);
         uint textColor = ImGui.GetColorU32(ImGuiCol.Text);
@@ -202,8 +192,6 @@ internal static class UiTheme
 
         using (PluginFonts.Push(labelScale))
         {
-            // The pushed font's OWN size. Passing a multiple of it here is precisely the stretch
-            // this method exists to avoid.
             drawList.AddText(
                 ImGui.GetFont(), ImGui.GetFontSize(),
                 new Vector2(left + iconSize.X + gap, min.Y + ((size.Y - labelSize.Y) / 2)),

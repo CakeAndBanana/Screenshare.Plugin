@@ -13,7 +13,6 @@ public enum GpuVendor
 
 public static class GpuVendorDetector
 {
-    // Standard PCI vendor IDs.
     private const int NvidiaVendorId = 0x10DE;
     private const int AmdVendorId = 0x1002;
     private const int IntelVendorId = 0x8086;

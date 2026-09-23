@@ -26,9 +26,6 @@ public class NumericEntryTests
         Assert.Equal(0.85f, value, 4);
     }
 
-    /// <summary>Both separators have to work under a comma-decimal culture: the widget seeds its
-    /// text box from invariant-formatted output, so rejecting "0.85" there would make a value
-    /// unre-enterable exactly as it was displayed.</summary>
     [Theory]
     [InlineData("0,85")]
     [InlineData("0.85")]
@@ -64,9 +61,6 @@ public class NumericEntryTests
     [InlineData("-")]
     [InlineData("abc")]
     [InlineData("1.2.3")]
-    // Accepted by float.TryParse under NumberStyles.Float, and a non-finite value reaching ImGui as
-    // a slider bound throws there - so these are rejected rather than clamped. "1e40" is the same
-    // case arrived at differently: it overflows float to infinity rather than failing to parse.
     [InlineData("NaN")]
     [InlineData("Infinity")]
     [InlineData("-Infinity")]
@@ -90,8 +84,6 @@ public class NumericEntryTests
         Assert.Equal(expected, value);
     }
 
-    /// <summary>Clamping happens before the cast, so a value far outside int range cannot overflow
-    /// into a bogus number inside the allowed span.</summary>
     [Theory]
     [InlineData("999999999999", 64)]
     [InlineData("-999999999999", 8)]
@@ -112,8 +104,6 @@ public class NumericEntryTests
         Assert.Equal("-300", NumericEntry.Format(-300f, 0, string.Empty));
     }
 
-    /// <summary>Formatting is invariant regardless of culture, matching what ImGui's own
-    /// printf-formatted sliders show elsewhere in the plugin.</summary>
     [Fact]
     public void Format_StaysInvariantUnderCommaCulture()
     {

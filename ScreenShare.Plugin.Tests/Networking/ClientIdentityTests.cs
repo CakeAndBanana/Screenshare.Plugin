@@ -4,9 +4,6 @@ namespace ScreenShare.Plugin.Tests.Networking;
 
 public class ClientIdentityTests
 {
-    /// <summary>Same vector as the relay's ClientIdentity test. The relay computes everyone else's
-    /// ID and this copy computes your own, so if the two drift apart you'd see a different ID for
-    /// yourself than everyone else sees.</summary>
     [Fact]
     public void ToPublicId_MatchesTheRelaysPinnedVector()
     {

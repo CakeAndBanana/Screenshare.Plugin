@@ -19,9 +19,6 @@ public sealed class MediaSocketClient : IAsyncDisposable
     private const int SendQueueCapacity = 512;
     private const int AudioQueueCapacity = 256;
 
-    // Video chunks - the bulk of outbound traffic by byte volume, and the one queue that's meant
-    // to absorb backpressure by dropping under load (that's the acceptable, by-design tradeoff
-    // for video: a dropped chunk is comparatively unnoticeable, recoverable by the next frame).
     private readonly Channel<byte[]> sendQueue = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(SendQueueCapacity)
     {
         FullMode = BoundedChannelFullMode.DropOldest,
@@ -29,13 +26,6 @@ public sealed class MediaSocketClient : IAsyncDisposable
         SingleWriter = false,
     });
 
-    // Audio packets - kept in their OWN queue, separate from video, and drained with priority
-    // over it. They used to share sendQueue with video chunks, which are far larger/more frequent
-    // by byte volume - under real network backpressure, video traffic could (and did, in
-    // practice) crowd out and evict audio packets via DropOldest, and a dropped audio packet is a
-    // far more perceptible glitch than a dropped video chunk. Still bounded/drop-oldest itself
-    // (audio CAN tolerate occasional loss, unlike metadata below) - just no longer competing with
-    // video for the same limited queue capacity.
     private readonly Channel<byte[]> audioQueue = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(AudioQueueCapacity)
     {
         FullMode = BoundedChannelFullMode.DropOldest,
@@ -43,12 +33,6 @@ public sealed class MediaSocketClient : IAsyncDisposable
         SingleWriter = false,
     });
 
-    // VideoMetadata/AudioMetadata are small, sent at most a couple of times per session, and MUST
-    // NOT be lost - unlike a dropped chunk/packet (the next one arrives shortly and nothing is
-    // permanently broken), losing the one-time metadata message means the receiving side can
-    // never construct a decoder at all, no matter how many chunks/packets arrive afterward. This
-    // queue is unbounded and drained with priority over both queues above so that can't happen:
-    // metadata never waits behind, or gets evicted by, a backlog of routine traffic.
     private readonly Channel<byte[]> reliableQueue = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions
     {
         SingleReader = true,
@@ -133,9 +117,6 @@ public sealed class MediaSocketClient : IAsyncDisposable
             return;
         }
 
-        // DropOldest's Writer.TryWrite always succeeds (it evicts to make room), so it can't
-        // itself signal that a drop happened - checking the queue depth just before writing is
-        // the cheap approximation.
         if (sendQueue.Reader.Count >= SendQueueCapacity)
             Interlocked.Increment(ref droppedMessages);
 
@@ -178,12 +159,6 @@ public sealed class MediaSocketClient : IAsyncDisposable
         {
             while (true)
             {
-                // Strict priority order: reliableQueue (metadata) fully drains before a single
-                // audio packet goes out, and audioQueue fully drains before a single video chunk
-                // goes out. Video is the only queue that ever actually backs up in practice (it's
-                // by far the highest byte volume), so in the common/degraded case this reduces to
-                // "audio and metadata always go out immediately, video absorbs the backpressure" -
-                // exactly the intended tradeoff.
                 while (reliableQueue.Reader.TryRead(out byte[]? reliableMessage))
                 {
                     if (ws.State != WebSocketState.Open)
@@ -210,10 +185,6 @@ public sealed class MediaSocketClient : IAsyncDisposable
                     continue;
                 }
 
-                // Nothing ready on any queue right now - wait for whichever gets an item first.
-                // DisposeAsync always cancels cancellationToken before completing any channel
-                // writer, so shutdown surfaces as an OperationCanceledException here rather than
-                // this loop ever seeing all three channels merely "completed".
                 Task<bool> reliableWait = reliableQueue.Reader.WaitToReadAsync(cancellationToken).AsTask();
                 Task<bool> audioWait = audioQueue.Reader.WaitToReadAsync(cancellationToken).AsTask();
                 Task<bool> sendWait = sendQueue.Reader.WaitToReadAsync(cancellationToken).AsTask();
@@ -294,18 +265,17 @@ public sealed class MediaSocketClient : IAsyncDisposable
             }
             catch
             {
-                // best-effort - the other side may already be gone
             }
         }
 
         if (sendLoopTask is not null)
         {
-            try { await sendLoopTask.ConfigureAwait(false); } catch { /* loop logs its own faults */ }
+            try { await sendLoopTask.ConfigureAwait(false); } catch { }
         }
 
         if (receiveLoopTask is not null)
         {
-            try { await receiveLoopTask.ConfigureAwait(false); } catch { /* loop logs its own faults */ }
+            try { await receiveLoopTask.ConfigureAwait(false); } catch { }
         }
 
         socket?.Dispose();

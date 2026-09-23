@@ -46,8 +46,6 @@ public static class VideoEncoderFactory
             gameAdapterDevice, capture, ffmpegExePath, sessionClock, targetHeight, bitrateKbps, fps, codec);
     }
 
-    // The ffmpeg tiers: libavcodec in-process first, then ffmpeg.exe as a child process when the
-    // shared libraries are missing or the encoder won't open through them.
     public static IVideoEncoder CreateWithoutMediaFoundation(
         GameAdapterDevice gameAdapterDevice,
         ICaptureSource capture,

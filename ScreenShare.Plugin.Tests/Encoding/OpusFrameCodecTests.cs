@@ -50,9 +50,6 @@ public class OpusFrameCodecTests
     [Fact]
     public void Feed_AcrossMultipleCallsSpanningAFrameBoundary_StillRaisesPacketEncoded()
     {
-        // Feed() has to handle a frame boundary landing mid-call correctly - this is exactly
-        // the shape of real WASAPI delivery, which hands over arbitrary-sized buffers that
-        // rarely align to Opus's fixed 20ms frame size.
         var encoder = new OpusFrameEncoder(SampleRate, Channels);
         int packetCount = 0;
         encoder.PacketEncoded += (_, _) => packetCount++;
@@ -83,7 +80,7 @@ public class OpusFrameCodecTests
         byte[]? packet = null;
         encoder.PacketEncoded += (_, p) => packet = p;
 
-        encoder.Feed(0, new float[encoder.FrameSizePerChannel * Channels]); // all zeros
+        encoder.Feed(0, new float[encoder.FrameSizePerChannel * Channels]);
 
         Assert.NotNull(packet);
         float[] decoded = decoder.Decode(packet);

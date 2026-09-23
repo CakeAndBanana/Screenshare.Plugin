@@ -39,7 +39,7 @@ env:
   RELEASE_REPO: CakeAndBanana/Screenshare
 
   # BtbN's ffmpeg-n7.1 GPL *shared* build - the exact source revision this plugin was developed and
-  # tested against (see README, "Building from source"). Pinned rather than tracking "latest"
+  # tested against (see BUILDING.md). Pinned rather than tracking "latest"
   # because the hardware encoder paths (NVENC/AMF/QSV) are sensitive to the ffmpeg version, and
   # because the plugin loads these DLLs in-process through FFmpeg.AutoGen 7.1.1, which only binds to
   # the 7.1 line (avcodec-61). BtbN's `latest` tag has already moved on to n8.1/n9.0. BtbN does

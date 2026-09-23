@@ -6,16 +6,6 @@ namespace MediaProbe;
 
 internal static class Duplication
 {
-    // DuplicateOutput's failure codes say different things and are routinely conflated:
-    //
-    //   E_INVALIDARG                       the device is not on the adapter that OWNS this output.
-    //   DXGI_ERROR_NOT_CURRENTLY_AVAILABLE something else already holds the one duplication slot.
-    //   E_ACCESSDENIED                     protected content, or a desktop switch in progress.
-    //   DXGI_ERROR_UNSUPPORTED             the adapter genuinely cannot duplicate.
-    //
-    // The plugin reports E_INVALIDARG as "this GPU does not support it", which is the one reading
-    // that code does NOT mean. It means the pairing is wrong, so this probe pairs every output with
-    // a device on its own adapter and reports what actually comes back.
     private const int InvalidArg = unchecked((int)0x80070057);
     private const int NotCurrentlyAvailable = unchecked((int)0x887A0022);
     private const int AccessDenied = unchecked((int)0x80070005);
@@ -25,10 +15,6 @@ internal static class Duplication
 
     public static int Run()
     {
-        // Whether the game is running changes what a pass here MEANS, and it is too easy to forget
-        // which way round a given run was done. Out of process with the game closed only proves the
-        // hardware works; out of process with the game OPEN proves the game's presence is not
-        // blocking the outputs, which is the question that actually matters.
         System.Diagnostics.Process[] game = System.Diagnostics.Process.GetProcessesByName("ffxiv_dx11");
         if (game.Length == 0)
             game = System.Diagnostics.Process.GetProcessesByName("ffxiv");
@@ -95,10 +81,6 @@ internal static class Duplication
 
         int succeeded = 0;
 
-        // Every device-creation flag combination the plugin has used, because the plugin's device
-        // is not created the way a minimal one is: MediaFoundation needs VideoSupport, and the
-        // shared capture/encode threads need multithread protection. Either could in principle be
-        // what duplication objects to, and guessing which is how this stayed unsolved.
         (string Label, DeviceCreationFlags Flags, bool Multithreaded)[] configurations =
         {
             ("bare", DeviceCreationFlags.None, false),
@@ -124,10 +106,6 @@ internal static class Duplication
             Console.WriteLine();
         }
 
-        // The plugin does not create its device at the driver's best feature level - it copies the
-        // GAME's, so that the shared textures it hands the game's device are compatible. Desktop
-        // Duplication has its own feature-level floor, so a game running below it would make the
-        // plugin's device unable to duplicate while an ordinary device on the same GPU can.
         Console.WriteLine("Same adapter, by feature level:");
         Console.WriteLine();
 
@@ -156,10 +134,6 @@ internal static class Duplication
                     multithreaded: true, out _, level));
         }
 
-        // The decisive test for the in-game failure. The plugin does not enumerate outputs from its
-        // own factory - it takes the adapter off the GAME's D3D device and enumerates from that, so
-        // the IDXGIOutput belongs to the game's DXGI factory while the device belongs to another.
-        // Same GPU, same LUID, different factory. This reproduces that pairing.
         Console.WriteLine("Output and device from DIFFERENT DXGI factories (same GPU):");
         Console.WriteLine();
 
@@ -179,10 +153,6 @@ internal static class Duplication
                 TryDuplicate(adapterB, outputFromB, DeviceCreationFlags.BgraSupport, multithreaded: false, out _));
         }
 
-        // Cross-pairing on purpose: with more than one adapter, duplicating an output using the
-        // WRONG adapter's device is what produces E_INVALIDARG. Showing it next to the correct
-        // pairing above is what distinguishes "this machine cannot duplicate" from "the plugin is
-        // asking with the wrong device", which is the whole question.
         if (factory.GetAdapterCount1() > 1)
         {
             Console.WriteLine();

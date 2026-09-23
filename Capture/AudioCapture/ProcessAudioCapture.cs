@@ -224,7 +224,6 @@ public sealed class ProcessAudioCapture : IAudioSource
         }
         catch (OperationCanceledException)
         {
-            // normal shutdown path
         }
     }
 
@@ -241,7 +240,6 @@ public sealed class ProcessAudioCapture : IAudioSource
         }
         catch
         {
-            // Ignore exceptions during stop; we're shutting down anyway.
         }
 
         Marshal.ReleaseComObject(captureClient);

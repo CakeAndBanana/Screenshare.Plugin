@@ -6,14 +6,6 @@ using SharpDX.Direct3D11;
 using static ScreenShare.Plugin.Encoding.Interop.MediaFoundationInterop;
 using Device = SharpDX.Direct3D11.Device;
 
-// Diagnostics for the plugin's Media Foundation paths, outside the game.
-//
-// Everything here exists because a media pipeline's failures look identical from the outside - no
-// picture, or frames going missing - and each of these separates a different cause. Every finding
-// they have produced so far was invisible to reading the code: encoder MFT flags that were silently
-// wrong, decoder output textures that are padded and array-backed, an ffmpeg stdin write that never
-// left its buffer.
-
 string command = args.Length > 0 ? args[0].ToLowerInvariant() : "help";
 
 if (command is "help" or "-h" or "--help")
@@ -44,10 +36,6 @@ if (command is "help" or "-h" or "--help")
     return 0;
 }
 
-// Deliberately NOT started before the dispatch below. Media Foundation is one of the things that
-// does not exist under Wine, so starting it up front would take the commands that have nothing to
-// do with it - duplication, sharedtex - down with it on exactly the platform they were added to
-// investigate. Each command that needs it starts it itself.
 if (command == "duplication")
     return Duplication.Run();
 
@@ -57,7 +45,6 @@ if (command == "sharedtex")
     return SharedTexture.Run(adapterIndex);
 }
 
-// Needs neither Media Foundation nor a D3D device - just the shared ffmpeg libraries.
 if (command == "encode")
 {
     int encodeFrames = args.Length > 1 && int.TryParse(args[1], out int parsedEncodeFrames) ? parsedEncodeFrames : 300;
@@ -89,9 +76,6 @@ string ffmpegExePath = FindFfmpeg();
 string workDirectory = Path.Combine(Path.GetTempPath(), "ScreenShareMediaProbe");
 Directory.CreateDirectory(workDirectory);
 
-// VideoSupport and multithread protection both matter: the plugin's device carries them, and a
-// decoder bound to a device without them behaves differently enough that soaking one would not be
-// soaking the other.
 using var device = new Device(
     SharpDX.Direct3D.DriverType.Hardware,
     DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport);
@@ -120,7 +104,7 @@ static string FindFfmpeg()
     }
 
     throw new FileNotFoundException(
-        "Could not find the bundled ffmpeg\\ffmpeg.exe. See the README for where to download it.");
+        "Could not find the bundled ffmpeg\\ffmpeg.exe. See BUILDING.md for where to download it.");
 }
 
 static void ReportMfts()
@@ -144,10 +128,6 @@ static void ReportMfts()
 
 static void ReportCategory(bool isEncoder, string label, Guid codecSubtype)
 {
-    // Encoders are async and hardware-registered; decoders are synchronous, and Microsoft's own
-    // H.264 decoder is registered as software even though it decodes on the GPU through DXVA once
-    // it has a D3D manager. Asking either for the other's flags returns nothing at all - which is
-    // exactly the bug this report was written to make visible.
     MftEnumFlags flags = isEncoder
         ? MftEnumFlags.Hardware | MftEnumFlags.AsyncMft | MftEnumFlags.SortAndFilter
         : MftEnumFlags.Hardware | MftEnumFlags.SyncMft | MftEnumFlags.SortAndFilter;
@@ -195,8 +175,6 @@ static bool IsD3D11Aware(SharpDX.MediaFoundation.Activate activate)
     }
     catch (Exception)
     {
-        // Missing attribute, or an MFT that will not instantiate here - both mean "not usable for
-        // GPU decode", which is what the caller is asking.
         return false;
     }
     finally

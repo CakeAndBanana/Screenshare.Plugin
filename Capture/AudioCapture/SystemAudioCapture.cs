@@ -142,7 +142,6 @@ public sealed class SystemAudioCapture : IAudioSource
         }
         catch (OperationCanceledException)
         {
-            // normal shutdown path
         }
     }
 
@@ -159,7 +158,6 @@ public sealed class SystemAudioCapture : IAudioSource
         }
         catch
         {
-            // best-effort - the client may already be in a bad/torn-down state
         }
 
         Marshal.ReleaseComObject(captureClient);

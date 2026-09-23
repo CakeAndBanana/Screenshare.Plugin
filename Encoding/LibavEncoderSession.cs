@@ -6,19 +6,10 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Encoding;
 
-// One libavcodec encoder, fed NV12 frames and handing back whole Annex-B access units. Knows
-// nothing about capture, the game's device or logging, so tools/MediaProbe can drive it directly.
-//
-// Two ways in: NV12 bytes from a CPU readback (SendNv12), or - when constructed with a D3D11
-// device - NV12 textures copied into a pool of encoder surfaces on that device
-// (TryCopyToSurface + SendSurface), which NVENC and AMF read without the frame leaving the GPU.
 public sealed unsafe class LibavEncoderSession : IDisposable
 {
-    // Frames the encoder can hold at once plus the one being filled. NVENC at p1 without lookahead
-    // keeps about four in flight; a full pool just means the frame is skipped, not an error.
     private const int SurfacePoolSize = 8;
 
-    // AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX from libavcodec/codec.h, which the bindings don't expose.
     private const int HwConfigMethodHwFramesContext = 0x02;
 
     private static readonly Lock LoadLock = new();
@@ -46,8 +37,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
 
     public bool UsesD3D11Surfaces => surfaceFrames is not null;
 
-    // Loads the shared ffmpeg libraries once per process. Throws when they're missing or don't
-    // match the bindings, which callers treat as "fall back to ffmpeg.exe".
     public static void EnsureLoaded(string libraryDirectory)
     {
         lock (LoadLock)
@@ -129,7 +118,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
             if (frame is null || packet is null)
                 throw new OutOfMemoryException("av_frame_alloc/av_packet_alloc failed.");
 
-            // In surface mode the frame is filled from the pool on every send instead.
             if (surfaceFrames is null)
             {
                 frame->format = (int)context->pix_fmt;
@@ -156,10 +144,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
 
         try
         {
-            // ffmpeg releases the device when the context goes away, so it gets its own reference.
-            // The immediate context and video interfaces are left for av_hwdevice_ctx_init to fetch,
-            // and the lock for it to default: ffmpeg only takes that lock for its own CPU transfers,
-            // which this never uses - our copies go through the plugin's ImmediateContextLock.
             var deviceContext = (AVHWDeviceContext*)device->data;
             var d3d11Context = (AVD3D11VADeviceContext*)deviceContext->hwctx;
             Marshal.AddRef(d3d11Device.NativePointer);
@@ -170,11 +154,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
             if (frames is null)
                 throw new OutOfMemoryException("av_hwframe_ctx_alloc failed.");
 
-            // One NV12 texture array (texture + slice index is the layout NVENC and AMF register),
-            // bound as a decoder target. Drivers only accept NV12 *arrays* with the decoder flag -
-            // none, shader-resource, video-encoder and render-target all give E_INVALIDARG on an
-            // RTX 3080 at feature level 11_0 and 11_1 - and it's what ffmpeg's own hardware
-            // decoders hand these encoders anyway. Copies into it don't need any bind flag.
             var framesContext = (AVHWFramesContext*)frames->data;
             framesContext->format = AVPixelFormat.AV_PIX_FMT_D3D11;
             framesContext->sw_format = AVPixelFormat.AV_PIX_FMT_NV12;
@@ -194,7 +173,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         }
         finally
         {
-            // The frames context holds its own reference to the device.
             ffmpeg.av_buffer_unref(&device);
         }
     }
@@ -213,8 +191,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         }
     }
 
-    // NV12 goes straight in when the encoder takes it (every hardware encoder, and libx264).
-    // Anything else gets planar 4:2:0, which the copy below produces by de-interleaving UV.
     private static AVPixelFormat PickPixelFormat(AVCodecContext* context, AVCodec* encoder)
     {
         void* configs = null;
@@ -241,10 +217,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
 
     private void ApplyBitrate(int bitrateKbps)
     {
-        // Same shape as the ffmpeg.exe path - maxrate 4/3 of the target, a two-second buffer -
-        // except for libx264, which is kept in CBR (maxrate == bitrate): x264 can't change an ABR
-        // target once running ("We don't support changing the ABR bitrate right now" in its
-        // ratecontrol.c), only a CBR one. The hardware encoders are already set to CBR.
         int maxRateKbps = EncoderName == "libx264" ? bitrateKbps : bitrateKbps * 4 / 3;
 
         context->bit_rate = bitrateKbps * 1000L;
@@ -252,8 +224,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         context->rc_buffer_size = bitrateKbps * 2 * 1000;
     }
 
-    // Picked up before the next frame is sent; the encoder wrapper notices the changed context
-    // fields and reconfigures itself.
     public void SetBitrate(int bitrateKbps) => Interlocked.Exchange(ref pendingBitrateKbps, bitrateKbps);
 
     public void SendNv12(byte[] nv12, long ptsMs, Action<long, byte[]> onAccessUnit)
@@ -264,16 +234,12 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         if (nv12.Length < FrameSize)
             throw new ArgumentException($"Expected {FrameSize} bytes of NV12, got {nv12.Length}.", nameof(nv12));
 
-        // The encoder may still hold a reference to last frame's buffers.
         Check(ffmpeg.av_frame_make_writable(frame), "making the input frame writable");
         CopyIntoFrame(nv12);
 
         SendFrame(ptsMs, onAccessUnit);
     }
 
-    // Takes a free surface from the pool and copies the NV12 texture into it on the GPU. Call with
-    // the device's immediate-context lock held. False when every surface is still with the
-    // encoder - skip the frame rather than wait.
     public bool TryCopyToSurface(DeviceContext deviceContext, Texture2D nv12Source)
     {
         if (!UsesD3D11Surfaces)
@@ -283,7 +249,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         if (ffmpeg.av_hwframe_get_buffer(surfaceFrames, frame, 0) < 0)
             return false;
 
-        // data[0] is the pool's texture array, data[1] the slice this frame owns.
         var texture = (nint)frame->data[0];
         int slice = (int)(nint)frame->data[1];
 
@@ -298,8 +263,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         return true;
     }
 
-    // Sends the surface filled by the last successful TryCopyToSurface. Doesn't need the lock:
-    // the encoder reads the texture on the GPU, ordered after the copy on the same device.
     public void SendSurface(long ptsMs, Action<long, byte[]> onAccessUnit)
     {
         try
@@ -308,7 +271,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         }
         finally
         {
-            // The encoder took its own reference; the slice returns to the pool when it's done.
             ffmpeg.av_frame_unref(frame);
         }
     }
@@ -319,7 +281,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         if (bitrateKbps > 0 && SupportsLiveBitrate)
             ApplyBitrate(bitrateKbps);
 
-        // Encoders reject non-increasing timestamps, and two frames can land in the same ms.
         if (ptsMs <= lastPtsMs)
             ptsMs = lastPtsMs + 1;
         lastPtsMs = ptsMs;
@@ -394,7 +355,6 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         }
     }
 
-    // Drains whatever the encoder is still holding. The session can't take more frames afterwards.
     public void Flush(Action<long, byte[]> onAccessUnit)
     {
         Check(ffmpeg.avcodec_send_frame(context, null), $"flushing {EncoderName}");

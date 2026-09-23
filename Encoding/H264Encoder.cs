@@ -86,8 +86,6 @@ public sealed class H264Encoder : IVideoEncoder
         Device device = gameAdapterDevice.Device;
         Vendor = GpuVendorDetector.Detect(device);
 
-        // Downscale and convert to NV12 on the GPU, so the readback and the pipe carry 1.5 bytes
-        // per pixel instead of 4 and ffmpeg never does an RGB->YUV conversion on the CPU.
         converter = new Nv12Converter(device, Width, Height);
         sourceSrv = new ShaderResourceView(device, source.CaptureTexture);
         readback = new AsyncTextureReadback(device, Width, Height, Format.NV12);
@@ -229,7 +227,6 @@ public sealed class H264Encoder : IVideoEncoder
         }
         catch
         {
-            // other side of the pipe may already be gone
         }
     }
 

@@ -41,14 +41,10 @@ public sealed class RoomHubClient : IAsyncDisposable
 
     public event Action? Reconnected;
 
-    /// <summary>The connection is gone for good (automatic reconnect gave up, e.g. the relay
-    /// hosting the room went down). Not raised for our own disconnects or reconnects.</summary>
     public event Action? Closed;
 
     public async Task ConnectAsync(string relayUrl)
     {
-        // Cleared before disposing so the old connection's Closed handler sees it's no longer
-        // current and stays quiet - this is a deliberate switch, not a lost connection.
         HubConnection? previous = connection;
         connection = null;
         if (previous is not null)
@@ -93,9 +89,6 @@ public sealed class RoomHubClient : IAsyncDisposable
         this.relayUrl = relayUrl;
     }
 
-    /// <summary>True while an established session is being moved to another relay (following a
-    /// redirect, or back to the main relay) - the connection is down for the hop, but nothing the
-    /// user should see as "disconnected".</summary>
     public bool IsSwitchingRelay { get; private set; }
 
     public async Task SwitchRelayAsync(string hubUrl)
@@ -111,8 +104,6 @@ public sealed class RoomHubClient : IAsyncDisposable
         }
     }
 
-    /// <summary>Moves this client onto the relay a lobby or non-owning relay pointed us at. The
-    /// relay sends its bare public URL, so the hub path is filled in here.</summary>
     private Task FollowRedirectAsync(string redirectUrl)
     {
         if (!Networking.RelayUrl.TryNormalize(redirectUrl, out string hubUrl))
@@ -138,8 +129,6 @@ public sealed class RoomHubClient : IAsyncDisposable
         CreateRoomResult result = await RequireConnection()
             .InvokeAsync<CreateRoomResult>("CreateRoom", request, clientId, displayName).ConfigureAwait(false);
 
-        // A lobby picked a relay to host the room. Relays always host locally, so one hop is all
-        // there ever is.
         if (result.RedirectUrl is { } redirectUrl)
         {
             await FollowRedirectAsync(redirectUrl).ConfigureAwait(false);

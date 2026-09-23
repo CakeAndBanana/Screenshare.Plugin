@@ -18,8 +18,6 @@ public static class VideoEncoderSelector
         _ => throw new ArgumentOutOfRangeException(nameof(codec)),
     };
 
-    // Encoder-private options, shared by the in-process libavcodec encoder (av_opt_set) and the
-    // ffmpeg.exe command line, so the two can't drift apart.
     public static IReadOnlyList<(string Name, string Value)> EncoderOptions(GpuVendor vendor) => vendor switch
     {
         GpuVendor.Nvidia => [("preset", "p1"), ("tune", "ll"), ("rc", "cbr")],
@@ -28,9 +26,6 @@ public static class VideoEncoderSelector
         _ => [("preset", "ultrafast"), ("tune", "zerolatency")],
     };
 
-    // Whether libavcodec's wrapper for this encoder picks up a changed bit_rate between frames.
-    // NVENC (when the driver reports dynamic bitrate support) and libx264 do; the AMF and QSV
-    // wrappers are left out because they couldn't be verified on real hardware.
     public static bool SupportsLiveBitrate(string encoderName) =>
         encoderName is "h264_nvenc" or "hevc_nvenc" or "libx264";
 
@@ -41,8 +36,6 @@ public static class VideoEncoderSelector
         return $"-c:v {EncoderName(vendor, codec)} {options} -b:v {bitrateKbps}k -maxrate {maxrateKbps}k -bufsize {bufsizeKbps}k -g {gopSize}";
     }
 
-    // Frames arrive as NV12, which nvenc/amf/qsv consume natively. The software encoders get
-    // an explicit planar yuv420p, which is only a cheap chroma de-interleave for swscale.
     public static string BuildOutputPixelFormatArgs(GpuVendor vendor) => vendor switch
     {
         GpuVendor.Nvidia or GpuVendor.Amd or GpuVendor.Intel => "",

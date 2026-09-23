@@ -210,7 +210,6 @@ public sealed class H264Decoder : IVideoDecoder
         }
         catch
         {
-            // other side of the pipe may already be gone
         }
     }
 

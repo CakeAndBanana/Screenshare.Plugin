@@ -208,9 +208,6 @@ internal sealed class DecodeHarness : IDisposable
 
             CopyIntoSlot(outSample, slot);
 
-            // Stands in for the presentation scheduler's display thread: convert and hand the slot
-            // straight back. A soak that held slots would be measuring the scheduler, not the
-            // decoder, and the scheduler has no GPU resources to leak.
             converter.Convert(device.ImmediateContext, slotLuma[slot], slotChroma[slot], targetView, Width, Height);
             device.ImmediateContext.Flush();
             freeSlots.Add(slot);
@@ -262,7 +259,6 @@ internal sealed class DecodeHarness : IDisposable
         }
         catch (Exception)
         {
-            // Being released either way.
         }
 
         transform.Dispose();

@@ -32,7 +32,8 @@ public sealed class ShareWindow : Window, IDisposable
     private GameAdapterDevice? device;
     private ICaptureSource? screenCapture;
 
-    private bool autoStartedAudioCapture;
+    private readonly Lock audioCaptureLock = new();
+    private int audioCaptureGeneration;
     private RawTextureWrap? previewTexture;
     private string? streamSetupError;
 
@@ -45,7 +46,7 @@ public sealed class ShareWindow : Window, IDisposable
     private readonly WorldScreenController worldScreen = new();
     private readonly IdentityChip identity;
     private readonly LobbyView lobby;
-    private readonly ConcurrentQueue<ActiveStreamerInfo> wentLive = new();
+    private readonly ConcurrentQueue<(ActiveStreamerInfo Streamer, bool JustStarted)> wentLive = new();
     private Screen lastScreen = Screen.Connect;
     private bool releaseForcedSize;
     private bool wasViewerInRoom;
@@ -76,7 +77,8 @@ public sealed class ShareWindow : Window, IDisposable
 
         identity = new IdentityChip(roomSession, () => mediaSession.IsHosting);
         lobby = new LobbyView(roomSession, identity, Disconnect);
-        roomSession.StreamerWentLive += streamer => wentLive.Enqueue(streamer);
+        roomSession.StreamerWentLive += streamer => wentLive.Enqueue((streamer, true));
+        roomSession.StreamerAlreadyLive += streamer => wentLive.Enqueue((streamer, false));
 
         TitleBarButtons =
         [
@@ -90,16 +92,18 @@ public sealed class ShareWindow : Window, IDisposable
         ];
     }
 
-    /// <summary>Brings the settings window up, from the title-bar cog, from Dalamud's own plugin
-    /// gear, and from the two places a stream fails to start for want of a capture source.</summary>
     public void OpenSettings()
     {
         Settings.IsOpen = true;
         Settings.BringToFront();
     }
 
-    /// <summary>Opens the in-world screen's own window, so its position can be adjusted without
-    /// having to open a stream to get at the controls.</summary>
+    private void OpenStreamingSettings()
+    {
+        Settings.SelectStreamingTab();
+        OpenSettings();
+    }
+
     public void OpenWorldScreen()
     {
         WorldScreen.IsOpen = true;
@@ -110,14 +114,28 @@ public sealed class ShareWindow : Window, IDisposable
     {
         HandleViewerMediaLifecycle();
 
-        // Raised on a SignalR thread; the toast and its click handler belong on this one.
-        while (wentLive.TryDequeue(out ActiveStreamerInfo? streamer))
-            NotifyWentLive(streamer);
+        while (wentLive.TryDequeue(out (ActiveStreamerInfo Streamer, bool JustStarted) live))
+        {
+            if (TryAutoWatch(live.Streamer.ConnectionId))
+                continue;
+
+            if (live.JustStarted)
+                NotifyWentLive(live.Streamer);
+        }
     }
 
-    // Reconnecting keeps the current screen: flipping to the connect card mid-room would shrink the
-    // window for what is usually a couple of seconds. Same for hopping between the main relay and
-    // the relay hosting a room, where the connection is down only for the hop itself.
+    private bool TryAutoWatch(string streamerId)
+    {
+        if (!ServiceCollector.Config.AutoWatchStreams || mediaSession.ViewingStreamerConnectionId is not null || mediaSession.IsHosting)
+            return false;
+
+        if (!roomSession.InRoom || !roomSession.ActiveStreamers.Any(s => s.ConnectionId == streamerId))
+            return false;
+
+        StartWatching(streamerId);
+        return mediaSession.ViewingStreamerConnectionId == streamerId;
+    }
+
     private Screen CurrentScreen => roomSession.State is HubConnectionState.Connected or HubConnectionState.Reconnecting || roomSession.IsSwitchingRelay
         ? roomSession.InRoom ? Screen.Room : Screen.Lobby
         : Screen.Connect;
@@ -130,8 +148,6 @@ public sealed class ShareWindow : Window, IDisposable
             ? $"Screen Share · {roomName}{(mediaSession.IsHosting ? " · LIVE" : string.Empty)}###ScreenShareMainWindow"
             : "Screen Share###ScreenShareMainWindow";
 
-        // The connect card sizes itself. Leaving it forces a normal size for one frame, then hands
-        // the size back to the user.
         if (screen == Screen.Connect)
             Flags |= ImGuiWindowFlags.AlwaysAutoResize;
         else
@@ -209,7 +225,6 @@ public sealed class ShareWindow : Window, IDisposable
 
     private void WatchFromNotification(string streamerId)
     {
-        // The toast can outlive the stream, or the room.
         if (!roomSession.InRoom || !roomSession.ActiveStreamers.Any(s => s.ConnectionId == streamerId))
             return;
 
@@ -246,8 +261,6 @@ public sealed class ShareWindow : Window, IDisposable
         ImGui.EndTabBar();
     }
 
-    /// <summary>The room's name, code and visibility on a gradient in the room's colour, with who
-    /// you are and Leave on the right. Sits above the tabs: it's navigation, not content.</summary>
     private void DrawRoomHeader()
     {
         RoomKind kind = UiTheme.KindOf(roomSession.RoomIsPublic, roomSession.RoomHasPassword);
@@ -314,10 +327,6 @@ public sealed class ShareWindow : Window, IDisposable
         DrawWatchingStatus();
         DrawMemberList();
 
-        // mediaSession.IsHosting is included on its own (not just CanStartStreaming) so the
-        // section never disappears out from under an already-running stream - e.g. if the host
-        // revokes a co-streamer's permission mid-stream, that streamer can still see and click
-        // "Stop", rather than losing the only way to stop what's still actively running.
         if (roomSession.CanStartStreaming || mediaSession.IsHosting)
             DrawStreamingSection();
 
@@ -326,9 +335,6 @@ public sealed class ShareWindow : Window, IDisposable
 
         DrawMediaStreamStatus();
 
-        // Errors stay on this tab rather than moving to the log with the events: they're the one
-        // thing the user may need to act on, and burying them behind a tab switch would mean a
-        // failed room action could go unnoticed entirely.
         if (roomSession.LastError is not null)
             ImGui.TextColored(UiTheme.ErrorColor, $"Relay error: {roomSession.LastError}");
     }
@@ -361,8 +367,6 @@ public sealed class ShareWindow : Window, IDisposable
                     ImGui.TextUnformatted(entry.Message);
                 }
 
-                // Follows new entries only while the user is already at the bottom, so scrolling
-                // back through history isn't yanked away every time someone joins or leaves.
                 if (ImGui.GetScrollY() >= ImGui.GetScrollMaxY())
                     ImGui.SetScrollHereY(1f);
             }
@@ -379,7 +383,6 @@ public sealed class ShareWindow : Window, IDisposable
 
         UiTheme.SectionLabel($"Members · {members.Count}");
 
-        // Whoever is live first - they're who people are looking for - then the host.
         IEnumerable<RoomMemberInfo> ordered = members
             .OrderByDescending(m => streamers.Any(s => s.ConnectionId == m.ConnectionId))
             .ThenByDescending(m => m.IsHost);
@@ -388,11 +391,6 @@ public sealed class ShareWindow : Window, IDisposable
             DrawMemberRow(member, members, streamers, watchers);
     }
 
-    /// <summary>
-    /// One member. A streamer's row gets the red line down its left edge and a red tint, their name
-    /// turns green and carries a LIVE badge, and clicking the name watches them. Hovering the name
-    /// shows their ID. The host's controls sit at the right end.
-    /// </summary>
     private void DrawMemberRow(
         RoomMemberInfo member,
         IReadOnlyList<RoomMemberInfo> members,
@@ -429,35 +427,19 @@ public sealed class ShareWindow : Window, IDisposable
 
         string label = isSelf ? $"{member.DisplayName} (you)" : member.DisplayName;
         if (isStreaming)
-        {
-            ImGui.PushStyleColor(ImGuiCol.Text, UiTheme.StreamingGreen);
-            if (ImGui.Selectable($"{label}##name", isWatchingThis, ImGuiSelectableFlags.None, new Vector2(ImGui.CalcTextSize(label).X, 0)))
-            {
-                if (isWatchingThis)
-                    StopWatching();
-                else
-                    StartWatching(member.ConnectionId);
-            }
-
-            ImGui.PopStyleColor();
-        }
+            ImGui.TextColored(UiTheme.StreamingGreen, label);
         else
-        {
             ImGui.TextUnformatted(label);
-        }
 
         if (ImGui.IsItemHovered())
-            DrawMemberTooltip(member, isSelf, isStreaming, isWatchingThis, watchingName);
+            DrawMemberTooltip(member, isStreaming, watchingName);
 
         if (isStreaming)
         {
             ImGui.SameLine();
             UiTheme.Pill("LIVE", UiTheme.LiveRed);
-            if (isWatchingThis)
-            {
-                ImGui.SameLine();
-                UiTheme.Pill("Watching", UiTheme.WatchingColor);
-            }
+            ImGui.SameLine();
+            DrawWatchButton(member, isSelf, isWatchingThis);
         }
 
         if (showHostActions)
@@ -493,8 +475,6 @@ public sealed class ShareWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Remove from the room");
 
-        // A kick is a ban - they can't come back and the room disappears from their lists - so it
-        // gets a second click rather than firing on a stray one.
         if (!ImGui.BeginPopup("##confirmKick"))
             return;
 
@@ -533,7 +513,28 @@ public sealed class ShareWindow : Window, IDisposable
         }
     }
 
-    private void DrawMemberTooltip(RoomMemberInfo member, bool isSelf, bool isStreaming, bool isWatchingThis, string? watchingName)
+    private void DrawWatchButton(RoomMemberInfo member, bool isSelf, bool isWatchingThis)
+    {
+        if (isWatchingThis)
+        {
+            if (ImGui.Button("Stop watching##watch"))
+                StopWatching();
+        }
+        else if (UiTheme.ColoredButton("Start watching##watch", UiTheme.WatchingColor))
+        {
+            StartWatching(member.ConnectionId);
+        }
+
+        if (isSelf && !isWatchingThis && ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Preview your own stream.\n" +
+                "Turn audio capture off first - system loopback would record\n" +
+                "this preview's own playback and feed it back into the stream.");
+        }
+    }
+
+    private void DrawMemberTooltip(RoomMemberInfo member, bool isStreaming, string? watchingName)
     {
         ImGui.BeginTooltip();
         if (isStreaming)
@@ -551,19 +552,6 @@ public sealed class ShareWindow : Window, IDisposable
         if (watchingName is not null)
             ImGui.TextDisabled($"Watching {watchingName}");
 
-        // Your own stream is watchable too, as a self-preview: it loops out to the relay and back
-        // exactly like anyone else's, so it's the only way to see what you're actually sending.
-        if (isStreaming)
-        {
-            ImGui.Spacing();
-            ImGui.TextDisabled(
-                isWatchingThis ? "Click to stop watching."
-                : isSelf ? "Click to preview your own stream.\n" +
-                           "Turn audio capture off first - system loopback would record\n" +
-                           "this preview's own playback and feed it back into the stream."
-                : "Click to watch.");
-        }
-
         ImGui.EndTooltip();
     }
 
@@ -578,8 +566,6 @@ public sealed class ShareWindow : Window, IDisposable
         UiTheme.Icon(FontAwesomeIcon.Eye, UiTheme.WatchingColor);
         ImGui.SameLine();
 
-        // Says where the stream actually is, because with the popout closed and the panel in the
-        // world this line is the only thing left explaining why audio is still playing.
         ImGui.TextUnformatted(worldScreen.IsProjecting && !StreamView.IsOpen
             ? $"Watching {displayName} on the in-world screen."
             : $"Watching {displayName} in a popout window.");
@@ -594,6 +580,28 @@ public sealed class ShareWindow : Window, IDisposable
         ImGui.SameLine();
         if (ImGui.Button("Stop watching##stopFromStatus"))
             StopWatching();
+
+        DrawWatchingVolume();
+    }
+
+    private static void DrawWatchingVolume()
+    {
+        Configuration config = ServiceCollector.Config;
+
+        ImGui.SameLine();
+        UiTheme.Icon(config.ViewerVolume <= 0f ? FontAwesomeIcon.VolumeMute : FontAwesomeIcon.VolumeUp, UiTheme.WatchingColor);
+        ImGui.SameLine();
+
+        int volumePercent = (int)MathF.Round(config.ViewerVolume * 100f);
+        ImGui.SetNextItemWidth(MathF.Max(UiTheme.Px(80), MathF.Min(UiTheme.Px(140), ImGui.GetContentRegionAvail().X)));
+        if (ImGui.SliderInt("##watchingVolume", ref volumePercent, 0, 100, "%d%%"))
+            config.ViewerVolume = Math.Clamp(volumePercent / 100f, 0f, 1f);
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            ServiceCollector.PI.SavePluginConfig(config);
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Volume of the stream you're watching.");
     }
 
     private void DrawStreamingSection()
@@ -642,8 +650,6 @@ public sealed class ShareWindow : Window, IDisposable
         DrawScreenCaptureStatus();
     }
 
-    /// <summary>What "Go live" is about to share. Here rather than only in the settings window so
-    /// an empty window pick is visible before the button is pressed, not after it fails.</summary>
     private void DrawCaptureSourceLine()
     {
         ImGui.AlignTextToFramePadding();
@@ -657,7 +663,7 @@ public sealed class ShareWindow : Window, IDisposable
 
         ImGui.SameLine();
         if (ImGui.SmallButton("Change##captureSource"))
-            OpenSettings();
+            OpenStreamingSettings();
     }
 
     private void DrawScreenCaptureStatus()
@@ -675,8 +681,6 @@ public sealed class ShareWindow : Window, IDisposable
         }
     }
 
-    /// <summary>For the host and anyone allowed to stream. Everyone else never places anything:
-    /// the screen just appears for them once it's here.</summary>
     private void DrawScreenPlacement()
     {
         UiTheme.SectionLabel("In-world screen");
@@ -702,9 +706,9 @@ public sealed class ShareWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Position, size, tilt and audio falloff for the in-world screen.");
 
-        // Its own line under the buttons rather than trailing them: alongside, the longest of these
-        // three messages ran the row past the window's width.
         ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X);
+        if (!ServiceCollector.Config.ShowWorldScreen)
+            ImGui.TextColored(UiTheme.WarnColor, "You've turned the in-world screen off in settings, so you won't see it yourself.");
         ImGui.TextDisabled(placement is null
             ? "Everyone watching sees it once it's placed."
             : placement.TerritoryType != ServiceCollector.ClientState.TerritoryType
@@ -721,26 +725,19 @@ public sealed class ShareWindow : Window, IDisposable
 
         wasViewerInRoom = isViewerInRoom;
 
-        // Kicked, room closed, or the relay hosting the room went down - there's nothing left to
-        // stream to, so don't keep capturing and encoding into a dead socket.
         if (!roomSession.InRoom && mediaSession.IsHosting)
         {
             mediaSession.StopHosting();
             DisposeStreamCapture();
-            StopAutoStartedAudioCapture();
+            StopAudioCapture();
         }
 
-        // The streamer currently being watched stopped, got kicked, or disconnected - don't hang
-        // on a now-dead feed.
         if (mediaSession.IsViewing && mediaSession.ViewingStreamerConnectionId is { } watchingId
             && !roomSession.ActiveStreamers.Any(s => s.ConnectionId == watchingId))
         {
             StopWatching();
         }
 
-        // The decoder's shared texture only exists once video metadata has round-tripped from
-        // the streamer over the network, which happens well after StartViewing kicks off the
-        // connection - so this has to be polled every frame rather than done once above.
         if (mediaSession.IsViewing && device is not null
             && mediaSession.ViewerSharedHandle is { } handle && handle != lastOpenedViewerVideoHandle)
         {
@@ -749,13 +746,6 @@ public sealed class ShareWindow : Window, IDisposable
             lastOpenedViewerVideoHandle = handle;
         }
 
-        // MediaSessionService's start-hosting/start-viewing failures happen on a background
-        // Task, not synchronously from a button click, so they can never reach the catch blocks
-        // in ToggleMediaStreaming that normally call TryRecoverFromDeviceRemoved - confirmed by a
-        // real DeviceRemoved failure landing here instead of there, which would otherwise have
-        // left the stale device in place until some unrelated button happened to trigger recovery
-        // first. Checked separately for each independent role/connection - a device-removed
-        // failure could in principle hit either the encoder or the decoder side.
         if (mediaSession.HostLastException is { } hostMediaEx && !ReferenceEquals(hostMediaEx, lastHandledHostMediaException))
         {
             lastHandledHostMediaException = hostMediaEx;
@@ -768,10 +758,26 @@ public sealed class ShareWindow : Window, IDisposable
             TryRecoverFromDeviceRemoved(viewerMediaEx);
         }
 
-        // Last, so it sees this frame's texture rather than the previous one's - and
-        // unconditionally, because it also owns resetting the audio mix back to plain stereo on
-        // every frame the panel ISN'T drawn.
+        EnsureDeviceForPlacedScreen();
         worldScreen.Update(device, previewTexture, roomSession, mediaSession);
+    }
+
+    private void EnsureDeviceForPlacedScreen()
+    {
+        if (device is not null || !roomSession.InRoom || roomSession.ScreenPlacement is not { } placement
+            || placement.TerritoryType != ServiceCollector.ClientState.TerritoryType)
+        {
+            return;
+        }
+
+        try
+        {
+            device = new GameAdapterDevice(ServiceCollector.PI.UiBuilder);
+        }
+        catch (Exception ex)
+        {
+            ServiceCollector.PluginLog.Verbose(ex, "ScreenShare could not create the game device for the idle in-world screen yet.");
+        }
     }
 
     private void StartWatching(string streamerConnectionId)
@@ -780,10 +786,6 @@ public sealed class ShareWindow : Window, IDisposable
         {
             device ??= new GameAdapterDevice(ServiceCollector.PI.UiBuilder);
             string ffmpegPath = Path.Combine(ServiceCollector.PI.AssemblyLocation.DirectoryName!, "ffmpeg", "ffmpeg.exe");
-            // Use roomSession.RelayUrl (the instance the SignalR connection is ACTUALLY on right
-            // now), not the configured relay URL (what the user typed) - a cross-instance redirect
-            // during JoinRoom can leave those pointing at different relays, and the media WebSocket
-            // has to hit the same instance that owns the room's live connections.
             mediaSession.StartViewing(roomSession.RelayUrl ?? ServiceCollector.Config.RelayUrl, roomSession.RoomId!, roomSession.ConnectionId!, streamerConnectionId, device, ffmpegPath);
             previewTexture?.Dispose();
             previewTexture = null;
@@ -831,8 +833,6 @@ public sealed class ShareWindow : Window, IDisposable
                     $"{mediaSession.HostEncoderName}, {mediaSession.HostCodec}");
             }
 
-            // Shown only when adaptation has actually pulled the bitrate down, so quality dropping
-            // reads as a deliberate response to the uplink rather than as something going wrong.
             if (mediaSession.HostBitrateReduced)
             {
                 ImGui.TextColored(UiTheme.WarnColor,
@@ -863,7 +863,7 @@ public sealed class ShareWindow : Window, IDisposable
         previewTexture = null;
         lastOpenedViewerVideoHandle = null;
         DisposeStreamCapture();
-        StopAutoStartedAudioCapture();
+        StopAudioCapture();
         roomSession.LeaveRoom();
     }
 
@@ -875,32 +875,41 @@ public sealed class ShareWindow : Window, IDisposable
             return;
         }
 
-        // Started by hand, so a later "stop streaming" leaves it running.
-        autoStartedAudioCapture = false;
         StartAudioCapture();
     }
 
     private void StartAudioCapture()
     {
         audioError = null;
+
+        int generation;
+        lock (audioCaptureLock)
+            generation = ++audioCaptureGeneration;
+
         if (Settings.AudioSourceProcessId is { } targetProcessId)
-            _ = StartProcessAudioCaptureAsync(targetProcessId);
+            _ = StartProcessAudioCaptureAsync(targetProcessId, generation);
         else
             StartSystemAudioCapture();
     }
 
     private void StopAudioCapture()
     {
-        audioCapture?.Dispose();
-        audioCapture = null;
-        autoStartedAudioCapture = false;
+        ReleaseAudioCapture();
         mediaSession.UpdateAudioSource(null);
     }
 
-    private void StopAutoStartedAudioCapture()
+    private void ReleaseAudioCapture()
     {
-        if (autoStartedAudioCapture)
-            StopAudioCapture();
+        IAudioSource? oldCapture;
+        lock (audioCaptureLock)
+        {
+            // Invalidates any process capture still activating, so it disposes itself instead of going live after a stop.
+            audioCaptureGeneration++;
+            oldCapture = audioCapture;
+            audioCapture = null;
+        }
+
+        oldCapture?.Dispose();
     }
 
     private void StartSystemAudioCapture()
@@ -917,13 +926,22 @@ public sealed class ShareWindow : Window, IDisposable
         }
     }
 
-    private async Task StartProcessAudioCaptureAsync(int processId)
+    private async Task StartProcessAudioCaptureAsync(int processId, int generation)
     {
         try
         {
             ProcessAudioCapture capture = await ProcessAudioCapture.CreateAsync((uint)processId).ConfigureAwait(false);
-            audioCapture = capture;
-            mediaSession.UpdateAudioSource(capture, Settings.AudioBitrateKbps * 1000);
+            lock (audioCaptureLock)
+            {
+                if (generation == audioCaptureGeneration)
+                {
+                    audioCapture = capture;
+                    mediaSession.UpdateAudioSource(capture, Settings.AudioBitrateKbps * 1000);
+                    return;
+                }
+            }
+
+            capture.Dispose();
         }
         catch (Exception ex)
         {
@@ -950,7 +968,7 @@ public sealed class ShareWindow : Window, IDisposable
         {
             mediaSession.StopHosting();
             DisposeStreamCapture();
-            StopAutoStartedAudioCapture();
+            StopAudioCapture();
             return;
         }
 
@@ -959,11 +977,8 @@ public sealed class ShareWindow : Window, IDisposable
 
         if (!Settings.HasCaptureSource)
         {
-            // Put the picker in front of them rather than leaving a line of red text to act on -
-            // window mode starts out unselected every session, so this is the ordinary first
-            // "Go live" of a session, not an unusual failure.
             streamSetupError = "Pick a window to capture first.";
-            OpenSettings();
+            OpenStreamingSettings();
             return;
         }
 
@@ -972,10 +987,6 @@ public sealed class ShareWindow : Window, IDisposable
             streamSetupError = null;
             device ??= new GameAdapterDevice(ServiceCollector.PI.UiBuilder);
 
-            // Always built fresh rather than reused. A capture only survives past a stream stopping
-            // when a previous start FAILED after creating it - StartHosting below can throw - and
-            // reusing that one silently ignores every capture setting changed since, so picking
-            // Monitor after a failed Window attempt would carry on sharing the window.
             DisposeStreamCapture();
             screenCapture = Settings.CaptureWindowMode
                 ? new WindowCapture(device, Settings.SelectedWindowHandle)
@@ -986,33 +997,19 @@ public sealed class ShareWindow : Window, IDisposable
             streamSetupError = $"Screen capture init failed: {ex.Message}";
             ServiceCollector.PluginLog.Error(ex, "ScreenShare screen capture init failed");
 
-            // A device-removed failure is about the GPU, and the reset above is the whole fix.
-            // Anything else here is overwhelmingly the chosen monitor or window having gone away -
-            // DesktopDuplicationCapture's message says as much - so open the picker.
             if (!TryRecoverFromDeviceRemoved(ex))
-                OpenSettings();
+                OpenStreamingSettings();
 
             return;
         }
 
         string ffmpegPath = Path.Combine(ServiceCollector.PI.AssemblyLocation.DirectoryName!, "ffmpeg", "ffmpeg.exe");
-        // See the matching comment in StartWatching - roomSession.RelayUrl reflects wherever the
-        // control-plane connection actually ended up, which is what the media WebSocket must match.
         mediaSession.StartHosting(
             roomSession.RelayUrl ?? ServiceCollector.Config.RelayUrl, roomId, connectionId, device, screenCapture, audioCapture, ffmpegPath,
             Settings.TargetHeight, Settings.VideoBitrateKbps, Settings.VideoFpsTarget, Settings.Codec, Settings.AudioBitrateKbps * 1000);
 
-        // Deliberately AFTER StartHosting. Starting audio first would hand StartHosting a snapshot
-        // of the source taken moments earlier, and per-process capture activates asynchronously -
-        // so whether the stream ended up with audio would come down to which of the two happened
-        // to finish first. Coming in through UpdateAudioSource instead has no such ordering:
-        // MediaSessionService records the source under a lock and wires it in as soon as the
-        // stream's socket is up, whichever order the two arrive in.
         if (Settings.AutoStartAudioWithStream && audioCapture is null)
-        {
-            autoStartedAudioCapture = true;
             StartAudioCapture();
-        }
     }
 
     private bool TryRecoverFromDeviceRemoved(Exception ex)
@@ -1025,14 +1022,6 @@ public sealed class ShareWindow : Window, IDisposable
             && sdx.ResultCode != SharpDX.DXGI.ResultCode.DeviceHung)
             return false;
 
-        // The exception itself only says THAT some call failed because the device is gone, not
-        // WHY it was removed in the first place. GetDeviceRemovedReason (still callable on an
-        // already-removed device - that's its whole purpose) gives the real answer: DeviceHung
-        // means a TDR timeout (a submitted command took too long, usually GPU overload), while
-        // DriverInternalError/DeviceReset point at an actual driver-level fault rather than a
-        // load problem. Logged here since this is the one place that sees every device-removed
-        // failure regardless of which code path (sync button click or async media session
-        // start) triggered it.
         if (device is not null)
         {
             SharpDX.ResultDescriptor reason = SharpDX.ResultDescriptor.Find(device.Device.DeviceRemovedReason);
@@ -1045,8 +1034,6 @@ public sealed class ShareWindow : Window, IDisposable
         lastOpenedViewerVideoHandle = null;
         DisposeStreamCapture();
 
-        // The panel renderer holds shaders and a constant buffer on the dead device; leaving them
-        // behind would have the next frame draw against it and fail identically forever.
         worldScreen.ReleaseDevice();
         device?.Dispose();
         device = null;
@@ -1075,13 +1062,7 @@ public sealed class ShareWindow : Window, IDisposable
 
         DisposeStep(DisposeStreamCapture, nameof(screenCapture));
 
-        DisposeStep(
-            () =>
-            {
-                audioCapture?.Dispose();
-                audioCapture = null;
-            },
-            nameof(audioCapture));
+        DisposeStep(ReleaseAudioCapture, nameof(audioCapture));
 
         DisposeStep(worldScreen.Dispose, nameof(worldScreen));
 

@@ -7,20 +7,6 @@ using MapFlags = SharpDX.Direct3D11.MapFlags;
 
 namespace MediaProbe;
 
-/// <summary>
-/// Whether a D3D11 texture shared from one device can be opened on another, on this machine.
-///
-/// On Windows this is so reliable that it is not worth asking. Under Wine it is the open question
-/// that decides how much work the viewer path needs: DXVK implements shared handles only partly,
-/// and the plugin leans on them in a place it does not have to. <c>H264Decoder</c> creates its
-/// decode texture with <see cref="ResourceOptionFlags.Shared"/> on the plugin's own device and
-/// <c>ShareWindow</c> opens it on the game's, even though the ffmpeg path only ever fills that
-/// texture with an UpdateSubresource from a managed array - which needs no second device at all.
-///
-/// So: if this passes under Wine, the viewer path collapses to "force the ffmpeg decoder" and the
-/// whole single-device refactor is unnecessary. If it fails, that refactor is the work. Nothing
-/// else distinguishes those two outcomes, and neither can be guessed from Windows.
-/// </summary>
 internal static class SharedTexture
 {
     private const int Width = 256;
@@ -40,10 +26,6 @@ internal static class SharedTexture
         Console.WriteLine($"Adapter [{adapterIndex}] {adapter.Description1.Description.Trim()}");
         Console.WriteLine();
 
-        // Mirrors GameAdapterDevice exactly: the game's device is an ordinary one, and the plugin
-        // makes a SECOND device on the same adapter at the game's feature level with VideoSupport
-        // (which exists only for Media Foundation). Probing any other pair would answer a question
-        // nobody is asking.
         using var gameDevice = new Device(adapter, DeviceCreationFlags.BgraSupport);
         using var pluginDevice = new Device(
             adapter,
@@ -63,9 +45,6 @@ internal static class SharedTexture
             "cross-device share (the real question)",
             pluginDevice, gameDevice, pattern);
 
-        // A control. If the cross-device case fails but this passes, the failure is specifically
-        // about sharing rather than about textures, UpdateSubresource or readback being broken -
-        // which is the difference between "refactor the viewer path" and "nothing works here".
         bool sameDevice = Attempt(
             "same-device control (should always pass)",
             pluginDevice, pluginDevice, pattern);
@@ -110,18 +89,11 @@ internal static class SharedTexture
 
         try
         {
-            // The plugin's own helper, not a copy of it, so a change to the real flags shows up here.
             shared = SharedTextureFactory.CreateEmpty(producer, Width, Height);
             Console.WriteLine("  create shared      : OK");
 
             producer.ImmediateContext.UpdateSubresource(pattern, shared, 0, Width * 4, 0);
 
-            // A plain Shared texture carries no keyed mutex and no fence, so Flush only STARTS the
-            // upload - it does not wait for it. Without this the consumer's CopyResource below can
-            // read the texture before the write has retired: an early version of this probe did
-            // exactly that and reported a corrupt round trip intermittently on a machine where
-            // sharing works perfectly. That false FAIL is the worst outcome this probe can produce,
-            // because it would send someone into the single-device refactor to fix a bug in here.
             WaitForGpu(producer);
             Console.WriteLine("  UpdateSubresource  : OK");
 
@@ -137,8 +109,6 @@ internal static class SharedTexture
             opened = consumer.OpenSharedResource<Texture2D>(handle);
             Console.WriteLine("  OpenSharedResource : OK");
 
-            // What SharedTextureBridge does with it. Reimplemented rather than called, because the
-            // real one returns a RawTextureWrap and that drags in Dalamud, which cannot load here.
             using (var srv = new ShaderResourceView(consumer, opened))
             {
                 if (srv.NativePointer == nint.Zero)
@@ -150,8 +120,6 @@ internal static class SharedTexture
 
             Console.WriteLine("  ShaderResourceView : OK");
 
-            // Opening a handle can succeed while the pixels behind it are not actually the same
-            // memory, which is the failure mode that looks like a working stream showing black.
             staging = new Texture2D(consumer, new Texture2DDescription
             {
                 Width = Width,
@@ -209,11 +177,6 @@ internal static class SharedTexture
         }
     }
 
-    /// <summary>
-    /// Blocks until everything already submitted on this device's immediate context has retired.
-    /// An Event query signals exactly that, and is the only ordering guarantee available between
-    /// two devices sharing a texture that has no keyed mutex.
-    /// </summary>
     private static void WaitForGpu(Device device)
     {
         using var query = new Query(device, new QueryDescription
@@ -228,8 +191,6 @@ internal static class SharedTexture
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         while (!device.ImmediateContext.IsDataAvailable(query))
         {
-            // A device that never signals is itself a finding, so bound the wait rather than
-            // hanging the probe on it. Two seconds is far beyond a 256x128 upload.
             if (stopwatch.ElapsedMilliseconds > 2000)
                 throw new TimeoutException("GPU did not signal completion within 2s.");
 
@@ -239,8 +200,6 @@ internal static class SharedTexture
 
     private static byte[] BuildPattern()
     {
-        // Varies along both axes so a transposed, stride-mangled or partially-copied result reads
-        // as a mismatch rather than coincidentally matching.
         byte[] pattern = new byte[Width * Height * 4];
         for (int y = 0; y < Height; y++)
         {
@@ -264,8 +223,6 @@ internal static class SharedTexture
 
         for (int y = 0; y < Height; y++)
         {
-            // Never assume the staging row pitch equals width*4 - drivers pad it, and reading as
-            // though they do not is itself a bug that would masquerade as a share failure.
             System.Runtime.InteropServices.Marshal.Copy(
                 box.DataPointer + (y * box.RowPitch), row, 0, row.Length);
 
