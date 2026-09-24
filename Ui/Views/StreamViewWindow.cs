@@ -86,6 +86,14 @@ public sealed class StreamViewWindow : Window
         }
 
         ImGui.Separator();
+        if (mediaSession.IsLocalPreview)
+        {
+            ImGui.TextDisabled("Local preview of your capture - not downloaded from the relay, so it uses no extra bandwidth.");
+            ImGui.TextDisabled("Viewers see it after encoding and their playback buffer. No audio is played here.");
+            DrawWorldScreenSection();
+            return;
+        }
+
         ImGui.TextUnformatted(
             $"{mediaSession.ViewerFramesDecoded} frames decoded ({mediaSession.ViewerAverageFps:F1} fps avg), " +
             $"{mediaSession.ViewerAudioPackets} audio packets");

@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Rendering;
@@ -287,17 +287,20 @@ internal sealed class WorldScreenPanel
             Id("placeSideways"), "Left / right (m)", ref sliderSideways, -PositionRangeMeters, PositionRangeMeters,
             labelWidth, decimals: 1, tooltip: "Slides the screen sideways, along its own face.");
         bool changed = edit.Committed;
+        bool edited = edit.Changed;
         bool active = edit.Active;
 
         edit = UiTheme.ValueSlider(
             Id("placeForward"), "Forward / back (m)", ref sliderForward, -PositionRangeMeters, PositionRangeMeters,
             labelWidth, decimals: 1, tooltip: "Pushes the screen away from, or pulls it towards, where it was placed from.");
         changed |= edit.Committed;
+        edited |= edit.Changed;
         active |= edit.Active;
 
         edit = UiTheme.ValueSlider(
             Id("placeWidth"), "Width (m)", ref sliderWidth, 1f, 40f, labelWidth, decimals: 1);
         changed |= edit.Committed;
+        edited |= edit.Changed;
         active |= edit.Active;
 
         float heightAnchor = sliderSource?.Y ?? placement.Y;
@@ -307,14 +310,17 @@ internal sealed class WorldScreenPanel
             Id("placeHeight"), "Height (m)", ref sliderHeight, heightAnchor - 10f, heightAnchor + 10f,
             labelWidth, decimals: 1);
         changed |= edit.Committed;
+        edited |= edit.Changed;
         active |= edit.Active;
 
         edit = UiTheme.ValueSlider(Id("placeYaw"), "Rotate (left/right)", ref sliderYaw, -180f, 180f, labelWidth, decimals: 0);
         changed |= edit.Committed;
+        edited |= edit.Changed;
         active |= edit.Active;
 
         edit = UiTheme.ValueSlider(Id("placeTilt"), "Tilt (down/up)", ref sliderPitch, -60f, 60f, labelWidth, decimals: 0);
         changed |= edit.Committed;
+        edited |= edit.Changed;
         active |= edit.Active;
 
         UiTheme.SectionLabel("Audio");
@@ -322,32 +328,53 @@ internal sealed class WorldScreenPanel
         edit = UiTheme.ValueSlider(
             Id("placeSpread"), "Speaker spread (m)", ref sliderSpread, 0f, 15f, labelWidth, decimals: 1);
         changed |= edit.Committed;
+        edited |= edit.Changed;
         active |= edit.Active;
 
         edit = UiTheme.ValueSlider(
             Id("placeFalloffStart"), "Audio full volume within (m)", ref sliderFalloffStart, 0f, 50f,
             labelWidth, decimals: 1);
         changed |= edit.Committed;
+        edited |= edit.Changed;
         active |= edit.Active;
 
         edit = UiTheme.ValueSlider(
             Id("placeFalloffEnd"), "Audio silent beyond (m)", ref sliderFalloffEnd, 1f, 120f,
             labelWidth, decimals: 1);
         changed |= edit.Committed;
+        edited |= edit.Changed;
         active |= edit.Active;
 
+        bool wasActive = slidersActive;
         slidersActive = active;
 
         if (!changed)
-            return;
+        {
+            // Show slider drags on this client right away; the room gets the result on release.
+            if (active && edited)
+                worldScreen().PreviewPlacement = BuildSliderPlacement(placement) with { Version = placement.Version };
+            else if (wasActive && !active)
+                worldScreen().PreviewPlacement = null;
 
+            return;
+        }
+
+        ScreenPlacementInfo anchor = positionAnchor ?? placement;
+        ScreenPlacementInfo updated = BuildSliderPlacement(placement);
+        bool turned = MathF.Abs(updated.Yaw - anchor.Yaw) > 0.0001f;
+
+        worldScreen().PreviewPlacement = null;
+        SeedSliders(updated, keepPositionAnchor: !turned);
+        ApplyPlacement(updated);
+    }
+
+    private ScreenPlacementInfo BuildSliderPlacement(ScreenPlacementInfo placement)
+    {
         ScreenPlacementInfo anchor = positionAnchor ?? placement;
         ScreenPlacementInfo moved = WorldScreenController.Nudge(anchor, sliderSideways, sliderForward);
         float yaw = sliderYaw * MathF.PI / 180f;
 
-        bool turned = MathF.Abs(yaw - anchor.Yaw) > 0.0001f;
-
-        ScreenPlacementInfo updated = placement with
+        return placement with
         {
             X = moved.X,
             Z = moved.Z,
@@ -361,9 +388,6 @@ internal sealed class WorldScreenPanel
             FalloffEnd = MathF.Max(sliderFalloffEnd, sliderFalloffStart + 1f),
             Version = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         };
-
-        SeedSliders(updated, keepPositionAnchor: !turned);
-        ApplyPlacement(updated);
     }
 
     private void SeedSliders(ScreenPlacementInfo placement, bool keepPositionAnchor = false)

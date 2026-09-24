@@ -529,8 +529,8 @@ public sealed class ShareWindow : Window, IDisposable
         {
             ImGui.SetTooltip(
                 "Preview your own stream.\n" +
-                "Turn audio capture off first - system loopback would record\n" +
-                "this preview's own playback and feed it back into the stream.");
+                "Shown straight from your capture, so it uses no extra bandwidth\n" +
+                "and plays no audio.");
         }
     }
 
@@ -566,9 +566,10 @@ public sealed class ShareWindow : Window, IDisposable
         UiTheme.Icon(FontAwesomeIcon.Eye, UiTheme.WatchingColor);
         ImGui.SameLine();
 
+        string who = mediaSession.IsLocalPreview ? "your own stream" : displayName;
         ImGui.TextUnformatted(worldScreen.IsProjecting && !StreamView.IsOpen
-            ? $"Watching {displayName} on the in-world screen."
-            : $"Watching {displayName} in a popout window.");
+            ? $"Watching {who} on the in-world screen."
+            : $"Watching {who} in a popout window.");
 
         ImGui.SameLine();
         if (ImGui.Button("Show##showStreamView"))
@@ -581,7 +582,8 @@ public sealed class ShareWindow : Window, IDisposable
         if (ImGui.Button("Stop watching##stopFromStatus"))
             StopWatching();
 
-        DrawWatchingVolume();
+        if (!mediaSession.IsLocalPreview)
+            DrawWatchingVolume();
     }
 
     private static void DrawWatchingVolume()
@@ -726,11 +728,11 @@ public sealed class ShareWindow : Window, IDisposable
         wasViewerInRoom = isViewerInRoom;
 
         if (!roomSession.InRoom && mediaSession.IsHosting)
-        {
-            mediaSession.StopHosting();
-            DisposeStreamCapture();
-            StopAudioCapture();
-        }
+            StopStreaming();
+
+        // Hosting can also stop on its own (a failed connect), which leaves the preview pointing at a dead capture.
+        if (mediaSession.IsLocalPreview && !mediaSession.IsHosting)
+            StopWatching();
 
         if (mediaSession.IsViewing && mediaSession.ViewingStreamerConnectionId is { } watchingId
             && !roomSession.ActiveStreamers.Any(s => s.ConnectionId == watchingId))
@@ -782,6 +784,12 @@ public sealed class ShareWindow : Window, IDisposable
 
     private void StartWatching(string streamerConnectionId)
     {
+        if (streamerConnectionId == roomSession.ConnectionId && mediaSession.IsHosting && screenCapture is not null)
+        {
+            StartLocalPreview(streamerConnectionId, screenCapture);
+            return;
+        }
+
         try
         {
             device ??= new GameAdapterDevice(ServiceCollector.PI.UiBuilder);
@@ -798,6 +806,16 @@ public sealed class ShareWindow : Window, IDisposable
             ServiceCollector.PluginLog.Error(ex, "ScreenShare failed to start viewing session");
             TryRecoverFromDeviceRemoved(ex);
         }
+    }
+
+    private void StartLocalPreview(string selfConnectionId, ICaptureSource capture)
+    {
+        mediaSession.StartLocalPreview(selfConnectionId, capture);
+        previewTexture?.Dispose();
+        previewTexture = null;
+        lastOpenedViewerVideoHandle = null;
+        StreamView.IsOpen = true;
+        StreamView.BringToFront();
     }
 
     private void StopWatching()
@@ -966,9 +984,7 @@ public sealed class ShareWindow : Window, IDisposable
     {
         if (mediaSession.IsHosting)
         {
-            mediaSession.StopHosting();
-            DisposeStreamCapture();
-            StopAudioCapture();
+            StopStreaming();
             return;
         }
 
@@ -1012,6 +1028,16 @@ public sealed class ShareWindow : Window, IDisposable
             StartAudioCapture();
     }
 
+    private void StopStreaming()
+    {
+        if (mediaSession.IsLocalPreview)
+            StopWatching();
+
+        mediaSession.StopHosting();
+        DisposeStreamCapture();
+        StopAudioCapture();
+    }
+
     private bool TryRecoverFromDeviceRemoved(Exception ex)
     {
         if (ex is not SharpDX.SharpDXException sdx)
@@ -1029,6 +1055,9 @@ public sealed class ShareWindow : Window, IDisposable
         }
 
         ServiceCollector.PluginLog.Warning(ex, "ScreenShare GPU device removed/reset - resetting so the next action recreates it.");
+        if (mediaSession.IsLocalPreview)
+            StopWatching();
+
         previewTexture?.Dispose();
         previewTexture = null;
         lastOpenedViewerVideoHandle = null;

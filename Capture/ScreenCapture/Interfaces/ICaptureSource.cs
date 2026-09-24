@@ -10,6 +10,8 @@ public interface ICaptureSource : IDisposable
 
     Texture2D CaptureTexture { get; }
 
+    nint SharedHandle { get; }
+
     Exception? LastError { get; }
 
     long FramesCaptured { get; }

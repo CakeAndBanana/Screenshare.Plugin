@@ -34,6 +34,8 @@ public sealed class WindowCapture : ICaptureSource
 
     public Texture2D CaptureTexture => targetTexture;
 
+    public nint SharedHandle { get; }
+
     public Exception? LastError { get; private set; }
 
     public long FramesCaptured => Interlocked.Read(ref framesCaptured);
@@ -79,6 +81,7 @@ public sealed class WindowCapture : ICaptureSource
         poolHeight = Height;
 
         targetTexture = SharedTextureFactory.CreateEmpty(device, Width, Height, renderTarget: true);
+        SharedHandle = SharedTextureFactory.GetSharedHandle(targetTexture);
         targetView = new RenderTargetView(device, targetTexture);
         downscaler = new GpuDownscaler(device);
 

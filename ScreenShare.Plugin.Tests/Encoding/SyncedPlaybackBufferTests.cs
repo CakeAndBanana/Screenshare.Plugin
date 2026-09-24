@@ -111,30 +111,47 @@ public class SyncedPlaybackBufferTests
         Assert.Equal(2010, buffer.GetPtsAtPlayedBytes(30 * BytesPerMs));
     }
 
+    // Add trims at the target plus burst headroom, not at the target itself.
+    private const int SmallTargetMs = 40;
+    private const int SmallCapMs = SmallTargetMs + SyncedPlaybackBuffer.BurstHeadroomMs;
+
+    private static SyncedPlaybackBuffer FillOnePacketPastTheCap()
+    {
+        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: SmallTargetMs);
+        for (int i = 0; i <= SmallCapMs / 20; i++)
+            buffer.Add(1000 + (i * 20), Packet((byte)(i + 1)));
+        return buffer;
+    }
+
+    [Fact]
+    public void Add_WithinTheBurstHeadroom_KeepsEverything()
+    {
+        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: SmallTargetMs);
+        for (int i = 0; i < SmallCapMs / 20; i++)
+            buffer.Add(1000 + (i * 20), Packet(1));
+
+        Assert.Equal(SmallCapMs, buffer.BufferedMilliseconds);
+        Assert.Equal(0, buffer.DroppedMilliseconds);
+    }
+
     [Fact]
     public void Add_PastTheCap_DropsTheOldestAudioNotTheNewest()
     {
-        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 40);
-        buffer.Add(1000, Packet(1));
-        buffer.Add(1020, Packet(2));
-        buffer.Add(1040, Packet(3));
+        SyncedPlaybackBuffer buffer = FillOnePacketPastTheCap();
 
-        Assert.Equal(40, buffer.BufferedMilliseconds);
+        Assert.Equal(SmallCapMs, buffer.BufferedMilliseconds);
         Assert.Equal(20, buffer.DroppedMilliseconds);
 
-        byte[] played = Drain(buffer, 40);
+        byte[] played = Drain(buffer, SmallCapMs);
         Assert.Equal(2, played[0]);
-        Assert.Equal(3, played[^1]);
+        Assert.Equal((SmallCapMs / 20) + 1, played[^1]);
     }
 
     [Fact]
     public void Add_PastTheCap_KeepsTheClockOnTheAudioThatSurvived()
     {
-        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 40);
-        buffer.Add(1000, Packet(1));
-        buffer.Add(1020, Packet(2));
-        buffer.Add(1040, Packet(3));
-        Drain(buffer, 40);
+        SyncedPlaybackBuffer buffer = FillOnePacketPastTheCap();
+        Drain(buffer, SmallCapMs);
 
         Assert.Equal(1020, buffer.GetPtsAtPlayedBytes(0));
     }
@@ -142,10 +159,12 @@ public class SyncedPlaybackBufferTests
     [Fact]
     public void Add_DroppingPartOfAPacket_AdvancesThatPacketsPtsToMatch()
     {
-        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 30);
-        buffer.Add(1000, Packet(1));
-        buffer.Add(1020, Packet(2));
-        Drain(buffer, 30);
+        const int targetMs = 30;
+        const int capMs = targetMs + SyncedPlaybackBuffer.BurstHeadroomMs;
+        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: targetMs);
+        for (int i = 0; i < (capMs + 10) / 20; i++)
+            buffer.Add(1000 + (i * 20), Packet((byte)(i + 1)));
+        Drain(buffer, capMs);
 
         Assert.Equal(1010, buffer.GetPtsAtPlayedBytes(0));
         Assert.Equal(1020, buffer.GetPtsAtPlayedBytes(10 * BytesPerMs));
@@ -154,17 +173,32 @@ public class SyncedPlaybackBufferTests
     [Fact]
     public void Add_WhilePlaybackIsHeldBack_LeavesPlaybackAtTheLiveEdge()
     {
-        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 40);
+        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: SmallTargetMs);
 
         for (int i = 0; i < 150; i++)
             buffer.Add(1000 + (i * 20), Packet((byte)(i % 250)));
 
-        Assert.Equal(40, buffer.BufferedMilliseconds);
+        Assert.Equal(SmallCapMs, buffer.BufferedMilliseconds);
 
         Drain(buffer, 40);
 
-        Assert.Equal(3960, buffer.GetPtsAtPlayedBytes(0));
-        Assert.Equal(3980, buffer.GetPtsAtPlayedBytes(20 * BytesPerMs));
+        const int liveEdge = 1000 + (150 * 20);
+        Assert.Equal(liveEdge - SmallCapMs, buffer.GetPtsAtPlayedBytes(0));
+        Assert.Equal(liveEdge - SmallCapMs + 20, buffer.GetPtsAtPlayedBytes(20 * BytesPerMs));
+    }
+
+    [Fact]
+    public void SustainedCleanPlayback_NeverNarrowsBelowTheConfiguredBudget()
+    {
+        SyncedPlaybackBuffer buffer = NewBuffer(maxBufferedMs: 200);
+
+        for (int i = 0; i < 3_000; i++)
+        {
+            buffer.Add(1000 + (i * 20), TonePacket());
+            Drain(buffer, 20);
+        }
+
+        Assert.Equal(200, buffer.TargetMilliseconds);
     }
 
     [Fact]

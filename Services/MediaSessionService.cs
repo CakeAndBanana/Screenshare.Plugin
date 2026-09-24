@@ -68,11 +68,19 @@ public sealed class MediaSessionService : IDisposable
 
     public Exception? ViewerLastException { get; private set; }
 
-    public nint? ViewerSharedHandle => videoDecoder?.SharedHandle;
+    private readonly record struct LocalPreviewSource(nint SharedHandle, int Width, int Height);
 
-    public int ViewerWidth => videoDecoder?.Width ?? 0;
+    // Set while the streamer watches their own stream: the preview shows the capture texture directly
+    // instead of pulling the stream back down from the relay, so it costs no download or decode.
+    private LocalPreviewSource? localPreview;
 
-    public int ViewerHeight => videoDecoder?.Height ?? 0;
+    public bool IsLocalPreview => localPreview is not null;
+
+    public nint? ViewerSharedHandle => localPreview is { } local ? local.SharedHandle : videoDecoder?.SharedHandle;
+
+    public int ViewerWidth => localPreview?.Width ?? videoDecoder?.Width ?? 0;
+
+    public int ViewerHeight => localPreview?.Height ?? videoDecoder?.Height ?? 0;
 
     public int ViewerAudioTargetMs => audioDecoder?.TargetBufferedMilliseconds ?? 0;
 
@@ -413,6 +421,16 @@ public sealed class MediaSessionService : IDisposable
         _ = StartViewingCoreAsync(relayUrl, roomId, connectionId, streamerConnectionId);
     }
 
+    public void StartLocalPreview(string selfConnectionId, ICaptureSource capture)
+    {
+        StopViewing();
+        ViewerLastError = null;
+        ViewerLastException = null;
+        localPreview = new LocalPreviewSource(capture.SharedHandle, capture.Width, capture.Height);
+        ViewingStreamerConnectionId = selfConnectionId;
+        IsViewing = true;
+    }
+
     private async Task StartViewingCoreAsync(string relayUrl, string roomId, string connectionId, string streamerConnectionId)
     {
         try
@@ -557,6 +575,7 @@ public sealed class MediaSessionService : IDisposable
         if (oldAudioDecoder is not null)
             _ = Task.Run(() => DisposeSafely(oldAudioDecoder, "AudioPlaybackDecoder"));
 
+        localPreview = null;
         viewerDevice = null;
         viewerFfmpegExePath = null;
         ViewingStreamerConnectionId = null;

@@ -35,6 +35,12 @@ public sealed class WorldScreenController : IDisposable
 
     public bool IsProjecting { get; private set; }
 
+    /// <summary>
+    /// A placement being edited (gizmo drag or slider drag) that only this client draws; the room
+    /// gets the final placement once the edit is released.
+    /// </summary>
+    public ScreenPlacementInfo? PreviewPlacement { get; set; }
+
     public void Update(
         GameAdapterDevice? device,
         RawTextureWrap? videoTexture,
@@ -54,6 +60,7 @@ public sealed class WorldScreenController : IDisposable
                 IsDraggingGizmo = false;
             }
 
+            PreviewPlacement = null;
             ReleaseDevice();
             mediaSession.SetViewerSpeakerGains(SpeakerGains.Identity);
             return;
@@ -63,9 +70,16 @@ public sealed class WorldScreenController : IDisposable
 
         if (!TryResolvePlacement(roomSession, out ScreenPlacementInfo? placement) || device is null)
         {
+            PreviewPlacement = null;
             mediaSession.SetViewerSpeakerGains(SpeakerGains.Identity);
             return;
         }
+
+        // A preview keeps the version it was started from; drop it once the room's placement moves on.
+        if (PreviewPlacement is { } preview && preview.Version == placement!.Version && CanPlace(roomSession))
+            placement = preview;
+        else
+            PreviewPlacement = null;
 
         bool isLive = mediaSession.IsViewing && videoTexture is not null;
         RawTextureWrap? panelTexture = isLive ? videoTexture : TryGetBlackTexture(device);
@@ -104,6 +118,7 @@ public sealed class WorldScreenController : IDisposable
             {
                 WorldScreenGizmo.Reset();
                 IsDraggingGizmo = false;
+                PreviewPlacement = null;
             }
 
             return placement;
@@ -116,11 +131,22 @@ public sealed class WorldScreenController : IDisposable
 
         IsDraggingGizmo = result.IsDragging;
 
-        if (result.Finished)
-            ApplyPlacement(roomSession, result.Placement);
+        if (result.IsDragging)
+        {
+            // Fed back in next frame: ImGuizmo's rotate applies per-frame deltas to the matrix it is given.
+            PreviewPlacement = result.Placement;
+        }
+        else if (result.Finished)
+        {
+            PreviewPlacement = null;
+            ApplyPlacement(roomSession, Stamp(result.Placement));
+        }
 
         return result.Placement;
     }
+
+    private static ScreenPlacementInfo Stamp(ScreenPlacementInfo placement) =>
+        placement with { Version = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
 
     public static bool CanPlace(RoomSessionService roomSession) => roomSession.InRoom && roomSession.CanPlaceScreen;
 
