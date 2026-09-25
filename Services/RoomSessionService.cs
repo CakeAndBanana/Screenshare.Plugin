@@ -95,6 +95,8 @@ public sealed class RoomSessionService : IDisposable
             ? [.. current.Rooms.Where(r => r.IsPublic && !IsBannedFrom(r.RoomId))]
             : [];
 
+    public IReadOnlyList<string> Regions => directory?.Regions ?? [];
+
     public RoomListing? FindListing(string roomId)
     {
         if (IsBannedFrom(roomId) || directory is not { } current)
@@ -615,11 +617,11 @@ public sealed class RoomSessionService : IDisposable
         }
     }
 
-    public void CreateRoom(string name, bool isPublic, string password, int maxViewers)
+    public void CreateRoom(string name, bool isPublic, string password, int maxViewers, string? region = null)
     {
         LastError = null;
         lastRoomPassword = password;
-        _ = CreateRoomCoreAsync(new CreateRoomRequest(name, isPublic, string.IsNullOrEmpty(password) ? null : password, maxViewers));
+        _ = CreateRoomCoreAsync(new CreateRoomRequest(name, isPublic, string.IsNullOrEmpty(password) ? null : password, maxViewers, region));
     }
 
     private async Task CreateRoomCoreAsync(CreateRoomRequest request)

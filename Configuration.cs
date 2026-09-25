@@ -43,6 +43,8 @@ public sealed class Configuration : IPluginConfiguration
 
     public int PlaybackLatencyMs { get; set; } = 500;
 
+    public const float MaxViewerVolume = 2f;
+
     public float ViewerVolume { get; set; } = 1f;
 
     public int AvSyncOffsetMs { get; set; }

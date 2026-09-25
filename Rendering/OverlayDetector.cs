@@ -22,6 +22,46 @@ internal static class OverlayDetector
         }
     }
 
+    // Anything that hooks Present or reorders the frame's passes: upscalers, overlays, capture hooks.
+    private static readonly string[] GraphicsModuleHints =
+    [
+        "nvngx", "dlss", "ffx", "fidelityfx", "xess", "optiscaler", "reshade", "gshade",
+        "rtsshooks", "discordhook", "gameoverlayrenderer", "graphics-hook", "nvspcap", "overlay",
+    ];
+
+    // System dlls that injectors ship as proxies next to the game executable.
+    private static readonly string[] ProxyDllNames = ["dxgi.dll", "d3d11.dll", "dinput8.dll", "winmm.dll", "version.dll"];
+
+    public static string DescribeGraphicsModules()
+    {
+        try
+        {
+            string systemDir = Environment.SystemDirectory;
+            var found = new List<string>();
+
+            using Process self = Process.GetCurrentProcess();
+
+            foreach (ProcessModule module in self.Modules)
+            {
+                using (module)
+                {
+                    string name = module.ModuleName;
+                    bool isProxy = ProxyDllNames.Contains(name, StringComparer.OrdinalIgnoreCase)
+                        && !module.FileName.StartsWith(systemDir, StringComparison.OrdinalIgnoreCase);
+
+                    if (isProxy || GraphicsModuleHints.Any(hint => name.Contains(hint, StringComparison.OrdinalIgnoreCase)))
+                        found.Add(isProxy ? $"{name} (proxy: {module.FileName})" : name);
+                }
+            }
+
+            return found.Count == 0 ? "none" : string.Join(", ", found);
+        }
+        catch (Exception ex)
+        {
+            return $"unavailable ({ex.GetType().Name})";
+        }
+    }
+
     private static string? Scan()
     {
         try

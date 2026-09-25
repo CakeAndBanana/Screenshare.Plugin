@@ -29,6 +29,8 @@ public sealed class ShareWindow : Window, IDisposable
 
     private static readonly Vector2 ConnectedSize = new(560, 540);
 
+    private static readonly string VersionLabel = $"v{typeof(ShareWindow).Assembly.GetName().Version?.ToString(3) ?? "?"}";
+
     private GameAdapterDevice? device;
     private ICaptureSource? screenCapture;
 
@@ -146,7 +148,9 @@ public sealed class ShareWindow : Window, IDisposable
 
         WindowName = screen == Screen.Room && roomSession.RoomName is { } roomName
             ? $"Screen Share · {roomName}{(mediaSession.IsHosting ? " · LIVE" : string.Empty)}###ScreenShareMainWindow"
-            : "Screen Share###ScreenShareMainWindow";
+            : screen == Screen.Connect
+                ? $"Screen Share · {VersionLabel}###ScreenShareMainWindow"
+                : "Screen Share###ScreenShareMainWindow";
 
         if (screen == Screen.Connect)
             Flags |= ImGuiWindowFlags.AlwaysAutoResize;
@@ -596,8 +600,8 @@ public sealed class ShareWindow : Window, IDisposable
 
         int volumePercent = (int)MathF.Round(config.ViewerVolume * 100f);
         ImGui.SetNextItemWidth(MathF.Max(UiTheme.Px(80), MathF.Min(UiTheme.Px(140), ImGui.GetContentRegionAvail().X)));
-        if (ImGui.SliderInt("##watchingVolume", ref volumePercent, 0, 100, "%d%%"))
-            config.ViewerVolume = Math.Clamp(volumePercent / 100f, 0f, 1f);
+        if (ImGui.SliderInt("##watchingVolume", ref volumePercent, 0, (int)(Configuration.MaxViewerVolume * 100f), "%d%%"))
+            config.ViewerVolume = Math.Clamp(volumePercent / 100f, 0f, Configuration.MaxViewerVolume);
 
         if (ImGui.IsItemDeactivatedAfterEdit())
             ServiceCollector.PI.SavePluginConfig(config);

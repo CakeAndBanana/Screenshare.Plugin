@@ -21,6 +21,7 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
     private int createVisibility;
     private string createPassword = string.Empty;
     private int createMaxViewers = 4;
+    private string? createRegion;
 
     private string joinCode = string.Empty;
     private string joinPassword = string.Empty;
@@ -568,13 +569,15 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         ImGui.TextUnformatted("Max viewers");
         UiTheme.ValueSlider("##maxViewers", string.Empty, ref createMaxViewers, 1, 16, 0f);
 
+        DrawRegionPicker(width);
+
         ImGui.Spacing();
         ImGui.Separator();
         float spacing = ImGui.GetStyle().ItemSpacing.X;
         var buttonSize = new Vector2((width - spacing) / 2, ImGui.GetFrameHeight() * 1.2f);
         if (UiTheme.ColoredButton("Create", UiTheme.ColorOf(kind), buttonSize))
         {
-            roomSession.CreateRoom(createName.Trim(), isPublic, createPassword, Math.Clamp(createMaxViewers, 1, 16));
+            roomSession.CreateRoom(createName.Trim(), isPublic, createPassword, Math.Clamp(createMaxViewers, 1, 16), createRegion);
             ImGui.CloseCurrentPopup();
         }
 
@@ -584,6 +587,49 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
 
         ImGui.EndPopup();
     }
+
+    private void DrawRegionPicker(float width)
+    {
+        IReadOnlyList<string> regions = roomSession.Regions;
+
+        // A pick that's no longer offered (its servers went away) quietly becomes Automatic.
+        if (createRegion is not null && !regions.Contains(createRegion))
+            createRegion = null;
+
+        // One region is no choice at all; relays from before regions send none.
+        if (regions.Count < 2)
+            return;
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Server region");
+        ImGui.SetNextItemWidth(width);
+        if (ImGui.BeginCombo("##createRegion", createRegion is null ? "Automatic" : RegionName(createRegion)))
+        {
+            if (ImGui.Selectable("Automatic", createRegion is null))
+                createRegion = null;
+
+            foreach (string region in regions)
+            {
+                if (ImGui.Selectable(RegionName(region), createRegion == region))
+                    createRegion = region;
+            }
+
+            ImGui.EndCombo();
+        }
+
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + width);
+        ImGui.TextDisabled(createRegion is null
+            ? "Uses whichever server has the most room."
+            : "Pick the region closest to you and your viewers.");
+        ImGui.PopTextWrapPos();
+    }
+
+    private static string RegionName(string region) => region switch
+    {
+        "eu" => "Europe (EU)",
+        "na" => "North America (NA)",
+        _ => region.ToUpperInvariant(),
+    };
 
     private void DrawJoinPopup()
     {

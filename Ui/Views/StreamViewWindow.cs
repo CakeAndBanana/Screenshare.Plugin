@@ -22,6 +22,8 @@ public sealed class StreamViewWindow : Window
 
     private readonly WorldScreenPanel worldScreenPanel;
 
+    private const int MaxVolumePercent = (int)(Configuration.MaxViewerVolume * 100f);
+
     private float volume = ServiceCollector.Config.ViewerVolume;
     private bool volumeActive;
     private int avSyncOffsetMs = ServiceCollector.Config.AvSyncOffsetMs;
@@ -194,11 +196,11 @@ public sealed class StreamViewWindow : Window
 
         int volumePercent = (int)MathF.Round(volume * 100f);
         SliderEdit volumeEdit = UiTheme.ValueSlider(
-            "##viewerVolume", "Volume", ref volumePercent, 0, 100, labelWidth, unit: "%");
+            "##viewerVolume", "Volume", ref volumePercent, 0, MaxVolumePercent, labelWidth, unit: "%");
         volumeActive = volumeEdit.Active;
         if (volumeEdit.Changed)
         {
-            volume = Math.Clamp(volumePercent / 100f, 0f, 1f);
+            volume = Math.Clamp(volumePercent / 100f, 0f, Configuration.MaxViewerVolume);
             config.ViewerVolume = volume;
         }
 

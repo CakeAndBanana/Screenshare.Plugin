@@ -27,6 +27,14 @@ public sealed class WorldScreenController : IDisposable
 
     public bool IsDrawingUnderUi => sceneHook?.IsActive == true;
 
+    /// <summary>
+    /// ReShade/GShade reorder the frame's passes, which makes the in-scene draw flicker, so drawing
+    /// under the UI is skipped while one is loaded. The saved setting is left alone.
+    /// </summary>
+    public static string? UnderUiBlockedBy => OverlayDetector.Detected;
+
+    private static bool WantsDrawUnderUi(Configuration config) => config.WorldScreenDrawUnderUi && UnderUiBlockedBy is null;
+
     public bool EditMode { get; set; }
 
     public GizmoOperation GizmoOperation { get; set; } = GizmoOperation.Move;
@@ -229,7 +237,7 @@ public sealed class WorldScreenController : IDisposable
 
         SceneDepthBuffer? depth = GameSceneCamera.TryGetSceneDepth();
 
-        bool drawsIntoScene = config.WorldScreenDrawUnderUi
+        bool drawsIntoScene = WantsDrawUnderUi(config)
             && TryGetSceneHook(device, out ScenePanelHook? sceneHookForMode)
             && sceneHookForMode!.IsActive;
 
@@ -249,7 +257,7 @@ public sealed class WorldScreenController : IDisposable
             (nint)videoTexture.Handle.Handle,
             depth?.ShaderResourceView ?? nint.Zero);
 
-        if (config.WorldScreenDrawUnderUi && TryGetSceneHook(device, out ScenePanelHook? hook) && hook!.IsActive)
+        if (WantsDrawUnderUi(config) && TryGetSceneHook(device, out ScenePanelHook? hook) && hook!.IsActive)
         {
             hook.Submit(in draw);
             return;

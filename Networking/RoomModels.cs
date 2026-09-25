@@ -1,6 +1,7 @@
 ﻿namespace ScreenShare.Plugin.Networking;
 
-public sealed record CreateRoomRequest(string Name, bool IsPublic, string? Password, int MaxViewers);
+/// <param name="Region">A region code to place the room in, or null for Automatic. Older relays ignore it.</param>
+public sealed record CreateRoomRequest(string Name, bool IsPublic, string? Password, int MaxViewers, string? Region = null);
 
 public sealed record CreateRoomResult(bool Success, string? RoomId, string? HostToken, string? InstanceId, string? Error, string? RoomName = null, string? RedirectUrl = null);
 
@@ -30,7 +31,8 @@ public sealed record RoomListing(
     int MaxViewers,
     DateTime CreatedUtc);
 
-public sealed record RoomDirectory(IReadOnlyList<RoomListing> Rooms, IReadOnlyList<string> BannedRoomIds);
+/// <param name="Regions">Regions a new room can be placed in; null from relays that predate regions.</param>
+public sealed record RoomDirectory(IReadOnlyList<RoomListing> Rooms, IReadOnlyList<string> BannedRoomIds, IReadOnlyList<string>? Regions = null);
 
 public sealed record RoomLocationResult(bool Found, string? InstanceId, string? RedirectUrl);
 

@@ -42,8 +42,21 @@ public sealed unsafe class ScenePanelHook : IDisposable
     private const int MaxRecordedPasses = 192;
     private readonly (bool Depth, int Width, int Height, int DepthWidth)[] recorded = new (bool, int, int, int)[MaxRecordedPasses];
     private int recordedCount;
-    private bool recordRequested = true;
-    private bool recording;
+    private int drawnAtBind = -1;
+
+    // Flicker reports come from machines we can't test on, so the log has to show what a bad frame
+    // looked like: every change in the frame's back-buffer binds, and every frame the screen missed.
+    private const int MaxLayoutLogs = 100;
+    private const long LayoutLogIntervalMs = 1000;
+    private int lastLayoutHash;
+    private bool loggedAnyLayout;
+    private long lastLayoutLogMs;
+    private int layoutLogsWritten;
+    private int layoutChangesSinceLog;
+    private int missedFramesSinceLog;
+
+    private int submitThreadId;
+    private bool loggedThreads;
 
     public bool IsActive => hook is { IsEnabled: true };
 
@@ -63,12 +76,8 @@ public sealed unsafe class ScenePanelHook : IDisposable
                 DoSetTargetCommandDetour);
             hook.Enable();
 
-            if (OverlayDetector.Detected is { } overlay)
-            {
-                ServiceCollector.PluginLog.Information(
-                    $"ScreenShare: {overlay} is loaded. It adds its own render passes, which is a known " +
-                    "cause of the in-world screen flickering while the popout window stays steady.");
-            }
+            ServiceCollector.PluginLog.Information(
+                $"ScreenShare graphics modules in the game process: {OverlayDetector.DescribeGraphicsModules()}.");
         }
         catch (Exception ex)
         {
@@ -82,6 +91,7 @@ public sealed unsafe class ScenePanelHook : IDisposable
         pending = draw;
         hasPending = true;
         pendingAtMs = Environment.TickCount64;
+        submitThreadId = Environment.CurrentManagedThreadId;
     }
 
     private bool PendingIsStale => Environment.TickCount64 - pendingAtMs > StaleAfterMs;
@@ -95,8 +105,13 @@ public sealed unsafe class ScenePanelHook : IDisposable
             sawScenePass = false;
             drewThisFrame = false;
             hasPending = false;
+            recordedCount = 0;
+            drawnAtBind = -1;
             return;
         }
+
+        bool missed = hasPending && !drewThisFrame;
+        LogLayoutIfChanged(missed);
 
         if (hasPending && !drewThisFrame)
         {
@@ -114,18 +129,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
             framesWithoutScenePass = 0;
         }
 
-        if (recording)
-        {
-            recording = false;
-            LogRecordedFrame();
-        }
-        else if (recordRequested)
-        {
-            recordRequested = false;
-            recording = true;
-            recordedCount = 0;
-        }
-
         LastFrameBackBufferSwitches = backBufferSwitches;
         LastFrameSceneSwitches = depthBoundSwitches;
         backBufferSwitches = 0;
@@ -133,6 +136,8 @@ public sealed unsafe class ScenePanelHook : IDisposable
         sawScenePass = false;
         drewThisFrame = false;
         hasPending = false;
+        recordedCount = 0;
+        drawnAtBind = -1;
     }
 
     private void DoSetTargetCommandDetour(ImmediateContext* immediateContext, RenderCommandSetTarget* command)
@@ -146,7 +151,7 @@ public sealed unsafe class ScenePanelHook : IDisposable
 
             backBufferSwitches++;
 
-            if (recording && recordedCount < MaxRecordedPasses)
+            if (recordedCount < MaxRecordedPasses)
             {
                 Texture* recordedTarget = command->RenderTargets[0];
                 Texture* recordedDepth = command->DepthBuffer;
@@ -171,6 +176,8 @@ public sealed unsafe class ScenePanelHook : IDisposable
                 return;
 
             drewThisFrame = true;
+            drawnAtBind = recordedCount - 1;
+            LogThreadsOnce();
             DrawWithStateRestored();
         }
         catch (Exception ex)
@@ -192,10 +199,64 @@ public sealed unsafe class ScenePanelHook : IDisposable
         }
     }
 
-    private void LogRecordedFrame()
+    private void LogThreadsOnce()
+    {
+        if (loggedThreads)
+            return;
+
+        loggedThreads = true;
+        int renderThreadId = Environment.CurrentManagedThreadId;
+        ServiceCollector.PluginLog.Information(
+            $"ScreenShare in-world screen threads: queued on {submitThreadId}, drawn on {renderThreadId}" +
+            (submitThreadId == renderThreadId ? " (same thread)." : " (different threads - frames can race)."));
+    }
+
+    private void LogLayoutIfChanged(bool missed)
+    {
+        if (!hasPending)
+            return;
+
+        var hash = default(HashCode);
+        for (int i = 0; i < recordedCount; i++)
+            hash.Add(recorded[i]);
+
+        int layoutHash = hash.ToHashCode();
+        bool changed = !loggedAnyLayout || layoutHash != lastLayoutHash;
+        lastLayoutHash = layoutHash;
+
+        if (changed)
+            layoutChangesSinceLog++;
+
+        if (missed)
+            missedFramesSinceLog++;
+
+        if (!changed && !missed)
+            return;
+
+        long now = Environment.TickCount64;
+        if (layoutLogsWritten >= MaxLayoutLogs || (loggedAnyLayout && now - lastLayoutLogMs < LayoutLogIntervalMs))
+            return;
+
+        loggedAnyLayout = true;
+        lastLayoutLogMs = now;
+        layoutLogsWritten++;
+
+        LogRecordedFrame(missed);
+
+        layoutChangesSinceLog = 0;
+        missedFramesSinceLog = 0;
+
+        if (layoutLogsWritten == MaxLayoutLogs)
+            ServiceCollector.PluginLog.Information("ScreenShare frame layout logging stopped after " + MaxLayoutLogs + " entries.");
+    }
+
+    private void LogRecordedFrame(bool missed)
     {
         var text = new System.Text.StringBuilder();
-        text.Append($"ScreenShare frame structure: {recordedCount} back-buffer binds, ")
+        text.Append($"ScreenShare frame layout: {recordedCount} back-buffer binds, ")
+            .Append(missed ? "screen MISSED this frame" : $"screen drawn at bind {drawnAtBind}")
+            .Append($"; since the previous entry {layoutChangesSinceLog} layout change(s), ")
+            .Append($"{missedFramesSinceLog} missed frame(s). ")
             .Append("'D' = depth bound (3D scene), '.' = no depth (interface). ");
 
         for (int i = 0; i < recordedCount; i++)

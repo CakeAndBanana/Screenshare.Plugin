@@ -102,6 +102,25 @@ internal sealed class WorldScreenPanel
             ServiceCollector.PI.SavePluginConfig(config);
         }
 
+        if (WorldScreenController.UnderUiBlockedBy is { } blockingOverlay)
+        {
+            ImGui.TextDisabled(
+                $"Drawing underneath the game UI is off because {blockingOverlay} is loaded; " +
+                "it makes the in-world screen flicker.");
+        }
+        else
+        {
+            DrawUnderUiOption(config);
+        }
+
+#if DEBUG
+
+        DrawDepthDiagnostics(config);
+#endif
+    }
+
+    private void DrawUnderUiOption(Configuration config)
+    {
         bool drawUnderUi = config.WorldScreenDrawUnderUi;
         if (ImGui.Checkbox("Draw underneath the game UI", ref drawUnderUi))
         {
@@ -121,11 +140,6 @@ internal sealed class WorldScreenPanel
 
         if (drawUnderUi)
             DrawRenderPassNotes();
-
-#if DEBUG
-
-        DrawDepthDiagnostics(config);
-#endif
     }
 
     private void DrawRenderPassNotes()
@@ -138,13 +152,6 @@ internal sealed class WorldScreenPanel
         {
             ImGui.TextColored(UiTheme.WarnColor,
                 "None of this frame's passes bound a depth buffer.");
-        }
-
-        if (OverlayDetector.Detected is { } overlay)
-        {
-            ImGui.TextColored(UiTheme.WarnColor,
-                $"{overlay} is loaded. If the in-world screen flickers while the popout window " +
-                "doesn't, turn off \"Draw under the game UI\"");
         }
 
         if (worldScreen().SceneHookFallbackReason is { } fallbackReason)

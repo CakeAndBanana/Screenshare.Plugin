@@ -41,7 +41,7 @@ public sealed class SpeakerMixWaveProvider : IWaveProvider
             : 1f;
     }
 
-    public void SetVolume(float value) => targetVolume = Math.Clamp(value, 0f, 1f);
+    public void SetVolume(float value) => targetVolume = Math.Clamp(value, 0f, Configuration.MaxViewerVolume);
 
     public void SetGains(SpeakerGains gains)
     {
@@ -83,9 +83,25 @@ public sealed class SpeakerMixWaveProvider : IWaveProvider
             rightToRight += (targetRightToRight - rightToRight) * rampAlpha;
             volume += (targetVolume - volume) * rampAlpha;
 
-            samples[frame * 2] = ((left * leftToLeft) + (right * rightToLeft)) * volume;
-            samples[(frame * 2) + 1] = ((left * leftToRight) + (right * rightToRight)) * volume;
+            samples[frame * 2] = Limit(((left * leftToLeft) + (right * rightToLeft)) * volume);
+            samples[(frame * 2) + 1] = Limit(((left * leftToRight) + (right * rightToRight)) * volume);
         }
+    }
+
+    // Boosting past 100% can push peaks beyond full scale; bend them smoothly toward
+    // 1.0 instead of letting the output device hard-clip. Untouched at or below 100%.
+    private float Limit(float sample)
+    {
+        if (volume <= 1f)
+            return sample;
+
+        const float knee = 0.8f;
+        float magnitude = MathF.Abs(sample);
+        if (magnitude <= knee)
+            return sample;
+
+        float limited = knee + ((1f - knee) * MathF.Tanh((magnitude - knee) / (1f - knee)));
+        return MathF.CopySign(limited, sample);
     }
 
     private void ApplyScalarGain(Span<float> samples)
@@ -100,7 +116,7 @@ public sealed class SpeakerMixWaveProvider : IWaveProvider
 
             int start = frame * perFrame;
             for (int channel = 0; channel < perFrame; channel++)
-                samples[start + channel] *= mono * volume;
+                samples[start + channel] = Limit(samples[start + channel] * mono * volume);
         }
     }
 }
