@@ -1,4 +1,5 @@
 using Dalamud.Configuration;
+using ScreenShare.Plugin.Networking;
 
 namespace ScreenShare.Plugin;
 
@@ -60,6 +61,8 @@ public sealed class Configuration : IPluginConfiguration
 
     public bool ShowWorldScreen { get; set; } = true;
 
+    public List<ScreenPreset> ScreenPresets { get; set; } = [];
+
     public bool Migrate()
     {
         if (Version >= 2)
@@ -90,4 +93,60 @@ public sealed class RecentRoom
     public bool WasHost { get; set; }
 
     public DateTime LastJoinedUtc { get; set; }
+}
+
+public sealed class ScreenPreset
+{
+    public string Name { get; set; } = string.Empty;
+
+    public uint TerritoryType { get; set; }
+
+    public float X { get; set; }
+
+    public float Y { get; set; }
+
+    public float Z { get; set; }
+
+    public float Yaw { get; set; }
+
+    public float Pitch { get; set; }
+
+    public float WidthMeters { get; set; }
+
+    public float SpeakerSpread { get; set; }
+
+    public float FalloffStart { get; set; }
+
+    public float FalloffEnd { get; set; }
+
+    public DateTime SavedUtc { get; set; }
+
+    public static ScreenPreset From(string name, ScreenPlacementInfo placement) => new()
+    {
+        Name = name,
+        TerritoryType = placement.TerritoryType,
+        X = placement.X,
+        Y = placement.Y,
+        Z = placement.Z,
+        Yaw = placement.Yaw,
+        Pitch = placement.Pitch,
+        WidthMeters = placement.WidthMeters,
+        SpeakerSpread = placement.SpeakerSpread,
+        FalloffStart = placement.FalloffStart,
+        FalloffEnd = placement.FalloffEnd,
+        SavedUtc = DateTime.UtcNow,
+    };
+
+    public ScreenPlacementInfo ToPlacement() => new(
+        TerritoryType,
+        X,
+        Y,
+        Z,
+        Yaw,
+        Pitch,
+        WidthMeters,
+        SpeakerSpread,
+        FalloffStart,
+        FalloffEnd,
+        Version: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 }

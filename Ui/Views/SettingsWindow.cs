@@ -76,7 +76,7 @@ public sealed class SettingsWindow : Window, IDisposable
 
     public int VideoFpsTarget => videoFpsTarget;
 
-    public VideoCodec Codec => (VideoCodec)videoCodecIndex;
+    public SupportedVideoCodec Codec => (SupportedVideoCodec)videoCodecIndex;
 
     public int AudioBitrateKbps => audioBitrateKbps;
 

@@ -4,6 +4,7 @@ using ScreenShare.Plugin.Capture.ScreenCapture.Interfaces;
 using ScreenShare.Plugin.Encoding;
 using ScreenShare.Plugin.Encoding.Enums;
 using ScreenShare.Plugin.Encoding.Interfaces;
+using ScreenShare.Plugin.Encoding.Opus;
 using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Rendering;
 
@@ -33,7 +34,7 @@ public sealed class MediaSessionService : IDisposable
         string FfmpegExePath,
         int TargetHeight,
         int Fps,
-        VideoCodec Codec,
+        SupportedVideoCodec Codec,
         int ConfiguredBitrateKbps);
 
     private HostEncodeSettings? hostEncodeSettings;
@@ -129,7 +130,7 @@ public sealed class MediaSessionService : IDisposable
 
     public string? HostEncoderName => videoEncoder?.EncoderName;
 
-    public VideoCodec? HostCodec => videoEncoder?.Codec;
+    public SupportedVideoCodec? HostCodec => videoEncoder?.Codec;
 
     public Exception? HostVideoError => videoEncoder?.LastError;
 
@@ -148,7 +149,7 @@ public sealed class MediaSessionService : IDisposable
         int targetHeight,
         int bitrateKbps,
         int fps = 15,
-        VideoCodec codec = VideoCodec.H264,
+        SupportedVideoCodec codec = SupportedVideoCodec.H264,
         int audioBitrateBps = 32000)
     {
         StopHosting();
@@ -177,7 +178,7 @@ public sealed class MediaSessionService : IDisposable
         int targetHeight,
         int bitrateKbps,
         int fps,
-        VideoCodec codec)
+        SupportedVideoCodec codec)
     {
         // Everything is built into locals and only published under the lock if no StopHosting ran while connecting;
         // otherwise a stop issued mid-connect would be overwritten and the stream would go live anyway.
@@ -455,7 +456,7 @@ public sealed class MediaSessionService : IDisposable
         }
     }
 
-    private void OnVideoMetadataReceived(int width, int height, VideoCodec codec, int fps)
+    private void OnVideoMetadataReceived(int width, int height, SupportedVideoCodec codec, int fps)
     {
         if (videoDecoder is not null || viewerDevice is null || viewerFfmpegExePath is null)
             return;

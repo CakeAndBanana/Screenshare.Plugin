@@ -1,10 +1,11 @@
-using System.Diagnostics;
-using System.Runtime.InteropServices;
 using ScreenShare.Plugin.Encoding;
 using ScreenShare.Plugin.Encoding.Enums;
+using ScreenShare.Plugin.Encoding.LibavCodec;
 using ScreenShare.Plugin.Rendering;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Device = SharpDX.Direct3D11.Device;
 using MapFlags = SharpDX.Direct3D11.MapFlags;
 
@@ -44,7 +45,7 @@ internal static class Encode
         {
             foreach (GpuVendor vendor in new[] { GpuVendor.Nvidia, GpuVendor.Amd, GpuVendor.Intel, GpuVendor.Unknown })
             {
-                foreach (VideoCodec codec in new[] { VideoCodec.H264, VideoCodec.Hevc })
+                foreach (SupportedVideoCodec codec in new[] { SupportedVideoCodec.H264, SupportedVideoCodec.Hevc })
                 {
                     bool hardware = vendor != GpuVendor.Unknown;
                     foreach (bool surfaces in hardware ? new[] { false, true } : new[] { false })
@@ -80,7 +81,7 @@ internal static class Encode
     }
 
     private static bool RunOne(
-        GpuVendor vendor, VideoCodec codec, string name, string label, Source source, bool surfaces,
+        GpuVendor vendor, SupportedVideoCodec codec, string name, string label, Source source, bool surfaces,
         int width, int height, int frames, string ffmpegExePath, string outputPath)
     {
         using var session = new LibavEncoderSession(

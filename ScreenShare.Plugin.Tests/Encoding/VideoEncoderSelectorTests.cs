@@ -7,15 +7,15 @@ namespace ScreenShare.Plugin.Tests.Encoding;
 public class VideoEncoderSelectorTests
 {
     [Theory]
-    [InlineData(GpuVendor.Nvidia, VideoCodec.H264, "h264_nvenc")]
-    [InlineData(GpuVendor.Nvidia, VideoCodec.Hevc, "hevc_nvenc")]
-    [InlineData(GpuVendor.Amd, VideoCodec.H264, "h264_amf")]
-    [InlineData(GpuVendor.Amd, VideoCodec.Hevc, "hevc_amf")]
-    [InlineData(GpuVendor.Intel, VideoCodec.H264, "h264_qsv")]
-    [InlineData(GpuVendor.Intel, VideoCodec.Hevc, "hevc_qsv")]
-    [InlineData(GpuVendor.Unknown, VideoCodec.H264, "libx264")]
-    [InlineData(GpuVendor.Unknown, VideoCodec.Hevc, "libx265")]
-    public void BuildEncoderArgs_PicksCorrectEncoderForVendorAndCodec(GpuVendor vendor, VideoCodec codec, string expectedEncoder)
+    [InlineData(GpuVendor.Nvidia, SupportedVideoCodec.H264, "h264_nvenc")]
+    [InlineData(GpuVendor.Nvidia, SupportedVideoCodec.Hevc, "hevc_nvenc")]
+    [InlineData(GpuVendor.Amd, SupportedVideoCodec.H264, "h264_amf")]
+    [InlineData(GpuVendor.Amd, SupportedVideoCodec.Hevc, "hevc_amf")]
+    [InlineData(GpuVendor.Intel, SupportedVideoCodec.H264, "h264_qsv")]
+    [InlineData(GpuVendor.Intel, SupportedVideoCodec.Hevc, "hevc_qsv")]
+    [InlineData(GpuVendor.Unknown, SupportedVideoCodec.H264, "libx264")]
+    [InlineData(GpuVendor.Unknown, SupportedVideoCodec.Hevc, "libx265")]
+    public void BuildEncoderArgs_PicksCorrectEncoderForVendorAndCodec(GpuVendor vendor, SupportedVideoCodec codec, string expectedEncoder)
     {
         string args = VideoEncoderSelector.BuildEncoderArgs(vendor, codec, 1500, 2000, 3000, 60);
 
@@ -25,7 +25,7 @@ public class VideoEncoderSelectorTests
     [Fact]
     public void BuildEncoderArgs_IncludesBitrateMaxrateBufsizeAndGop()
     {
-        string args = VideoEncoderSelector.BuildEncoderArgs(GpuVendor.Nvidia, VideoCodec.H264, 1500, 2000, 3000, 60);
+        string args = VideoEncoderSelector.BuildEncoderArgs(GpuVendor.Nvidia, SupportedVideoCodec.H264, 1500, 2000, 3000, 60);
 
         Assert.Contains("-b:v 1500k", args);
         Assert.Contains("-maxrate 2000k", args);
@@ -36,7 +36,7 @@ public class VideoEncoderSelectorTests
     [Fact]
     public void BuildEncoderArgs_NvencH264UsesLowLatencyTuneAndConstantBitrate()
     {
-        string args = VideoEncoderSelector.BuildEncoderArgs(GpuVendor.Nvidia, VideoCodec.H264, 1500, 2000, 3000, 60);
+        string args = VideoEncoderSelector.BuildEncoderArgs(GpuVendor.Nvidia, SupportedVideoCodec.H264, 1500, 2000, 3000, 60);
 
         Assert.Contains("-preset p1", args);
         Assert.Contains("-tune ll", args);
@@ -46,18 +46,18 @@ public class VideoEncoderSelectorTests
     [Fact]
     public void BuildEncoderArgs_UnrecognizedVendor_FallsBackToSoftwareEncoderNotHardware()
     {
-        string args = VideoEncoderSelector.BuildEncoderArgs((GpuVendor)999, VideoCodec.H264, 1500, 2000, 3000, 60);
+        string args = VideoEncoderSelector.BuildEncoderArgs((GpuVendor)999, SupportedVideoCodec.H264, 1500, 2000, 3000, 60);
 
         Assert.Contains("-c:v libx264", args);
     }
 
     [Theory]
-    [InlineData(GpuVendor.Nvidia, VideoCodec.H264, "h264_nvenc")]
-    [InlineData(GpuVendor.Amd, VideoCodec.Hevc, "hevc_amf")]
-    [InlineData(GpuVendor.Intel, VideoCodec.H264, "h264_qsv")]
-    [InlineData(GpuVendor.Unknown, VideoCodec.Hevc, "libx265")]
-    [InlineData((GpuVendor)999, VideoCodec.H264, "libx264")]
-    public void EncoderName_MatchesTheEncoderTheCommandLineSelects(GpuVendor vendor, VideoCodec codec, string expected)
+    [InlineData(GpuVendor.Nvidia, SupportedVideoCodec.H264, "h264_nvenc")]
+    [InlineData(GpuVendor.Amd, SupportedVideoCodec.Hevc, "hevc_amf")]
+    [InlineData(GpuVendor.Intel, SupportedVideoCodec.H264, "h264_qsv")]
+    [InlineData(GpuVendor.Unknown, SupportedVideoCodec.Hevc, "libx265")]
+    [InlineData((GpuVendor)999, SupportedVideoCodec.H264, "libx264")]
+    public void EncoderName_MatchesTheEncoderTheCommandLineSelects(GpuVendor vendor, SupportedVideoCodec codec, string expected)
     {
         Assert.Equal(expected, VideoEncoderSelector.EncoderName(vendor, codec));
         Assert.Contains($"-c:v {expected} ", VideoEncoderSelector.BuildEncoderArgs(vendor, codec, 1500, 2000, 3000, 60));
@@ -95,9 +95,9 @@ public class VideoEncoderSelectorTests
     }
 
     [Theory]
-    [InlineData(VideoCodec.H264, "h264")]
-    [InlineData(VideoCodec.Hevc, "hevc")]
-    public void RawFormatName_ReturnsFfmpegFormatNameForCodec(VideoCodec codec, string expected)
+    [InlineData(SupportedVideoCodec.H264, "h264")]
+    [InlineData(SupportedVideoCodec.Hevc, "hevc")]
+    public void RawFormatName_ReturnsFfmpegFormatNameForCodec(SupportedVideoCodec codec, string expected)
     {
         Assert.Equal(expected, VideoEncoderSelector.RawFormatName(codec));
     }
@@ -105,6 +105,6 @@ public class VideoEncoderSelectorTests
     [Fact]
     public void RawFormatName_InvalidCodecValue_Throws()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => VideoEncoderSelector.RawFormatName((VideoCodec)999));
+        Assert.Throws<ArgumentOutOfRangeException>(() => VideoEncoderSelector.RawFormatName((SupportedVideoCodec)999));
     }
 }

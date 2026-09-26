@@ -1,6 +1,5 @@
-﻿using System.Diagnostics;
-using ScreenShare.Plugin.Encoding;
-using ScreenShare.Plugin.Encoding.Enums;
+﻿using ScreenShare.Plugin.Encoding.Enums;
+using System.Diagnostics;
 using Device = SharpDX.Direct3D11.Device;
 
 namespace MediaProbe;
@@ -18,7 +17,7 @@ internal static class Soak
             $"{width}x{height}, {slotCount} slots");
         Console.WriteLine();
 
-        using var harness = new DecodeHarness(device, width, height, slotCount, VideoCodec.H264);
+        using var harness = new DecodeHarness(device, width, height, slotCount, SupportedVideoCodec.H264);
         Console.WriteLine($"decoder: {harness.DecoderName}");
 
         Process self = Process.GetCurrentProcess();

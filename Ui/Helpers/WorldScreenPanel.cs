@@ -27,6 +27,8 @@ internal sealed class WorldScreenPanel
     private ScreenPlacementInfo? positionAnchor;
     private float sliderSideways;
     private float sliderForward;
+    private string presetName = string.Empty;
+    private int selectedPreset;
 
     public WorldScreenPanel(
         string idPrefix,
@@ -46,6 +48,9 @@ internal sealed class WorldScreenPanel
     {
         ScreenPlacementInfo? placement = roomSession.ScreenPlacement;
         bool canPlace = WorldScreenController.CanPlace(roomSession);
+
+        if (canPlace)
+            DrawPresets(placement);
 
         UiTheme.SectionLabel("Placement");
 
@@ -106,6 +111,74 @@ internal sealed class WorldScreenPanel
         ImGui.SameLine();
         if (ImGui.Button("Clear"))
             ApplyPlacement(null);
+    }
+
+    private void DrawPresets(ScreenPlacementInfo? placement)
+    {
+        Configuration config = ServiceCollector.Config;
+        uint territory = ServiceCollector.ClientState.TerritoryType;
+        IReadOnlyList<ScreenPreset> presets = ScreenPresetStore.ForTerritory(config.ScreenPresets, territory);
+
+        UiTheme.SectionLabel("Presets");
+
+        if (presets.Count == 0)
+        {
+            ImGui.TextDisabled("No presets saved for this zone.");
+        }
+        else
+        {
+            selectedPreset = Math.Clamp(selectedPreset, 0, presets.Count - 1);
+            ScreenPreset selected = presets[selectedPreset];
+
+            ImGui.SetNextItemWidth(220f);
+            if (ImGui.BeginCombo(Id("presetPicker"), selected.Name))
+            {
+                for (int i = 0; i < presets.Count; i++)
+                {
+                    if (ImGui.Selectable($"{presets[i].Name}##preset{i}", i == selectedPreset))
+                        selectedPreset = i;
+                }
+
+                ImGui.EndCombo();
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button($"Apply{Id("presetApply")}"))
+            {
+                ScreenPlacementInfo applied = selected.ToPlacement();
+                SeedSliders(applied);
+                ApplyPlacement(applied);
+            }
+
+            ImGui.SameLine();
+            bool ctrlHeld = ImGui.GetIO().KeyCtrl;
+            ImGui.BeginDisabled(!ctrlHeld);
+            if (ImGui.Button($"Delete{Id("presetDelete")}") && ScreenPresetStore.Delete(config.ScreenPresets, selected))
+                ServiceCollector.PI.SavePluginConfig(config);
+            ImGui.EndDisabled();
+
+            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                ImGui.SetTooltip("Hold Ctrl to delete this preset.");
+        }
+
+        bool placedHere = placement is not null && placement.TerritoryType == territory;
+        bool overwrites = ScreenPresetStore.Find(config.ScreenPresets, territory, presetName) is not null;
+
+        ImGui.SetNextItemWidth(220f);
+        bool submitted = ImGui.InputTextWithHint(
+            Id("presetName"), "Preset name", ref presetName, 40, ImGuiInputTextFlags.EnterReturnsTrue);
+
+        ImGui.SameLine();
+        ImGui.BeginDisabled(!placedHere || presetName.Trim().Length == 0);
+        submitted |= ImGui.Button($"{(overwrites ? "Overwrite" : "Save current")}{Id("presetSave")}");
+        ImGui.EndDisabled();
+
+        if (submitted && placedHere && ScreenPresetStore.Save(config.ScreenPresets, presetName, placement!) is { } saved)
+        {
+            ServiceCollector.PI.SavePluginConfig(config);
+            presetName = string.Empty;
+            selectedPreset = ScreenPresetStore.ForTerritory(config.ScreenPresets, territory).ToList().IndexOf(saved);
+        }
     }
 
 #if DEBUG

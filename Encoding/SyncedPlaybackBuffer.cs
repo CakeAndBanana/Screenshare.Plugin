@@ -11,8 +11,6 @@ public sealed class SyncedPlaybackBuffer(WaveFormat waveFormat, int maxBufferedM
     private const int NarrowStepMs = 10;
     private const int NarrowIntervalMs = 5000;
 
-    // Room above the target before Add trims, so a burst after a network stall is played rather
-    // than cut. Without it the buffer sits exactly at the target and any early packet is dropped.
     internal const int BurstHeadroomMs = 120;
 
     private readonly Lock gate = new();

@@ -1,11 +1,10 @@
-﻿using System.Collections.Concurrent;
-using System.Runtime.InteropServices;
-using ScreenShare.Plugin.Encoding;
-using ScreenShare.Plugin.Encoding.Enums;
+﻿using ScreenShare.Plugin.Encoding.Enums;
 using ScreenShare.Plugin.Rendering;
-using SharpDX.DXGI;
 using SharpDX.Direct3D11;
+using SharpDX.DXGI;
 using SharpDX.MediaFoundation;
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using static ScreenShare.Plugin.Encoding.Interop.MediaFoundationInterop;
 using Device = SharpDX.Direct3D11.Device;
 
@@ -42,7 +41,7 @@ internal sealed class DecodeHarness : IDisposable
 
     public string OutputShape { get; private set; } = "(nothing decoded yet)";
 
-    public DecodeHarness(Device device, int width, int height, int slotCount, VideoCodec codec)
+    public DecodeHarness(Device device, int width, int height, int slotCount, SupportedVideoCodec codec)
     {
         this.device = device;
         Width = width;
@@ -86,7 +85,7 @@ internal sealed class DecodeHarness : IDisposable
         using (var inputType = new MediaType())
         {
             inputType.Set(MediaTypeAttributeKeys.MajorType, MajorTypeVideo);
-            inputType.Set(MediaTypeAttributeKeys.Subtype, codec == VideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264);
+            inputType.Set(MediaTypeAttributeKeys.Subtype, codec == SupportedVideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264);
             inputType.Set(MediaTypeAttributeKeys.FrameSize, Pack(width, height));
             inputType.Set(MediaTypeAttributeKeys.FrameRate, Pack(30, 1));
             inputType.Set(MediaTypeAttributeKeys.PixelAspectRatio, Pack(1, 1));
@@ -117,9 +116,9 @@ internal sealed class DecodeHarness : IDisposable
 
     private static long Pack(int high, int low) => ((long)high << 32) | (uint)low;
 
-    private static Transform Activate(VideoCodec codec, out string name)
+    private static Transform Activate(SupportedVideoCodec codec, out string name)
     {
-        Guid subtype = codec == VideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264;
+        Guid subtype = codec == SupportedVideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264;
         List<nint> activates = EnumerateDecoders(
             subtype, MftEnumFlags.SyncMft | MftEnumFlags.Hardware | MftEnumFlags.SortAndFilter);
 

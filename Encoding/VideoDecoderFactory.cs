@@ -1,6 +1,8 @@
 ﻿using ScreenShare.Plugin.Encoding.Enums;
+using ScreenShare.Plugin.Encoding.H264;
 using ScreenShare.Plugin.Encoding.Interfaces;
 using ScreenShare.Plugin.Encoding.Interop;
+using ScreenShare.Plugin.Encoding.MediaFoundation;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 
@@ -14,7 +16,7 @@ public static class VideoDecoderFactory
         int width,
         int height,
         int fps,
-        VideoCodec codec,
+        SupportedVideoCodec codec,
         Func<long?> getAudioPtsMs,
         Func<int>? getSyncOffsetMs,
         int audioLatencyBudgetMs,

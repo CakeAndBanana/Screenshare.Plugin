@@ -2,20 +2,18 @@ using ScreenShare.Plugin.Encoding.Enums;
 
 namespace ScreenShare.Plugin.Encoding;
 
-public sealed class AnnexBAccessUnitSplitter
+public sealed class AnnexBAccessUnitSplitter(SupportedVideoCodec codec)
 {
     private const int InitialCapacity = 64 * 1024;
 
     private const int MaxAccessUnitBytes = 8 * 1024 * 1024;
 
-    private readonly bool isHevc;
+    private readonly bool isHevc = codec == SupportedVideoCodec.Hevc;
 
     private byte[] buffer = new byte[InitialCapacity];
     private int length;
     private int scan;
     private bool haveVcl;
-
-    public AnnexBAccessUnitSplitter(VideoCodec codec) => isHevc = codec == VideoCodec.Hevc;
 
     public int Pending => length;
 

@@ -9,7 +9,7 @@ using SharpDX.Direct3D11;
 using SharpDX.DXGI;
 using Device = SharpDX.Direct3D11.Device;
 
-namespace ScreenShare.Plugin.Encoding;
+namespace ScreenShare.Plugin.Encoding.H264;
 
 public sealed class H264Encoder : IVideoEncoder
 {
@@ -62,7 +62,7 @@ public sealed class H264Encoder : IVideoEncoder
 
     public event Action<long, byte[]>? ChunkEncoded;
 
-    public VideoCodec Codec { get; }
+    public SupportedVideoCodec Codec { get; }
 
     public H264Encoder(
         GameAdapterDevice gameAdapterDevice,
@@ -72,7 +72,7 @@ public sealed class H264Encoder : IVideoEncoder
         int targetHeight = 720,
         int bitrateKbps = 1500,
         int fps = 15,
-        VideoCodec codec = VideoCodec.H264)
+        SupportedVideoCodec codec = SupportedVideoCodec.H264)
     {
         this.gameAdapterDevice = gameAdapterDevice;
         this.source = source;

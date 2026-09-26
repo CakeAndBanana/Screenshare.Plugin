@@ -1,6 +1,4 @@
-﻿using System.Runtime.InteropServices;
-using MediaProbe;
-using ScreenShare.Plugin.Encoding;
+﻿using MediaProbe;
 using ScreenShare.Plugin.Encoding.Interop;
 using SharpDX.Direct3D11;
 using static ScreenShare.Plugin.Encoding.Interop.MediaFoundationInterop;

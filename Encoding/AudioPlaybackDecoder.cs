@@ -1,4 +1,6 @@
 ﻿using NAudio.Wave;
+using ScreenShare.Plugin.Encoding.H264;
+using ScreenShare.Plugin.Encoding.Opus;
 using ScreenShare.Plugin.Services;
 
 namespace ScreenShare.Plugin.Encoding;

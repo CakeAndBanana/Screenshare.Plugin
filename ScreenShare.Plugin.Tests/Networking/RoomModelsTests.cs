@@ -35,4 +35,12 @@ public class RoomModelsTests
 
         Assert.Contains("\"region\":\"na\"", json);
     }
+
+    [Fact]
+    public void CreateRoomRequest_SendsThePreferredRegionUnderTheNameTheRelayReads()
+    {
+        string json = JsonSerializer.Serialize(new CreateRoomRequest("Room", true, null, 4, PreferredRegion: "eu"), HubJson);
+
+        Assert.Contains("\"preferredRegion\":\"eu\"", json);
+    }
 }

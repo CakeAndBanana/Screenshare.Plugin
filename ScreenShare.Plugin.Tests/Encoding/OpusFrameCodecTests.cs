@@ -1,4 +1,4 @@
-using ScreenShare.Plugin.Encoding;
+using ScreenShare.Plugin.Encoding.Opus;
 
 namespace ScreenShare.Plugin.Tests.Encoding;
 

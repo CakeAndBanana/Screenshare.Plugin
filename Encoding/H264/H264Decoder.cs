@@ -8,7 +8,7 @@ using ScreenShare.Plugin.Services;
 using SharpDX;
 using SharpDX.Direct3D11;
 
-namespace ScreenShare.Plugin.Encoding;
+namespace ScreenShare.Plugin.Encoding.H264;
 
 public sealed class H264Decoder : IVideoDecoder
 {
@@ -66,7 +66,7 @@ public sealed class H264Decoder : IVideoDecoder
         int width,
         int height,
         int fps,
-        VideoCodec codec,
+        SupportedVideoCodec codec,
         Func<long?> getAudioPtsMs,
         Func<int>? getSyncOffsetMs = null,
         int audioLatencyBudgetMs = PresentationBufferMilliseconds)

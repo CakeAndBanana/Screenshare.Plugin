@@ -8,8 +8,11 @@ using SharpDX.Direct3D11;
 using SharpDX.DXGI;
 using Device = SharpDX.Direct3D11.Device;
 
-namespace ScreenShare.Plugin.Encoding;
+namespace ScreenShare.Plugin.Encoding.LibavCodec;
 
+/// <summary>
+/// Livab video encoder that uses libavcodec to encode frames from a capture source.
+/// </summary>
 public sealed class LibavVideoEncoder : IVideoEncoder
 {
     private readonly GameAdapterDevice gameAdapterDevice;
@@ -35,7 +38,7 @@ public sealed class LibavVideoEncoder : IVideoEncoder
 
     public string EncoderName => $"libavcodec {session.EncoderName} ({(session.UsesD3D11Surfaces ? "d3d11" : "readback")})";
 
-    public VideoCodec Codec { get; }
+    public SupportedVideoCodec Codec { get; }
 
     public long FramesEncoded => Interlocked.Read(ref framesEncoded);
 
@@ -51,6 +54,17 @@ public sealed class LibavVideoEncoder : IVideoEncoder
 
     public bool SupportsLiveBitrate => session.SupportsLiveBitrate;
 
+    /// <summary>
+    /// Constructor for the libav video encoder.
+    /// </summary>
+    /// <param name="gameAdapterDevice">The game adapter device.</param>
+    /// <param name="source">The capture source.</param>
+    /// <param name="ffmpegDirectory">The directory containing the FFmpeg libraries.</param>
+    /// <param name="sessionClock">The stopwatch for measuring session time.</param>
+    /// <param name="targetHeight">The target height for the encoded video.</param>
+    /// <param name="bitrateKbps">The target bitrate in kilobits per second.</param>
+    /// <param name="fps">The frames per second.</param>
+    /// <param name="codec">The video codec.</param>
     public LibavVideoEncoder(
         GameAdapterDevice gameAdapterDevice,
         ICaptureSource source,
@@ -59,16 +73,20 @@ public sealed class LibavVideoEncoder : IVideoEncoder
         int targetHeight,
         int bitrateKbps,
         int fps,
-        VideoCodec codec)
+        SupportedVideoCodec codec)
     {
+        // Validate parameters
         this.gameAdapterDevice = gameAdapterDevice;
         this.source = source;
         this.sessionClock = sessionClock;
+
+        // Calculate frame interval in milliseconds, ensuring it's at least 1 ms
         frameIntervalMs = Math.Max(1, 1000 / Math.Max(1, fps));
         Codec = codec;
 
         LibavEncoderSession.EnsureLoaded(ffmpegDirectory);
 
+        // Calculate the scaled width and height based on the source dimensions and target height
         (int width, int height) = ComputeScaledSize(source.Width, source.Height, targetHeight);
 
         Device device = gameAdapterDevice.Device;
@@ -76,9 +94,12 @@ public sealed class LibavVideoEncoder : IVideoEncoder
         string encoderName = VideoEncoderSelector.EncoderName(vendor, codec);
         IReadOnlyList<(string Name, string Value)> options = VideoEncoderSelector.EncoderOptions(vendor);
 
+        // Initialize the NV12 converter for converting frames to NV12 format
         converter = new Nv12Converter(device, width, height);
+        // Initialize the source shader resource view and encoder session
         try
         {
+            // Create a shader resource view for the source capture texture
             sourceSrv = new ShaderResourceView(device, source.CaptureTexture);
 
             LibavEncoderSession? surfaceSession = null;
@@ -109,6 +130,13 @@ public sealed class LibavVideoEncoder : IVideoEncoder
         encodeThread.Start();
     }
 
+    /// <summary>
+    /// Calculates the scaled width and height for the encoded video based on the source dimensions and target height.
+    /// </summary>
+    /// <param name="sourceWidth">The width of the source video.</param>
+    /// <param name="sourceHeight">The height of the source video.</param>
+    /// <param name="targetHeight">The target height for the encoded video.</param>
+    /// <returns>The scaled width and height for the encoded video.</returns>
     private static (int Width, int Height) ComputeScaledSize(int sourceWidth, int sourceHeight, int targetHeight)
     {
         int height = Math.Min(targetHeight, sourceHeight);
@@ -118,12 +146,26 @@ public sealed class LibavVideoEncoder : IVideoEncoder
         return (Math.Max(2, width), Math.Max(2, height));
     }
 
+
+    /// <summary>
+    /// SurfaceInputWorks checks if the encoder can take frames directly from the GPU surface without needing to read them back to the CPU.
+    /// </summary>
+    /// <param name="encoderName">The name of the encoder.</param>
+    /// <param name="options">The options for the encoder.</param>
+    /// <param name="codec">The video codec.</param>
+    /// <param name="width">The width of the encoded video.</param>
+    /// <param name="height">The height of the encoded video.</param>
+    /// <param name="fps">The frames per second for the encoded video.</param>
+    /// <param name="bitrateKbps">The bitrate for the encoded video.</param>
+    /// <returns></returns>
+    /// <exception cref="InvalidOperationException">Thrown when the encoder cannot take frames directly from the GPU surface.</exception>
     private bool SurfaceInputWorks(
-        string encoderName, IReadOnlyList<(string Name, string Value)> options, VideoCodec codec,
+        string encoderName, IReadOnlyList<(string Name, string Value)> options, SupportedVideoCodec codec,
         int width, int height, int fps, int bitrateKbps)
     {
         try
         {
+            // Create a temporary encoder session to test if it can take frames directly from the GPU surface
             using var probe = new LibavEncoderSession(
                 encoderName, options, codec, width, height, fps, bitrateKbps, gameAdapterDevice.Device);
 
@@ -151,19 +193,29 @@ public sealed class LibavVideoEncoder : IVideoEncoder
         }
     }
 
+    /// <summary>
+    /// Sets the birate of the encoder session.
+    /// </summary>
+    /// <param name="bitrateKbps">Bitrate in Kpbs</param>
     public void SetBitrate(int bitrateKbps) => session.SetBitrate(bitrateKbps);
 
+    /// <summary>
+    /// Encoding loop for the encoder thread. 
+    /// It continuously captures frames from the source, encodes them, and emits access units until the encoder is stopped.
+    /// </summary>
     private void EncodeLoop()
     {
         byte[] frame = readback is null ? [] : new byte[readback.FrameSize];
         var clock = Stopwatch.StartNew();
         long frameIndex = 0;
 
+        // Use PrecisionSleep to wait for the next frame interval, ensuring accurate timing for frame capture and encoding
         using var pacer = new PrecisionSleep();
         try
         {
             while (running)
             {
+                // Capture and encode frames at the specified frame interval
                 bool sent = readback is null ? EncodeFromSurface() : EncodeFromReadback(readback, frame);
 
                 if (sent)
@@ -184,6 +236,10 @@ public sealed class LibavVideoEncoder : IVideoEncoder
         }
     }
 
+    /// <summary>
+    /// Encode the frames from the GPU surface directly.
+    /// </summary>
+    /// <returns>True if the frame was encoded successfully, false otherwise.</returns>
     private bool EncodeFromSurface()
     {
         bool copied;
@@ -203,6 +259,12 @@ public sealed class LibavVideoEncoder : IVideoEncoder
         return true;
     }
 
+    /// <summary>
+    /// Encodes frames from the readback buffer.
+    /// </summary>
+    /// <param name="readback">The async texture readback instance.</param>
+    /// <param name="frame">The frame data buffer.</param>
+    /// <returns>True if the frame was encoded successfully, false otherwise.</returns>
     private bool EncodeFromReadback(AsyncTextureReadback readback, byte[] frame)
     {
         bool gotFrame;
@@ -222,12 +284,20 @@ public sealed class LibavVideoEncoder : IVideoEncoder
         return true;
     }
 
+    /// <summary>
+    /// Emit the encoded access unit to the ChunkEncoded event and update the encoded bytes count.
+    /// </summary>
+    /// <param name="ptsMs">The presentation timestamp in milliseconds.</param>
+    /// <param name="accessUnit">The encoded access unit.</param>
     private void EmitAccessUnit(long ptsMs, byte[] accessUnit)
     {
         Interlocked.Add(ref encodedBytes, accessUnit.Length);
         ChunkEncoded?.Invoke(ptsMs, accessUnit);
     }
 
+    /// <summary>
+    /// Disposes of the encoder.
+    /// </summary>
     public void Dispose()
     {
         running = false;
@@ -235,8 +305,7 @@ public sealed class LibavVideoEncoder : IVideoEncoder
         if (!encodeThread.Join(1000))
         {
             ServiceCollector.PluginLog.Warning(
-                "ScreenShare's libavcodec encoder thread didn't exit within 1s (likely a stalled/hung GPU) - " +
-                "leaking its encoder and GPU resources rather than risking a use-after-dispose crash.");
+                "ScreenShare's libavcodec encoder thread didn't exit within 1s (likely a stalled/hung GPU).");
             return;
         }
 

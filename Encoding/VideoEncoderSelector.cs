@@ -5,16 +5,16 @@ namespace ScreenShare.Plugin.Encoding;
 
 public static class VideoEncoderSelector
 {
-    public static string EncoderName(GpuVendor vendor, VideoCodec codec) => (vendor, codec) switch
+    public static string EncoderName(GpuVendor vendor, SupportedVideoCodec codec) => (vendor, codec) switch
     {
-        (GpuVendor.Nvidia, VideoCodec.H264) => "h264_nvenc",
-        (GpuVendor.Nvidia, VideoCodec.Hevc) => "hevc_nvenc",
-        (GpuVendor.Amd, VideoCodec.H264) => "h264_amf",
-        (GpuVendor.Amd, VideoCodec.Hevc) => "hevc_amf",
-        (GpuVendor.Intel, VideoCodec.H264) => "h264_qsv",
-        (GpuVendor.Intel, VideoCodec.Hevc) => "hevc_qsv",
-        (_, VideoCodec.H264) => "libx264",
-        (_, VideoCodec.Hevc) => "libx265",
+        (GpuVendor.Nvidia, SupportedVideoCodec.H264) => "h264_nvenc",
+        (GpuVendor.Nvidia, SupportedVideoCodec.Hevc) => "hevc_nvenc",
+        (GpuVendor.Amd, SupportedVideoCodec.H264) => "h264_amf",
+        (GpuVendor.Amd, SupportedVideoCodec.Hevc) => "hevc_amf",
+        (GpuVendor.Intel, SupportedVideoCodec.H264) => "h264_qsv",
+        (GpuVendor.Intel, SupportedVideoCodec.Hevc) => "hevc_qsv",
+        (_, SupportedVideoCodec.H264) => "libx264",
+        (_, SupportedVideoCodec.Hevc) => "libx265",
         _ => throw new ArgumentOutOfRangeException(nameof(codec)),
     };
 
@@ -29,7 +29,7 @@ public static class VideoEncoderSelector
     public static bool SupportsLiveBitrate(string encoderName) =>
         encoderName is "h264_nvenc" or "hevc_nvenc" or "libx264";
 
-    public static string BuildEncoderArgs(GpuVendor vendor, VideoCodec codec, int bitrateKbps, int maxrateKbps, int bufsizeKbps, int gopSize)
+    public static string BuildEncoderArgs(GpuVendor vendor, SupportedVideoCodec codec, int bitrateKbps, int maxrateKbps, int bufsizeKbps, int gopSize)
     {
         string options = string.Join(" ", EncoderOptions(vendor).Select(option => $"-{option.Name} {option.Value}"));
 
@@ -42,10 +42,10 @@ public static class VideoEncoderSelector
         _ => "-pix_fmt yuv420p",
     };
 
-    public static string RawFormatName(VideoCodec codec) => codec switch
+    public static string RawFormatName(SupportedVideoCodec codec) => codec switch
     {
-        VideoCodec.H264 => "h264",
-        VideoCodec.Hevc => "hevc",
+        SupportedVideoCodec.H264 => "h264",
+        SupportedVideoCodec.Hevc => "hevc",
         _ => throw new ArgumentOutOfRangeException(nameof(codec)),
     };
 }

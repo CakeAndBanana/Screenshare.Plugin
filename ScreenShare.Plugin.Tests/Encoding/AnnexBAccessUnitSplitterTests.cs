@@ -35,7 +35,7 @@ public class AnnexBAccessUnitSplitterTests
         Nal(StartCode4, H264Aud, 0x30),
         Nal(StartCode3, H264Slice, FirstMbZero, payload, payload, payload));
 
-    private static List<byte[]> Split(VideoCodec codec, byte[] stream, int chunkSize)
+    private static List<byte[]> Split(SupportedVideoCodec codec, byte[] stream, int chunkSize)
     {
         var splitter = new AnnexBAccessUnitSplitter(codec);
         var units = new List<byte[]>();
@@ -52,7 +52,7 @@ public class AnnexBAccessUnitSplitterTests
         byte[] first = H264KeyAccessUnit();
         byte[] second = H264DeltaAccessUnit(0xAA);
 
-        List<byte[]> units = Split(VideoCodec.H264, Concat(first, second), int.MaxValue);
+        List<byte[]> units = Split(SupportedVideoCodec.H264, Concat(first, second), int.MaxValue);
 
         Assert.Equal([first], units);
     }
@@ -63,7 +63,7 @@ public class AnnexBAccessUnitSplitterTests
         byte[] first = H264KeyAccessUnit();
         byte[] second = H264DeltaAccessUnit(0xAA);
         byte[] stream = Concat(first, second);
-        var splitter = new AnnexBAccessUnitSplitter(VideoCodec.H264);
+        var splitter = new AnnexBAccessUnitSplitter(SupportedVideoCodec.H264);
         var units = new List<byte[]>();
 
         splitter.Append(stream, 0, stream.Length, units.Add);
@@ -76,7 +76,7 @@ public class AnnexBAccessUnitSplitterTests
     [Fact]
     public void Flush_WithNothingBuffered_ReturnsNull()
     {
-        Assert.Null(new AnnexBAccessUnitSplitter(VideoCodec.H264).Flush());
+        Assert.Null(new AnnexBAccessUnitSplitter(SupportedVideoCodec.H264).Flush());
     }
 
     [Theory]
@@ -97,7 +97,7 @@ public class AnnexBAccessUnitSplitterTests
             H264DeltaAccessUnit(0x33),
         ];
 
-        List<byte[]> units = Split(VideoCodec.H264, Concat(expected), chunkSize);
+        List<byte[]> units = Split(SupportedVideoCodec.H264, Concat(expected), chunkSize);
 
         Assert.Equal(expected[..^1], units);
     }
@@ -109,7 +109,7 @@ public class AnnexBAccessUnitSplitterTests
             H264KeyAccessUnit(),
             H264DeltaAccessUnit(0x11),
             H264DeltaAccessUnit(0x22));
-        var splitter = new AnnexBAccessUnitSplitter(VideoCodec.H264);
+        var splitter = new AnnexBAccessUnitSplitter(SupportedVideoCodec.H264);
         var units = new List<byte[]>();
 
         for (int i = 0; i < stream.Length; i++)
@@ -130,7 +130,7 @@ public class AnnexBAccessUnitSplitterTests
             Nal(StartCode3, H264Slice, FirstMbNonZero, 0x02),
             Nal(StartCode3, H264Slice, FirstMbNonZero, 0x03));
 
-        List<byte[]> units = Split(VideoCodec.H264, Concat(multiSlice, H264DeltaAccessUnit(0x44)), 5);
+        List<byte[]> units = Split(SupportedVideoCodec.H264, Concat(multiSlice, H264DeltaAccessUnit(0x44)), 5);
 
         Assert.Equal([multiSlice], units);
     }
@@ -143,7 +143,7 @@ public class AnnexBAccessUnitSplitterTests
             Nal(StartCode3, H264IdrSlice, FirstMbZero, 0x01),
             Nal(StartCode3, H264Filler, 0xFF, 0xFF, 0x80));
 
-        List<byte[]> units = Split(VideoCodec.H264, Concat(withFiller, H264DeltaAccessUnit(0x55)), 3);
+        List<byte[]> units = Split(SupportedVideoCodec.H264, Concat(withFiller, H264DeltaAccessUnit(0x55)), 3);
 
         Assert.Equal([withFiller], units);
     }
@@ -154,7 +154,7 @@ public class AnnexBAccessUnitSplitterTests
         byte[] delta = H264DeltaAccessUnit(0x11);
         byte[] key = H264KeyAccessUnit();
 
-        List<byte[]> units = Split(VideoCodec.H264, Concat(delta, key, H264DeltaAccessUnit(0x22)), 6);
+        List<byte[]> units = Split(SupportedVideoCodec.H264, Concat(delta, key, H264DeltaAccessUnit(0x22)), 6);
 
         Assert.Equal([delta, key], units);
     }
@@ -173,7 +173,7 @@ public class AnnexBAccessUnitSplitterTests
             Nal(StartCode4, Hevc(39), 0x01, 0x01, 0x80),
             Nal(StartCode3, Hevc(1), 0x01, FirstMbZero, 0xBB));
 
-        List<byte[]> units = Split(VideoCodec.Hevc, Concat(first, second, first), 9);
+        List<byte[]> units = Split(SupportedVideoCodec.Hevc, Concat(first, second, first), 9);
 
         Assert.Equal([first, second], units);
     }
@@ -184,7 +184,7 @@ public class AnnexBAccessUnitSplitterTests
         byte[] key = H264KeyAccessUnit();
         byte[] delta = H264DeltaAccessUnit(0x11);
         byte[] stream = Concat(key, delta);
-        var splitter = new AnnexBAccessUnitSplitter(VideoCodec.H264);
+        var splitter = new AnnexBAccessUnitSplitter(SupportedVideoCodec.H264);
 
         splitter.Append(stream, 0, stream.Length, _ => { });
 

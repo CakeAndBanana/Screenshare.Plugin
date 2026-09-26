@@ -54,7 +54,7 @@ public sealed class MediaSocketClient : IAsyncDisposable
 
     public event Action<long, byte[]>? AudioPacketReceived;
 
-    public event Action<int, int, VideoCodec, int>? VideoMetadataReceived;
+    public event Action<int, int, SupportedVideoCodec, int>? VideoMetadataReceived;
 
     public event Action<int, int>? AudioMetadataReceived;
 
@@ -135,7 +135,7 @@ public sealed class MediaSocketClient : IAsyncDisposable
         return payload;
     }
 
-    public void SendVideoMetadata(int width, int height, VideoCodec codec, int fps)
+    public void SendVideoMetadata(int width, int height, SupportedVideoCodec codec, int fps)
     {
         byte[] payload = new byte[11];
         BitConverter.GetBytes(width).CopyTo(payload, 0);
@@ -233,7 +233,7 @@ public sealed class MediaSocketClient : IAsyncDisposable
                         AudioPacketReceived?.Invoke(BitConverter.ToInt64(payload, 0), payload[8..]);
                         break;
                     case MediaMessageType.VideoMetadata when payload.Length >= 11:
-                        VideoMetadataReceived?.Invoke(BitConverter.ToInt32(payload, 0), BitConverter.ToInt32(payload, 4), (VideoCodec)payload[8], BitConverter.ToUInt16(payload, 9));
+                        VideoMetadataReceived?.Invoke(BitConverter.ToInt32(payload, 0), BitConverter.ToInt32(payload, 4), (SupportedVideoCodec)payload[8], BitConverter.ToUInt16(payload, 9));
                         break;
                     case MediaMessageType.AudioMetadata when payload.Length >= 8:
                         AudioMetadataReceived?.Invoke(BitConverter.ToInt32(payload, 0), BitConverter.ToInt32(payload, 4));

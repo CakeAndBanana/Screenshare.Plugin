@@ -577,7 +577,7 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         var buttonSize = new Vector2((width - spacing) / 2, ImGui.GetFrameHeight() * 1.2f);
         if (UiTheme.ColoredButton("Create", UiTheme.ColorOf(kind), buttonSize))
         {
-            roomSession.CreateRoom(createName.Trim(), isPublic, createPassword, Math.Clamp(createMaxViewers, 1, 16), createRegion);
+            roomSession.CreateRoom(createName.Trim(), isPublic, createPassword, Math.Clamp(createMaxViewers, 1, 16), createRegion, createRegion is null ? PlayerRegion.Current() : null);
             ImGui.CloseCurrentPopup();
         }
 
@@ -619,7 +619,7 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
 
         ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + width);
         ImGui.TextDisabled(createRegion is null
-            ? "Uses whichever server has the most room."
+            ? "Uses a server in your region, or another region only when yours is full."
             : "Pick the region closest to you and your viewers.");
         ImGui.PopTextWrapPos();
     }

@@ -1,8 +1,11 @@
 ﻿using System.Diagnostics;
 using ScreenShare.Plugin.Capture.ScreenCapture.Interfaces;
 using ScreenShare.Plugin.Encoding.Enums;
+using ScreenShare.Plugin.Encoding.H264;
 using ScreenShare.Plugin.Encoding.Interfaces;
 using ScreenShare.Plugin.Encoding.Interop;
+using ScreenShare.Plugin.Encoding.LibavCodec;
+using ScreenShare.Plugin.Encoding.MediaFoundation;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 
@@ -18,7 +21,7 @@ public static class VideoEncoderFactory
         int targetHeight,
         int bitrateKbps,
         int fps,
-        VideoCodec codec,
+        SupportedVideoCodec codec,
         bool preferMediaFoundation = true)
     {
         if (preferMediaFoundation)
@@ -54,7 +57,7 @@ public static class VideoEncoderFactory
         int targetHeight,
         int bitrateKbps,
         int fps,
-        VideoCodec codec)
+        SupportedVideoCodec codec)
     {
         try
         {

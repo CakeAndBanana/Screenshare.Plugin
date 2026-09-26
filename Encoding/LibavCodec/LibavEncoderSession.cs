@@ -4,8 +4,11 @@ using ScreenShare.Plugin.Encoding.Enums;
 using SharpDX.Direct3D11;
 using Device = SharpDX.Direct3D11.Device;
 
-namespace ScreenShare.Plugin.Encoding;
+namespace ScreenShare.Plugin.Encoding.LibavCodec;
 
+/// <summary>
+/// Low-level wrapper around a libavcodec encoder session. This class is unsafe and should be used with care.
+/// </summary>
 public sealed unsafe class LibavEncoderSession : IDisposable
 {
     private const int SurfacePoolSize = 8;
@@ -37,6 +40,11 @@ public sealed unsafe class LibavEncoderSession : IDisposable
 
     public bool UsesD3D11Surfaces => surfaceFrames is not null;
 
+    /// <summary>
+    /// Ensuring that the library is loaded from the specified directory.
+    /// </summary>
+    /// <param name="libraryDirectory">Location of the library</param>
+    /// <exception cref="NotSupportedException">Thrown when the specified library directory is not supported.</exception>
     public static void EnsureLoaded(string libraryDirectory)
     {
         lock (LoadLock)
@@ -55,10 +63,22 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         }
     }
 
+    /// <summary>
+    /// Constructor for the low-level wrapper around the codec
+    /// </summary>
+    /// <param name="encoderName">The name of the encoder to use</param>
+    /// <param name="options">The options for the encoder</param>
+    /// <param name="codec">The video codec to use</param>
+    /// <param name="width">The width of the video frames</param>
+    /// <param name="height">The height of the video frames</param>
+    /// <param name="fps">The frame rate of the video</param>
+    /// <param name="bitrateKbps">The bitrate of the video</param>
+    /// <param name="d3d11Device">The D3D11 device to use</param>
+    /// <exception cref="ArgumentException"></exception>
     public LibavEncoderSession(
         string encoderName,
         IReadOnlyList<(string Name, string Value)> options,
-        VideoCodec codec,
+        SupportedVideoCodec codec,
         int width,
         int height,
         int fps,
@@ -68,19 +88,21 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         if (width % 2 != 0 || height % 2 != 0)
             throw new ArgumentException($"NV12 requires even dimensions, got {width}x{height}.");
 
+        // Ensure the library is loaded before using it
         EncoderName = encoderName;
         Width = width;
         Height = height;
         this.fps = fps;
         SupportsLiveBitrate = VideoEncoderSelector.SupportsLiveBitrate(encoderName);
 
+        // Initialize the encoder context and allocate resources
         try
         {
             AVCodec* encoder = ffmpeg.avcodec_find_encoder_by_name(encoderName);
             if (encoder is null)
                 throw new NotSupportedException($"This ffmpeg build has no '{encoderName}' encoder.");
 
-            AVCodecID expectedId = codec == VideoCodec.Hevc ? AVCodecID.AV_CODEC_ID_HEVC : AVCodecID.AV_CODEC_ID_H264;
+            AVCodecID expectedId = codec == SupportedVideoCodec.Hevc ? AVCodecID.AV_CODEC_ID_HEVC : AVCodecID.AV_CODEC_ID_H264;
             if (encoder->id != expectedId)
                 throw new ArgumentException($"'{encoderName}' does not encode {codec}.");
 
@@ -88,6 +110,7 @@ public sealed unsafe class LibavEncoderSession : IDisposable
             if (context is null)
                 throw new OutOfMemoryException("avcodec_alloc_context3 failed.");
 
+            // Set the encoder parameters
             context->width = width;
             context->height = height;
             context->time_base = new AVRational { num = 1, den = 1000 };
@@ -103,27 +126,28 @@ public sealed unsafe class LibavEncoderSession : IDisposable
             {
                 context->pix_fmt = PickPixelFormat(context, encoder);
             }
-
             context->gop_size = fps * 2;
             context->max_b_frames = 0;
             ApplyBitrate(bitrateKbps);
 
+            // Set the encoder options
             foreach ((string name, string value) in options)
-                Check(ffmpeg.av_opt_set(context->priv_data, name, value, 0), $"setting {encoderName} option {name}={value}");
+                CheckCall(ffmpeg.av_opt_set(context->priv_data, name, value, 0), $"setting {encoderName} option {name}={value}");
 
-            Check(ffmpeg.avcodec_open2(context, encoder, null), $"opening {encoderName}");
+            CheckCall(ffmpeg.avcodec_open2(context, encoder, null), $"opening {encoderName}");
 
             frame = ffmpeg.av_frame_alloc();
             packet = ffmpeg.av_packet_alloc();
             if (frame is null || packet is null)
                 throw new OutOfMemoryException("av_frame_alloc/av_packet_alloc failed.");
 
+            // If we're not using D3D11 surfaces, allocate a buffer for the input frame
             if (surfaceFrames is null)
             {
                 frame->format = (int)context->pix_fmt;
                 frame->width = width;
                 frame->height = height;
-                Check(ffmpeg.av_frame_get_buffer(frame, 0), "allocating the input frame");
+                CheckCall(ffmpeg.av_frame_get_buffer(frame, 0), "allocating the input frame");
             }
         }
         catch
@@ -133,27 +157,42 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         }
     }
 
+    /// <summary>
+    /// Creates a D3D11 surface pool for the encoder, allowing it to accept D3D11 frames directly.
+    /// </summary>
+    /// <param name="encoder">The encoder for which to create the surface pool</param>
+    /// <param name="d3d11Device">The D3D11 device to use</param>
+    /// <param name="width">The width of the video frames</param>
+    /// <param name="height">The height of the video frames</param>
+    /// <returns>The surface pool buffer reference</returns>
+    /// <exception cref="NotSupportedException">Thrown when the encoder does not support D3D11 frames</exception>
+    /// <exception cref="OutOfMemoryException">Thrown when memory allocation fails</exception>
     private static AVBufferRef* CreateSurfacePool(AVCodec* encoder, Device d3d11Device, int width, int height)
     {
+        // Check if the encoder supports D3D11 frames
         if (!AcceptsD3D11Frames(encoder))
             throw new NotSupportedException($"{Marshal.PtrToStringAnsi((nint)encoder->name)} does not take D3D11 frames.");
 
+        // Allocate a hardware device context for D3D11
         AVBufferRef* device = ffmpeg.av_hwdevice_ctx_alloc(AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA);
         if (device is null)
             throw new OutOfMemoryException("av_hwdevice_ctx_alloc failed.");
 
+        // Initialize the device context with the D3D11 device
         try
         {
+            // Wrap the D3D11 device in the hardware device context
             var deviceContext = (AVHWDeviceContext*)device->data;
             var d3d11Context = (AVD3D11VADeviceContext*)deviceContext->hwctx;
             Marshal.AddRef(d3d11Device.NativePointer);
             d3d11Context->device = (ID3D11Device*)d3d11Device.NativePointer;
-            Check(ffmpeg.av_hwdevice_ctx_init(device), "wrapping the D3D11 device");
+            CheckCall(ffmpeg.av_hwdevice_ctx_init(device), "wrapping the D3D11 device");
 
             AVBufferRef* frames = ffmpeg.av_hwframe_ctx_alloc(device);
             if (frames is null)
                 throw new OutOfMemoryException("av_hwframe_ctx_alloc failed.");
 
+            // Configure the frames context for D3D11 surfaces
             var framesContext = (AVHWFramesContext*)frames->data;
             framesContext->format = AVPixelFormat.AV_PIX_FMT_D3D11;
             framesContext->sw_format = AVPixelFormat.AV_PIX_FMT_NV12;
@@ -162,43 +201,61 @@ public sealed unsafe class LibavEncoderSession : IDisposable
             framesContext->initial_pool_size = SurfacePoolSize;
             ((AVD3D11VAFramesContext*)framesContext->hwctx)->BindFlags = (uint)BindFlags.Decoder;
 
+            // Initialize the frames context, which allocates the D3D11 surface pool
             int result = ffmpeg.av_hwframe_ctx_init(frames);
             if (result < 0)
             {
                 ffmpeg.av_buffer_unref(&frames);
-                Check(result, "allocating the D3D11 surface pool");
+                CheckCall(result, "allocating the D3D11 surface pool");
             }
 
             return frames;
         }
         finally
         {
+            // Unreference the device context, as the frames context now holds a reference to it
             ffmpeg.av_buffer_unref(&device);
         }
     }
 
+    /// <summary>
+    /// Accepts D3D11 frames if the encoder supports it.
+    /// </summary>
+    /// <param name="encoder">The encoder to check</param>
+    /// <returns>true if the encoder accepts D3D11 frames; otherwise, false</returns>
     private static bool AcceptsD3D11Frames(AVCodec* encoder)
     {
         for (int i = 0; ; i++)
         {
+            // Get the hardware configuration for the encoder
             AVCodecHWConfig* config = ffmpeg.avcodec_get_hw_config(encoder, i);
             if (config is null)
                 return false;
 
+            // Check if the configuration supports D3D11 and has the required methods
             if (config->pix_fmt == AVPixelFormat.AV_PIX_FMT_D3D11 &&
                 (config->methods & HwConfigMethodHwFramesContext) != 0)
                 return true;
         }
     }
 
+    /// <summary>
+    /// Picks the best pixel format for the encoder, preferring NV12 and falling back to YUV420P if necessary.
+    /// </summary>
+    /// <param name="context">The codec context</param>
+    /// <param name="encoder">The encoder</param>
+    /// <returns>The preferred pixel format</returns>
+    /// <exception cref="NotSupportedException">Not supported with the specified encoder</exception>
     private static AVPixelFormat PickPixelFormat(AVCodecContext* context, AVCodec* encoder)
     {
+        // Query the encoder for its supported pixel formats
         void* configs = null;
         int count = 0;
         if (ffmpeg.avcodec_get_supported_config(context, encoder, AVCodecConfig.AV_CODEC_CONFIG_PIX_FORMAT, 0, &configs, &count) < 0 ||
             configs is null)
             return AVPixelFormat.AV_PIX_FMT_NV12;
 
+        // Check if NV12 is supported, and if not, check for YUV420P
         var formats = (AVPixelFormat*)configs;
         for (int i = 0; i < count; i++)
         {
@@ -212,9 +269,14 @@ public sealed unsafe class LibavEncoderSession : IDisposable
                 return AVPixelFormat.AV_PIX_FMT_YUV420P;
         }
 
+        // If neither NV12 nor YUV420P is supported, throw an exception
         throw new NotSupportedException("The encoder takes neither NV12 nor YUV420P input.");
     }
 
+    /// <summary>
+    /// Applying the bitrate to the encoder context.
+    /// </summary>
+    /// <param name="bitrateKbps">The bitrate in Kbps</param>
     private void ApplyBitrate(int bitrateKbps)
     {
         int maxRateKbps = EncoderName == "libx264" ? bitrateKbps : bitrateKbps * 4 / 3;
@@ -224,22 +286,45 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         context->rc_buffer_size = bitrateKbps * 2 * 1000;
     }
 
+    /// <summary>
+    /// Sets the pending bitrate for the encoder. This will be applied on the next frame sent.
+    /// </summary>
+    /// <param name="bitrateKbps">The bitrate in Kbps</param>
     public void SetBitrate(int bitrateKbps) => Interlocked.Exchange(ref pendingBitrateKbps, bitrateKbps);
 
+
+    /// <summary>
+    /// Sends the NV12 frame to to encoder.
+    /// </summary>
+    /// <param name="nv12">The NV12 frame data</param>
+    /// <param name="ptsMs">The presentation time stamp in milliseconds</param>
+    /// <param name="onAccessUnit">The callback to invoke when an access unit is available</param>
+    /// <exception cref="InvalidOperationException"></exception>
+    /// <exception cref="ArgumentException"></exception>
     public void SendNv12(byte[] nv12, long ptsMs, Action<long, byte[]> onAccessUnit)
     {
+        // Ensure that the encoder is not using D3D11 surfaces, as this method is for NV12 bytes
         if (UsesD3D11Surfaces)
             throw new InvalidOperationException("This session takes D3D11 surfaces, not NV12 bytes.");
 
+        // Ensure that the NV12 frame data is the expected size
         if (nv12.Length < FrameSize)
             throw new ArgumentException($"Expected {FrameSize} bytes of NV12, got {nv12.Length}.", nameof(nv12));
 
-        Check(ffmpeg.av_frame_make_writable(frame), "making the input frame writable");
+        // Make the input frame writable, copy the NV12 data into it, and send it to the encoder
+        CheckCall(ffmpeg.av_frame_make_writable(frame), "making the input frame writable");
         CopyIntoFrame(nv12);
 
         SendFrame(ptsMs, onAccessUnit);
     }
 
+    /// <summary>
+    /// Tries to copy the NV12 frame to a D3D11 surface.
+    /// </summary>
+    /// <param name="deviceContext">The device context</param>
+    /// <param name="nv12Source">The NV12 source texture</param>
+    /// <returns>true if the copy was successful; otherwise, false</returns>
+    /// <exception cref="InvalidOperationException">Thrown when the session does not use D3D11 surfaces.</exception>
     public bool TryCopyToSurface(DeviceContext deviceContext, Texture2D nv12Source)
     {
         if (!UsesD3D11Surfaces)
@@ -263,6 +348,11 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Sends a D3D11 surface to the encoder.
+    /// </summary>
+    /// <param name="ptsMs">The presentation time stamp in milliseconds</param>
+    /// <param name="onAccessUnit">The callback to invoke when an access unit is available</param>
     public void SendSurface(long ptsMs, Action<long, byte[]> onAccessUnit)
     {
         try
@@ -275,12 +365,18 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         }
     }
 
+    /// <summary>
+    /// Sends the frame to the encoder
+    /// </summary>
+    /// <param name="ptsMs">The presentation time stamp in milliseconds</param>
+    /// <param name="onAccessUnit">The callback to invoke when an access unit is available</param>
     private void SendFrame(long ptsMs, Action<long, byte[]> onAccessUnit)
     {
+        // If the birate has changed since the last frame, apply it now
         int bitrateKbps = Interlocked.Exchange(ref pendingBitrateKbps, 0);
         if (bitrateKbps > 0 && SupportsLiveBitrate)
             ApplyBitrate(bitrateKbps);
-
+        
         if (ptsMs <= lastPtsMs)
             ptsMs = lastPtsMs + 1;
         lastPtsMs = ptsMs;
@@ -288,14 +384,19 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         frame->pts = ptsMs;
         frame->duration = 1000 / Math.Max(1, fps);
 
-        Check(ffmpeg.avcodec_send_frame(context, frame), $"sending a frame to {EncoderName}");
+        CheckCall(ffmpeg.avcodec_send_frame(context, frame), $"sending a frame to {EncoderName}");
         ReceivePackets(onAccessUnit);
     }
 
+    /// <summary>
+    /// Copies the NV12 frame data into the encoder's input frame.
+    /// </summary>
+    /// <param name="nv12">The NV12 frame data</param>
     private void CopyIntoFrame(byte[] nv12)
     {
         int lumaSize = Width * Height;
 
+        // Pin the NV12 byte array and copy the luma and chroma planes into the frame's data buffers
         fixed (byte* source = nv12)
         {
             CopyRows(source, Width, frame->data[0], frame->linesize[0], Width, Height);
@@ -324,12 +425,25 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         }
     }
 
+    /// <summary>
+    /// Copies the specified number of rows from the source buffer to the destination buffer.
+    /// </summary>
+    /// <param name="source">The source buffer</param>
+    /// <param name="sourceStride">The stride of the source buffer</param>
+    /// <param name="destination">The destination buffer</param>
+    /// <param name="destinationStride">The stride of the destination buffer</param>
+    /// <param name="rowBytes">The number of bytes in each row</param>
+    /// <param name="rows">The number of rows to copy</param>
     private static void CopyRows(byte* source, int sourceStride, byte* destination, int destinationStride, int rowBytes, int rows)
     {
         for (int y = 0; y < rows; y++)
             System.Buffer.MemoryCopy(source + y * sourceStride, destination + y * destinationStride, rowBytes, rowBytes);
     }
 
+    /// <summary>
+    /// Receives packets from the encoder and invokes the callback for each access unit.
+    /// </summary>
+    /// <param name="onAccessUnit">The callback to invoke when an access unit is available</param>
     private void ReceivePackets(Action<long, byte[]> onAccessUnit)
     {
         while (true)
@@ -338,7 +452,7 @@ public sealed unsafe class LibavEncoderSession : IDisposable
             if (result == ffmpeg.AVERROR(ffmpeg.EAGAIN) || result == ffmpeg.AVERROR_EOF)
                 return;
 
-            Check(result, $"receiving a packet from {EncoderName}");
+            CheckCall(result, $"receiving a packet from {EncoderName}");
 
             try
             {
@@ -355,22 +469,35 @@ public sealed unsafe class LibavEncoderSession : IDisposable
         }
     }
 
+    /// <summary>
+    /// Flushes the encoder, sending a null frame to indicated the end of the stream and receiving any remaining packets.
+    /// </summary>
+    /// <param name="onAccessUnit">The callback to invoke when an access unit is available</param>
     public void Flush(Action<long, byte[]> onAccessUnit)
     {
-        Check(ffmpeg.avcodec_send_frame(context, null), $"flushing {EncoderName}");
+        CheckCall(ffmpeg.avcodec_send_frame(context, null), $"flushing {EncoderName}");
         ReceivePackets(onAccessUnit);
     }
 
-    private static void Check(int result, string what)
+    /// <summary>
+    /// Checks the results of libavcodec calls and throws an exception if the result indicates an error.
+    /// </summary>
+    /// <param name="result">The result of the libavcodec call</param>
+    /// <param name="failedReason">A description of the operation that failed</param>
+    /// <exception cref="InvalidOperationException">Thrown when the libavcodec call fails</exception>
+    private static void CheckCall(int result, string failedReason)
     {
         if (result >= 0)
             return;
 
         byte* message = stackalloc byte[256];
         ffmpeg.av_strerror(result, message, 256);
-        throw new InvalidOperationException($"libavcodec failed {what}: {Marshal.PtrToStringAnsi((nint)message)} ({result})");
+        throw new InvalidOperationException($"libavcodec failed {failedReason}: {Marshal.PtrToStringAnsi((nint)message)} ({result})");
     }
 
+    /// <summary>
+    /// Disposes of the resources used by the encoder session.
+    /// </summary>
     public void Dispose()
     {
         if (packet is not null)

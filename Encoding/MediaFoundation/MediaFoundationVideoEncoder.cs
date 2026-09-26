@@ -11,8 +11,11 @@ using ScreenShare.Plugin.Encoding.Interfaces;
 using ScreenShare.Plugin.Encoding.Enums;
 using ScreenShare.Plugin.Capture.ScreenCapture.Interfaces;
 
-namespace ScreenShare.Plugin.Encoding;
+namespace ScreenShare.Plugin.Encoding.MediaFoundation;
 
+/// <summary>
+/// Media Foundation video encoder that uses the system's hardware encoder for H.264 or HEVC.
+/// </summary>
 public sealed class MediaFoundationVideoEncoder : IVideoEncoder
 {
     private const int FrameRingLength = 3;
@@ -46,7 +49,7 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
 
     public string EncoderName { get; } = "Media Foundation";
 
-    public VideoCodec Codec { get; }
+    public SupportedVideoCodec Codec { get; }
 
     public long FramesEncoded => Interlocked.Read(ref framesEncoded);
 
@@ -62,6 +65,16 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
 
     public bool SupportsLiveBitrate => codecApi is not null;
 
+    /// <summary>
+    /// Constructor for MediaFoundationVideoEncoder.
+    /// </summary>
+    /// <param name="gameAdapterDevice">The game adapter device.</param>
+    /// <param name="capture">The capture source.</param>
+    /// <param name="sessionClock">The session clock.</param>
+    /// <param name="targetHeight">The target height.</param>
+    /// <param name="bitrateKbps">The bitrate in kbps.</param>
+    /// <param name="fps">The frames per second.</param>
+    /// <param name="codec">The video codec.</param>
     public MediaFoundationVideoEncoder(
         GameAdapterDevice gameAdapterDevice,
         ICaptureSource capture,
@@ -69,8 +82,9 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         int targetHeight,
         int bitrateKbps,
         int fps,
-        VideoCodec codec)
+        SupportedVideoCodec codec)
     {
+        // Initialize the Media Foundation platform if it hasn't been initialized yet.
         this.gameAdapterDevice = gameAdapterDevice;
         this.capture = capture;
         this.sessionClock = sessionClock;
@@ -88,6 +102,7 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         DXGIDeviceManager? manager = null;
         MediaEventGenerator? generator = null;
 
+        // The try-catch block ensures that if any part of the initialization fails, all allocated resources are properly disposed of to prevent memory leaks.
         try
         {
             srv = new ShaderResourceView(device, capture.CaptureTexture);
@@ -138,6 +153,13 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
     }
 
+    /// <summary>
+    /// Computes the scaled size of the video frame while maintaining the aspect ratio and ensuring that both width and height are even numbers.
+    /// </summary>
+    /// <param name="sourceWidth">The width of the source frame.</param>
+    /// <param name="sourceHeight">The height of the source frame.</param>
+    /// <param name="targetHeight">The target height.</param>
+    /// <returns>The scaled width and height.</returns>
     private static (int Width, int Height) ComputeScaledSize(int sourceWidth, int sourceHeight, int targetHeight)
     {
         int height = Math.Min(targetHeight, sourceHeight);
@@ -147,6 +169,13 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         return (Math.Max(2, width), Math.Max(2, height));
     }
 
+    /// <summary>
+    /// Creates a new NV12 texture with the specified width and height.
+    /// </summary>
+    /// <param name="device">The Direct3D device.</param>
+    /// <param name="width">The width of the texture.</param>
+    /// <param name="height">The height of the texture.</param>
+    /// <returns>The created NV12 texture.</returns>
     private static Texture2D CreateNv12Texture(Device device, int width, int height) =>
         new(device, new Texture2DDescription
         {
@@ -162,9 +191,16 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
             OptionFlags = ResourceOptionFlags.None,
         });
 
-    private static Transform ActivateEncoder(VideoCodec codec, out string name)
+    /// <summary>
+    /// Activates the hardware encoder for the specified codec and returns the corresponding Transform object.
+    /// </summary>
+    /// <param name="codec">The video codec.</param>
+    /// <param name="name">The name of the activated encoder.</param>
+    /// <returns>The activated Transform object.</returns>
+    /// <exception cref="NotSupportedException">Not supported by the codec</exception>
+    private static Transform ActivateEncoder(SupportedVideoCodec codec, out string name)
     {
-        Guid subtype = codec == VideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264;
+        Guid subtype = codec == SupportedVideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264;
         List<nint> activates = EnumerateEncoders(
             subtype,
             MftEnumFlags.Hardware | MftEnumFlags.AsyncMft | MftEnumFlags.SortAndFilter);
@@ -192,10 +228,18 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         return activate.ActivateObject<Transform>(typeof(Transform).GUID);
     }
 
+    /// <summary>
+    /// Configures the types for the input and output of the encoder transform based on the specified width, height, fps, and bitrate.
+    /// </summary>
+    /// <param name="width">The width of the video.</param>
+    /// <param name="height">The height of the video.</param>
+    /// <param name="fps">The frames per second of the video.</param>
+    /// <param name="bitrateKbps">The bitrate of the video in kbps.</param>
     private void ConfigureTypes(int width, int height, int fps, int bitrateKbps)
     {
-        Guid subtype = Codec == VideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264;
+        Guid subtype = Codec == SupportedVideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264;
 
+        // Configure the output type of the encoder transform.
         using (var outputType = new MediaType())
         {
             outputType.Set(MediaTypeAttributeKeys.MajorType, MajorTypeVideo);
@@ -208,6 +252,7 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
             transform.SetOutputType(0, outputType, 0);
         }
 
+        // Configure the input type of the encoder transform.
         using var inputType = new MediaType();
         inputType.Set(MediaTypeAttributeKeys.MajorType, MajorTypeVideo);
         inputType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatNv12);
@@ -222,6 +267,12 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
 
     private static long Pack(int high, int low) => ((long)high << 32) | (uint)low;
 
+    /// <summary>
+    /// Tries to get the codec API for the encoder to allow for live bitrate changes.
+    /// </summary>
+    /// <param name="bitrateKbps"></param>
+    /// <param name="fps"></param>
+    /// <returns></returns>
     private ICodecApi? TryGetCodecApi(int bitrateKbps, int fps)
     {
         try
@@ -234,6 +285,7 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
             void Apply(string name, Guid property, object value) =>
                 (TrySetCodecProperty(api, property, value) ? accepted : refused).Add(name);
 
+            // Set the encoder properties for CBR mode, bitrate, low-latency mode, and GOP size.
             Apply("CBR", AvEncCommonRateControlMode, RateControlModeCbr);
             Apply($"{bitrateKbps}kbps", AvEncCommonMeanBitRate, (uint)(bitrateKbps * 1000));
             Apply("low-latency", AvLowLatencyMode, true);
@@ -254,12 +306,19 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
     }
 
+    /// <summary>
+    /// Sets the bitrate for the encoder.
+    /// </summary>
+    /// <param name="bitrateKbps">The bitrate in Kbps.</param>
     public void SetBitrate(int bitrateKbps)
     {
         if (codecApi is not null)
             Interlocked.Exchange(ref pendingBitrateKbps, bitrateKbps);
     }
 
+    /// <summary>
+    /// Apply pending bitrate changes to the encoder if any are queued.
+    /// </summary>
     private void ApplyPendingBitrate()
     {
         int bitrateKbps = Interlocked.Exchange(ref pendingBitrateKbps, 0);
@@ -277,6 +336,9 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
     }
 
+    /// <summary>
+    /// Pumps the encoder loop, handling input and output events from the Media Foundation transform.
+    /// </summary>
     private void PumpLoop()
     {
         var clock = Stopwatch.StartNew();
@@ -324,6 +386,11 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
     }
 
+    /// <summary>
+    /// Feeds a frame to the encoder, handling timing and frame skipping as necessary to maintain the desired frame rate.
+    /// </summary>
+    /// <param name="clock">The stopwatch used for timing.</param>
+    /// <param name="pacer">The precision sleep instance used for timing.</param>
     private void FeedFrame(Stopwatch clock, PrecisionSleep pacer)
     {
         long dueMs = nextFrameIndex * frameIntervalMs;
@@ -371,6 +438,9 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
     }
 
+    /// <summary>
+    /// Drains the output from the encoder, retrieving encoded samples and invoking the ChunkEncoded event.
+    /// </summary>
     private void DrainOutput()
     {
         nint samplePtr = ProcessOutput(transform.NativePointer);
@@ -399,6 +469,11 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         }
     }
 
+    /// <summary>
+    /// Reads the output presentation timestamp (PTS) from the given sample.
+    /// </summary>
+    /// <param name="sample"></param>
+    /// <returns></returns>
     private long ReadOutputPts(Sample sample)
     {
         try
@@ -414,6 +489,9 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         return Interlocked.Read(ref lastFedPtsMs);
     }
 
+    /// <summary>
+    /// Disposes of the encoder, stopping the pump thread and releasing all resources.
+    /// </summary>
     public void Dispose()
     {
         running = false;

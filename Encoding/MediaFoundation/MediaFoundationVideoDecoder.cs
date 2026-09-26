@@ -1,20 +1,23 @@
-﻿using System.Collections.Concurrent;
+﻿using ScreenShare.Plugin.Encoding.Enums;
+using ScreenShare.Plugin.Encoding.H264;
+using ScreenShare.Plugin.Encoding.Interfaces;
+using ScreenShare.Plugin.Rendering;
+using ScreenShare.Plugin.Services;
+using SharpDX.Direct3D11;
+using SharpDX.DXGI;
+using SharpDX.MediaFoundation;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
-using ScreenShare.Plugin.Encoding.Interop;
-using ScreenShare.Plugin.Rendering;
-using ScreenShare.Plugin.Services;
-using SharpDX.DXGI;
-using SharpDX.Direct3D11;
-using SharpDX.MediaFoundation;
 using static ScreenShare.Plugin.Encoding.Interop.MediaFoundationInterop;
 using Device = SharpDX.Direct3D11.Device;
-using ScreenShare.Plugin.Encoding.Interfaces;
-using ScreenShare.Plugin.Encoding.Enums;
 
-namespace ScreenShare.Plugin.Encoding;
+namespace ScreenShare.Plugin.Encoding.MediaFoundation;
 
+/// <summary>
+/// Media foundation video decoder that decodes H.264 or HEVC video streams into NV12 textures and converts them to BGRA for display.
+/// </summary>
 public sealed class MediaFoundationVideoDecoder : IVideoDecoder
 {
     private const int FeedChannelCapacity = 256;
@@ -71,12 +74,23 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         remove => scheduler.ReadyToDisplay -= value;
     }
 
+    /// <summary>
+    /// Constructs a MediaFoundationVideoDecoder that decodes H.264 or HEVC video streams into NV12 textures and converts them to BGRA for display.
+    /// </summary>
+    /// <param name="gameAdapterDevice">The game adapter device.</param>
+    /// <param name="width">The width of the video frame.</param>
+    /// <param name="height">The height of the video frame.</param>
+    /// <param name="fps">The frames per second of the video stream.</param>
+    /// <param name="codec">The video codec to decode.</param>
+    /// <param name="getAudioPtsMs">A function to get the audio presentation timestamp in milliseconds.</param>
+    /// <param name="getSyncOffsetMs">A function to get the synchronization offset in milliseconds.</param>
+    /// <param name="audioLatencyBudgetMs">The audio latency budget in milliseconds.</param>
     public MediaFoundationVideoDecoder(
         GameAdapterDevice gameAdapterDevice,
         int width,
         int height,
         int fps,
-        VideoCodec codec,
+        SupportedVideoCodec codec,
         Func<long?> getAudioPtsMs,
         Func<int>? getSyncOffsetMs = null,
         int audioLatencyBudgetMs = H264Decoder.PresentationBufferMilliseconds)
@@ -160,6 +174,13 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         decodeThread.Start();
     }
 
+    /// <summary>
+    /// Create an NV12 texture with the specified width and height.
+    /// </summary>
+    /// <param name="device">The Direct3D device.</param>
+    /// <param name="width">The width of the texture.</param>
+    /// <param name="height">The height of the texture.</param>
+    /// <returns>The created NV12 texture.</returns>
     private static Texture2D CreateNv12Texture(Device device, int width, int height) =>
         new(device, new Texture2DDescription
         {
@@ -175,9 +196,16 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
             OptionFlags = ResourceOptionFlags.None,
         });
 
-    private static Transform ActivateDecoder(VideoCodec codec, out string name)
+    /// <summary>
+    /// Active a Media Foundation decoder for the specified codec.
+    /// </summary>
+    /// <param name="codec">The video codec.</param>
+    /// <param name="name">The name of the decoder.</param>
+    /// <returns>The activated decoder.</returns>
+    /// <exception cref="NotSupportedException">Not supported codec.</exception>
+    private static Transform ActivateDecoder(SupportedVideoCodec codec, out string name)
     {
-        Guid subtype = codec == VideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264;
+        Guid subtype = codec == SupportedVideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264;
         List<nint> activates = EnumerateDecoders(
             subtype,
             MftEnumFlags.Hardware | MftEnumFlags.SyncMft | MftEnumFlags.SortAndFilter);
@@ -191,6 +219,7 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
 
         using var activate = new Activate(chosen);
 
+        // Get the friendly name of the decoder, or fall back to a generic name if not available.
         string friendly;
         try
         {
@@ -224,23 +253,37 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         return decoder;
     }
 
-    private void ConfigureTypes(int width, int height, int fps, VideoCodec codec)
+    /// <summary>
+    /// Configures the input and output types for the Media Foundation decoder.
+    /// </summary>
+    /// <param name="width">The width of the video.</param>
+    /// <param name="height">The height of the video.</param>
+    /// <param name="fps">The frame rate of the video.</param>
+    /// <param name="codec">The video codec.</param>
+    private void ConfigureTypes(int width, int height, int fps, SupportedVideoCodec codec)
     {
         using (var inputType = new MediaType())
         {
+            // Set the input type for the decoder.
             inputType.Set(MediaTypeAttributeKeys.MajorType, MajorTypeVideo);
-            inputType.Set(MediaTypeAttributeKeys.Subtype, codec == VideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264);
+            inputType.Set(MediaTypeAttributeKeys.Subtype, codec == SupportedVideoCodec.Hevc ? VideoFormatHevc : VideoFormatH264);
             inputType.Set(MediaTypeAttributeKeys.FrameSize, Pack(width, height));
             inputType.Set(MediaTypeAttributeKeys.FrameRate, Pack(fps, 1));
             inputType.Set(MediaTypeAttributeKeys.PixelAspectRatio, Pack(1, 1));
             transform.SetInputType(0, inputType, 0);
         }
 
+        // Set the output type for the decoder to NV12.
         SelectNv12OutputType();
     }
 
+    /// <summary>
+    /// Selects the NV12 output type for the Media Foundation decoder.
+    /// </summary>
+    /// <exception cref="NotSupportedException">Not supported when the decoder does not offer NV12 output.</exception>
     private void SelectNv12OutputType()
     {
+        // Enumerate the available output types and select NV12 if available.
         for (int index = 0; transform.TryGetOutputAvailableType(0, index, out MediaType candidate); index++)
         {
             using (candidate)
@@ -256,8 +299,19 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         throw new NotSupportedException("The Media Foundation decoder does not offer NV12 output.");
     }
 
+    /// <summary>
+    /// Packs two integers into a long value, with the high integer in the upper 32 bits and the low integer in the lower 32 bits.
+    /// </summary>
+    /// <param name="high">The high integer.</param>
+    /// <param name="low">The low integer.</param>
+    /// <returns>The packed long value.</returns>
     private static long Pack(int high, int low) => ((long)high << 32) | (uint)low;
 
+    /// <summary>
+    /// Feeds the decoder with a chunk of encoded video data and its corresponding presentation timestamp in milliseconds.
+    /// </summary>
+    /// <param name="ptsMs">The presentation timestamp in milliseconds.</param>
+    /// <param name="chunk">The chunk of encoded video data.</param>
     public void Feed(long ptsMs, byte[] chunk)
     {
         if (feedChannel.Reader.Count >= FeedChannelCapacity)
@@ -266,12 +320,19 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         feedChannel.Writer.TryWrite((ptsMs, chunk));
     }
 
+    /// <summary>
+    /// Starts the display of decoded frames.
+    /// </summary>
     public void StartDisplay() => scheduler.StartDisplay();
 
+    /// <summary>
+    /// Decodes the video chunks fed into the decoder and processes the output frames.
+    /// </summary>
     private void DecodeLoop()
     {
         try
         {
+            // Wait for chunks to be available in the feed channel and process them.
             while (running && feedChannel.Reader.WaitToReadAsync().AsTask().GetAwaiter().GetResult())
             {
                 while (running && feedChannel.Reader.TryRead(out (long PtsMs, byte[] Chunk) entry))
@@ -288,16 +349,23 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         }
     }
 
+    /// <summary>
+    /// Submits a chunk of encoded video data to the Media Foundation decoder with the specified presentation timestamp in milliseconds.
+    /// </summary>
+    /// <param name="ptsMs">The presentation timestamp in milliseconds.</param>
+    /// <param name="chunk">The chunk of encoded video data.</param>
     private void SubmitChunk(long ptsMs, byte[] chunk)
     {
         MediaBuffer buffer = MediaFactory.CreateMemoryBuffer(chunk.Length);
         using (buffer)
         {
+            // Lock the buffer and copy the chunk data into it.
             nint destination = buffer.Lock(out _, out _);
             Marshal.Copy(chunk, 0, destination, chunk.Length);
             buffer.Unlock();
             buffer.CurrentLength = chunk.Length;
 
+            // Create a sample and add the buffer to it, then set the sample time and submit it to the decoder. :D
             using Sample sample = MediaFactory.CreateSample();
             sample.AddBuffer(buffer);
             sample.SampleTime = ptsMs * 10_000;
@@ -306,6 +374,9 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         }
     }
 
+    /// <summary>
+    /// Drains the decoded frames from the Media Foundation decoder and captures them for display.
+    /// </summary>
     private void DrainDecodedFrames()
     {
         while (running)
@@ -332,6 +403,10 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         }
     }
 
+    /// <summary>
+    /// Captures a decoded frame from the Media Foundation decoder and schedules it for display.
+    /// </summary>
+    /// <param name="sample">The decoded sample.</param>
     private void CaptureFrame(Sample sample)
     {
         if (!freeSlots.TryTake(out int slot))
@@ -346,6 +421,7 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
             using MediaBuffer buffer = sample.GetBufferByIndex(0);
             var dxgiBuffer = (IMfDxgiBuffer)Marshal.GetObjectForIUnknown(buffer.NativePointer);
 
+            // Copy the decoded frame from the DXGI buffer to the corresponding slot texture.
             try
             {
                 Guid textureIid = typeof(Texture2D).GUID;
@@ -383,6 +459,11 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         }
     }
 
+    /// <summary>
+    /// Reads the sample time from a Media Foundation sample and converts it to milliseconds.
+    /// </summary>
+    /// <param name="sample">The Media Foundation sample.</param>
+    /// <returns>The sample time in milliseconds, or null if the time is not available.</returns>
     private static long? ReadSampleTime(Sample sample)
     {
         try
@@ -396,6 +477,10 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         }
     }
 
+    /// <summary>
+    /// Presents a decoded frame from the specified slot by converting it from NV12 to BGRA and rendering it to the decoded view.
+    /// </summary>
+    /// <param name="slot">The slot containing the decoded frame.</param>
     private void PresentSlot(int slot)
     {
         lock (gameAdapterDevice.ImmediateContextLock)
@@ -407,8 +492,17 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         }
     }
 
+    /// <summary>
+    /// Releases slots back to the slot pool.
+    /// </summary>
+    /// <param name="slot">The slot to release.</param>
     private void ReleaseSlot(int slot) => freeSlots.Add(slot);
 
+    /// <summary>
+    /// Records an error that occurred during the decoding or display process, logs it, and stops the decoder from running.
+    /// </summary>
+    /// <param name="stage">The stage where the error occurred.</param>
+    /// <param name="ex">The exception that occurred.</param>
     private void RecordError(string stage, Exception ex)
     {
         ServiceCollector.PluginLog.Error(ex, $"ScreenShare MediaFoundationVideoDecoder error in {stage}");
@@ -418,6 +512,9 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         running = false;
     }
 
+    /// <summary>
+    /// Disposes of the MediaFoundationVideoDecoder
+    /// </summary>
     public void Dispose()
     {
         running = false;
@@ -451,6 +548,9 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         DisposeGpuResources();
     }
 
+    /// <summary>
+    /// Disposes of the gpu resources used by the MediaFoundationVideoDecoder.
+    /// </summary>
     private void DisposeGpuResources()
     {
         for (int i = 0; i < slots.Length; i++)

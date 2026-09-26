@@ -10,7 +10,7 @@ public interface IVideoEncoder : IDisposable
 
     string EncoderName { get; }
 
-    VideoCodec Codec { get; }
+    SupportedVideoCodec Codec { get; }
 
     long FramesEncoded { get; }
 
