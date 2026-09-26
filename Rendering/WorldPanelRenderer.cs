@@ -148,6 +148,7 @@ public sealed class WorldPanelRenderer : IDisposable
     private readonly SamplerState pointSampler;
     private readonly Buffer constantBuffer;
     private readonly BlendState sceneBlendState;
+    private readonly BlendState overlayBlendState;
     private readonly DepthStencilState sceneDepthStencilState;
     private readonly DepthStencilState sceneDepthWriteState;
     private readonly DepthStencilState sceneDepthWriteReversedState;
@@ -199,6 +200,20 @@ public sealed class WorldPanelRenderer : IDisposable
         };
         sceneBlendState = new BlendState(gameDevice, blend);
 
+        var overlayBlend = new BlendStateDescription();
+        overlayBlend.RenderTarget[0] = new RenderTargetBlendDescription
+        {
+            IsBlendEnabled = true,
+            SourceBlend = BlendOption.SourceAlpha,
+            DestinationBlend = BlendOption.InverseSourceAlpha,
+            BlendOperation = BlendOperation.Add,
+            SourceAlphaBlend = BlendOption.Zero,
+            DestinationAlphaBlend = BlendOption.One,
+            AlphaBlendOperation = BlendOperation.Add,
+            RenderTargetWriteMask = ColorWriteMaskFlags.Red | ColorWriteMaskFlags.Green | ColorWriteMaskFlags.Blue,
+        };
+        overlayBlendState = new BlendState(gameDevice, overlayBlend);
+
         sceneDepthStencilState = new DepthStencilState(gameDevice, new DepthStencilStateDescription
         {
             IsDepthEnabled = false,
@@ -248,7 +263,11 @@ public sealed class WorldPanelRenderer : IDisposable
         });
     }
 
-    public void Draw(DeviceContext context, in WorldPanelDraw draw) => DrawCore(context, in draw, setScissor: true);
+    public void Draw(DeviceContext context, in WorldPanelDraw draw)
+    {
+        context.OutputMerger.SetBlendState(overlayBlendState, new SharpDX.Mathematics.Interop.RawColor4(0f, 0f, 0f, 0f), unchecked((int)0xFFFFFFFF));
+        DrawCore(context, in draw, setScissor: true);
+    }
 
     private void DrawCore(DeviceContext context, in WorldPanelDraw draw, bool setScissor)
     {
@@ -311,6 +330,7 @@ public sealed class WorldPanelRenderer : IDisposable
         sceneDepthWriteState.Dispose();
         sceneDepthWriteReversedState.Dispose();
         sceneBlendState.Dispose();
+        overlayBlendState.Dispose();
         video.Dispose();
         depth.Dispose();
         constantBuffer.Dispose();

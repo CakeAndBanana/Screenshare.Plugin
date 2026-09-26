@@ -56,6 +56,7 @@ public sealed class WorldPanelDispatch : IDisposable
         D3DBuffer[] pixelConstantBuffers = context.PixelShader.GetConstantBuffers(0, 1);
         SamplerState[] pixelSamplers = context.PixelShader.GetSamplers(0, 2);
         ScissorRects scissors = ScissorRects.Capture(context);
+        BlendState? blendState = context.OutputMerger.GetBlendState(out RawColor4 blendFactor, out int sampleMask);
 
         try
         {
@@ -71,11 +72,13 @@ public sealed class WorldPanelDispatch : IDisposable
             context.PixelShader.SetConstantBuffers(0, pixelConstantBuffers);
             context.PixelShader.SetSamplers(0, pixelSamplers);
 
+            context.OutputMerger.SetBlendState(blendState, blendFactor, sampleMask);
             scissors.Restore(context);
 
             inputLayout?.Dispose();
             vertexShader?.Dispose();
             pixelShader?.Dispose();
+            blendState?.Dispose();
             DisposeAll(vertexConstantBuffers);
             DisposeAll(pixelConstantBuffers);
             DisposeAll(pixelSamplers);
