@@ -2,6 +2,7 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
+using ScreenShare.Plugin.Encoding;
 using ScreenShare.Plugin.Encoding.Enums;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
@@ -17,12 +18,14 @@ public sealed class SettingsWindow : Window, IDisposable
     private const int MaxVideoFps = 60;
     private const int MinAudioBitrateKbps = 8;
     private const int MaxAudioBitrateKbps = 64;
+    private const int MaxVolumePercent = (int)(Configuration.MaxViewerVolume * 100f);
 
     private readonly Func<bool> isStreaming;
     private readonly Func<bool> isAudioCapturing;
     private readonly Action<int> applyLiveAudioBitrate;
     private readonly Func<bool> canApplyLiveVideoBitrate;
     private readonly Func<int, bool> applyLiveVideoBitrate;
+    private readonly Func<WorldScreenController> worldScreen;
 
     private GameAdapterDevice? enumerationDevice;
 
@@ -55,6 +58,11 @@ public sealed class SettingsWindow : Window, IDisposable
     private int videoFpsTarget = ServiceCollector.Config.VideoFpsTarget;
     private static readonly string[] VideoCodecLabels = ["H.264", "HEVC (H.265)"];
     private int videoCodecIndex = ServiceCollector.Config.VideoCodecIndex;
+
+    private float volume = ServiceCollector.Config.ViewerVolume;
+    private bool volumeActive;
+    private float opacity = ServiceCollector.Config.WorldScreenOpacity;
+    private bool opacityActive;
 
     public int MonitorIndex => monitorIndex;
 
@@ -92,7 +100,8 @@ public sealed class SettingsWindow : Window, IDisposable
         Func<bool> isAudioCapturing,
         Action<int> applyLiveAudioBitrate,
         Func<bool> canApplyLiveVideoBitrate,
-        Func<int, bool> applyLiveVideoBitrate)
+        Func<int, bool> applyLiveVideoBitrate,
+        Func<WorldScreenController> worldScreen)
         : base("Screen Share Settings###ScreenShareSettingsWindow")
     {
         this.isStreaming = isStreaming;
@@ -100,6 +109,7 @@ public sealed class SettingsWindow : Window, IDisposable
         this.applyLiveAudioBitrate = applyLiveAudioBitrate;
         this.canApplyLiveVideoBitrate = canApplyLiveVideoBitrate;
         this.applyLiveVideoBitrate = applyLiveVideoBitrate;
+        this.worldScreen = worldScreen;
         Size = new Vector2(460, 420);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
@@ -145,9 +155,10 @@ public sealed class SettingsWindow : Window, IDisposable
         ImGui.EndTabBar();
     }
 
-    private static void DrawGeneralSettings()
+    private void DrawGeneralSettings()
     {
         Configuration config = ServiceCollector.Config;
+        float labelWidth = UiTheme.LabelColumn("Opacity");
 
         UiTheme.SectionLabel("Watching");
 
@@ -164,6 +175,8 @@ public sealed class SettingsWindow : Window, IDisposable
                              "Doesn't switch away from a stream you're already watching, or start while you're streaming yourself.");
         }
 
+        DrawListeningSettings(config);
+
         UiTheme.SectionLabel("In-world screen");
 
         bool showWorldScreen = config.ShowWorldScreen;
@@ -175,6 +188,127 @@ public sealed class SettingsWindow : Window, IDisposable
 
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("When off, the screen placed in the world never appears for you - streams play in the popout window only.");
+
+        DrawWorldScreenDisplaySettings(config, labelWidth);
+    }
+
+    private void DrawListeningSettings(Configuration config)
+    {
+        float labelWidth = UiTheme.LabelColumn("Volume", "Playback buffer (ms)", "A/V sync (ms)");
+
+        UiTheme.SectionLabel("Audio");
+        DrawPlaybackSettings(config, labelWidth);
+
+        bool spatialAudio = config.SpatialAudio;
+        if (ImGui.Checkbox("Positional audio", ref spatialAudio))
+        {
+            config.SpatialAudio = spatialAudio;
+            ServiceCollector.PI.SavePluginConfig(config);
+        }
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Plays the stream's audio from the in-world screen's position, fading with distance.");
+    }
+
+    private void DrawPlaybackSettings(Configuration config, float labelWidth)
+    {
+        if (!volumeActive)
+            volume = config.ViewerVolume;
+
+        int volumePercent = (int)MathF.Round(volume * 100f);
+        SliderEdit volumeEdit = UiTheme.ValueSlider(
+            "##viewerVolume", "Volume", ref volumePercent, 0, MaxVolumePercent, labelWidth, unit: "%");
+        volumeActive = volumeEdit.Active;
+        if (volumeEdit.Changed)
+        {
+            volume = Math.Clamp(volumePercent / 100f, 0f, Configuration.MaxViewerVolume);
+            config.ViewerVolume = volume;
+        }
+
+        if (volumeEdit.Committed)
+            ServiceCollector.PI.SavePluginConfig(config);
+
+        int playbackLatencyMs = config.PlaybackLatencyMs;
+        SliderEdit bufferEdit = UiTheme.ValueSlider(
+            "##playbackBuffer", "Playback buffer (ms)", ref playbackLatencyMs,
+            AudioPlaybackDecoder.MinLatencyBudgetMs, AudioPlaybackDecoder.MaxLatencyBudgetMs, labelWidth,
+            tooltip: "How much audio is held before playing. This sets the delay for BOTH streams." +
+                     "The streams would be audio and video stream.");
+        if (bufferEdit.Changed)
+            config.PlaybackLatencyMs = playbackLatencyMs;
+
+        if (bufferEdit.Committed)
+            ServiceCollector.PI.SavePluginConfig(config);
+
+        int avSyncOffsetMs = config.AvSyncOffsetMs;
+        SliderEdit syncEdit = UiTheme.ValueSlider(
+            "##avSync", "A/V sync (ms)", ref avSyncOffsetMs, -300, 300, labelWidth,
+            tooltip: "Holds video back to line it up with audio.");
+        if (syncEdit.Changed)
+            config.AvSyncOffsetMs = avSyncOffsetMs;
+
+        if (syncEdit.Committed)
+            ServiceCollector.PI.SavePluginConfig(config);
+    }
+
+    private void DrawWorldScreenDisplaySettings(Configuration config, float labelWidth)
+    {
+        if (!opacityActive)
+            opacity = config.WorldScreenOpacity;
+
+        SliderEdit opacityEdit = UiTheme.ValueSlider("##worldScreenOpacity", "Opacity", ref opacity, 0.05f, 1f, labelWidth);
+        opacityActive = opacityEdit.Active;
+
+        if (opacityEdit.Committed)
+        {
+            config.WorldScreenOpacity = opacity;
+            ServiceCollector.PI.SavePluginConfig(config);
+        }
+
+        if (WorldScreenController.UnderUiBlockedBy is { } blockingOverlay)
+        {
+            ImGui.TextDisabled(
+                $"Drawing underneath the game UI is off because {blockingOverlay} is loaded; " +
+                "it makes the in-world screen flicker.");
+        }
+        else
+        {
+            DrawUnderUiOption(config);
+        }
+    }
+
+    private void DrawUnderUiOption(Configuration config)
+    {
+        bool drawUnderUi = config.WorldScreenDrawUnderUi;
+        if (ImGui.Checkbox("Draw underneath the game UI", ref drawUnderUi))
+        {
+            config.WorldScreenDrawUnderUi = drawUnderUi;
+            ServiceCollector.PI.SavePluginConfig(config);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Draws the screen inside the game's own render pass so your hotbars and windows sit " +
+                "on top of it; untick it if anything looks wrong.");
+        }
+
+        if (!drawUnderUi)
+            return;
+
+        WorldScreenController controller = worldScreen();
+        if (!controller.IsDrawingUnderUi)
+            ImGui.TextColored(UiTheme.WarnColor, "The render hook isn't running.");
+
+        int passes = controller.LastFrameBackBufferSwitches;
+        int scenePasses = controller.LastFrameSceneSwitches;
+        ImGui.TextDisabled($"Render passes last frame: {passes} ({scenePasses} drawing the 3D scene)");
+
+        if (scenePasses == 0 && passes > 0)
+            ImGui.TextColored(UiTheme.WarnColor, "None of this frame's passes bound a depth buffer.");
+
+        if (controller.SceneHookFallbackReason is { } fallbackReason)
+            ImGui.TextDisabled($"Adjusted automatically: {fallbackReason}.");
     }
 
     private void DrawStreamingSettings()

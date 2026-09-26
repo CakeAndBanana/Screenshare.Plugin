@@ -28,9 +28,6 @@ internal sealed class WorldScreenPanel
     private float sliderSideways;
     private float sliderForward;
 
-    private float opacity = ServiceCollector.Config.WorldScreenOpacity;
-    private bool opacityActive;
-
     public WorldScreenPanel(
         string idPrefix,
         RoomSessionService roomSession,
@@ -47,7 +44,6 @@ internal sealed class WorldScreenPanel
 
     public void Draw()
     {
-        Configuration config = ServiceCollector.Config;
         ScreenPlacementInfo? placement = roomSession.ScreenPlacement;
         bool canPlace = WorldScreenController.CanPlace(roomSession);
 
@@ -76,86 +72,10 @@ internal sealed class WorldScreenPanel
             ImGui.TextDisabled("Showing the room's screen in the world. The host and streamers decide where it goes.");
         }
 
-        UiTheme.SectionLabel("Display");
-        DrawDisplaySettings(config);
-    }
-
-    private void DrawDisplaySettings(Configuration config)
-    {
-        if (!opacityActive)
-            opacity = config.WorldScreenOpacity;
-
-        SliderEdit opacityEdit = UiTheme.ValueSlider(
-            Id("opacity"), "Opacity", ref opacity, 0.05f, 1f, UiTheme.LabelColumn("Opacity"));
-        opacityActive = opacityEdit.Active;
-
-        if (opacityEdit.Committed)
-        {
-            config.WorldScreenOpacity = opacity;
-            ServiceCollector.PI.SavePluginConfig(config);
-        }
-
-        bool spatialAudio = config.SpatialAudio;
-        if (ImGui.Checkbox("Positional audio", ref spatialAudio))
-        {
-            config.SpatialAudio = spatialAudio;
-            ServiceCollector.PI.SavePluginConfig(config);
-        }
-
-        if (WorldScreenController.UnderUiBlockedBy is { } blockingOverlay)
-        {
-            ImGui.TextDisabled(
-                $"Drawing underneath the game UI is off because {blockingOverlay} is loaded; " +
-                "it makes the in-world screen flicker.");
-        }
-        else
-        {
-            DrawUnderUiOption(config);
-        }
-
 #if DEBUG
-
-        DrawDepthDiagnostics(config);
+        UiTheme.SectionLabel("Depth diagnostics");
+        DrawDepthDiagnostics(ServiceCollector.Config);
 #endif
-    }
-
-    private void DrawUnderUiOption(Configuration config)
-    {
-        bool drawUnderUi = config.WorldScreenDrawUnderUi;
-        if (ImGui.Checkbox("Draw underneath the game UI", ref drawUnderUi))
-        {
-            config.WorldScreenDrawUnderUi = drawUnderUi;
-            ServiceCollector.PI.SavePluginConfig(config);
-        }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "Draws the screen inside the game's own render pass so your hotbars and windows sit " +
-                "on top of it; untick it if anything looks wrong.");
-        }
-
-        if (drawUnderUi && !worldScreen().IsDrawingUnderUi)
-            ImGui.TextColored(UiTheme.WarnColor, "The render hook isn't running.");
-
-        if (drawUnderUi)
-            DrawRenderPassNotes();
-    }
-
-    private void DrawRenderPassNotes()
-    {
-        int passes = worldScreen().LastFrameBackBufferSwitches;
-        int scenePasses = worldScreen().LastFrameSceneSwitches;
-        ImGui.TextDisabled($"Render passes last frame: {passes} ({scenePasses} drawing the 3D scene)");
-
-        if (scenePasses == 0 && passes > 0)
-        {
-            ImGui.TextColored(UiTheme.WarnColor,
-                "None of this frame's passes bound a depth buffer.");
-        }
-
-        if (worldScreen().SceneHookFallbackReason is { } fallbackReason)
-            ImGui.TextDisabled($"Adjusted automatically: {fallbackReason}.");
     }
 
     private void DrawPlacementButtons(ScreenPlacementInfo? placement)

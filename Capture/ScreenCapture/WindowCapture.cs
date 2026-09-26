@@ -17,6 +17,8 @@ public sealed class WindowCapture : ICaptureSource
     private readonly Lock contextLock;
     private readonly WindowsGraphicsCaptureInterop.IDirect3D11CaptureFramePool framePool;
     private readonly WindowsGraphicsCaptureInterop.IGraphicsCaptureSession session;
+    private WindowsGraphicsCaptureInterop.IGraphicsCaptureSession2? cursorSession;
+    private readonly nint targetWindow;
     private readonly Texture2D targetTexture;
     private readonly RenderTargetView targetView;
     private readonly GpuDownscaler downscaler;
@@ -24,6 +26,7 @@ public sealed class WindowCapture : ICaptureSource
     private readonly Thread captureThread;
     private volatile bool running;
     private long framesCaptured;
+    private bool cursorCaptured = true;
 
     private int poolWidth;
     private int poolHeight;
@@ -44,6 +47,7 @@ public sealed class WindowCapture : ICaptureSource
     {
         device = gameAdapterDevice.Device;
         contextLock = gameAdapterDevice.ImmediateContextLock;
+        targetWindow = hwnd;
 
         nint itemPtr = CreateItemForWindow(hwnd);
         try
@@ -69,6 +73,10 @@ public sealed class WindowCapture : ICaptureSource
             Marshal.ThrowExceptionForHR(framePool.CreateCaptureSession(itemPtr, out nint sessionPtr));
             session = (WindowsGraphicsCaptureInterop.IGraphicsCaptureSession)Marshal.GetObjectForIUnknown(sessionPtr);
             Marshal.Release(sessionPtr);
+
+            // Null before Windows 10 2004; the cursor then stays captured whenever it's inside the window.
+            cursorSession = session as WindowsGraphicsCaptureInterop.IGraphicsCaptureSession2;
+            UpdateCursorCapture();
 
             Marshal.ThrowExceptionForHR(session.StartCapture());
         }
@@ -174,6 +182,8 @@ public sealed class WindowCapture : ICaptureSource
         {
             try
             {
+                UpdateCursorCapture();
+
                 if (framePool.TryGetNextFrame(out nint framePtr) != 0 || framePtr == 0)
                 {
                     Thread.Sleep(16);
@@ -195,6 +205,43 @@ public sealed class WindowCapture : ICaptureSource
                 Thread.Sleep(200);
             }
         }
+    }
+
+    // Windows draws the cursor whenever it's inside the window's rectangle, even while another
+    // window covering it is the one actually under the cursor - so only capture it when it's ours.
+    private void UpdateCursorCapture()
+    {
+        if (cursorSession is null)
+            return;
+
+        bool overTarget = IsCursorOverTargetWindow();
+        if (overTarget == cursorCaptured)
+            return;
+
+        int hr = cursorSession.SetIsCursorCaptureEnabled(overTarget);
+        if (hr < 0)
+        {
+            cursorSession = null;
+            ServiceCollector.PluginLog.Warning(
+                $"ScreenShare couldn't toggle cursor capture (0x{hr:X8}); the cursor will show whenever it's inside the shared window.");
+            return;
+        }
+
+        cursorCaptured = overTarget;
+    }
+
+    private bool IsCursorOverTargetWindow()
+    {
+        if (!WindowsGraphicsCaptureInterop.GetCursorPos(out WindowsGraphicsCaptureInterop.Point point))
+            return false;
+
+        nint hit = WindowsGraphicsCaptureInterop.WindowFromPoint(point);
+        if (hit == 0)
+            return false;
+
+        // Root owner keeps the cursor visible over the shared app's own menus and dropdowns.
+        return WindowsGraphicsCaptureInterop.GetAncestor(hit, WindowsGraphicsCaptureInterop.GaRoot) == targetWindow
+            || WindowsGraphicsCaptureInterop.GetAncestor(hit, WindowsGraphicsCaptureInterop.GaRootOwner) == targetWindow;
     }
 
     private void ProcessFrame(nint framePtr)

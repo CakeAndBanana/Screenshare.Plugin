@@ -1,11 +1,9 @@
 ﻿using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
-using ScreenShare.Plugin.Encoding;
 using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
-using ScreenShare.Plugin.Ui.Helpers;
 
 namespace ScreenShare.Plugin.Ui;
 
@@ -19,15 +17,6 @@ public sealed class StreamViewWindow : Window
     private readonly Func<RawTextureWrap?> getPreviewTexture;
     private readonly Func<WorldScreenController> worldScreen;
     private readonly Action onClosed;
-
-    private readonly WorldScreenPanel worldScreenPanel;
-
-    private const int MaxVolumePercent = (int)(Configuration.MaxViewerVolume * 100f);
-
-    private float volume = ServiceCollector.Config.ViewerVolume;
-    private bool volumeActive;
-    private int avSyncOffsetMs = ServiceCollector.Config.AvSyncOffsetMs;
-    private int playbackLatencyMs = ServiceCollector.Config.PlaybackLatencyMs;
 
     private DateTime rateSampledAt;
     private long rateUnderrunBaseMs;
@@ -48,7 +37,6 @@ public sealed class StreamViewWindow : Window
         this.getPreviewTexture = getPreviewTexture;
         this.worldScreen = worldScreen;
         this.onClosed = onClosed;
-        worldScreenPanel = new WorldScreenPanel("streamView", roomSession, worldScreen, getPreviewTexture);
         Size = new Vector2(640, 420);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
@@ -92,7 +80,6 @@ public sealed class StreamViewWindow : Window
         {
             ImGui.TextDisabled("Local preview of your capture - not downloaded from the relay, so it uses no extra bandwidth.");
             ImGui.TextDisabled("Viewers see it after encoding and their playback buffer. No audio is played here.");
-            DrawWorldScreenSection();
             return;
         }
 
@@ -119,7 +106,7 @@ public sealed class StreamViewWindow : Window
                 bool unhealthy = underrunPerMinute > 200 || droppedPerMinute > 200;
                 string rateText = $"Recent rate: {underrunPerMinute}ms silence/min, {droppedPerMinute}ms dropped/min";
                 if (unhealthy)
-                    ImGui.TextColored(WarnColor, rateText + " - still happening, raise the playback buffer");
+                    ImGui.TextColored(WarnColor, rateText + " - still happening, raise the playback buffer in settings");
                 else
                     ImGui.TextDisabled(rateText);
             }
@@ -128,12 +115,13 @@ public sealed class StreamViewWindow : Window
             string driftLabel = Math.Abs(drift) < 50
                 ? "in sync"
                 : drift > 0 ? "video ahead of audio" : "video behind audio";
+            int avSyncOffsetMs = ServiceCollector.Config.AvSyncOffsetMs;
             string offsetNote = avSyncOffsetMs != 0 ? $", A/V sync offset {avSyncOffsetMs:+0;-0}ms applied" : string.Empty;
             ImGui.TextDisabled($"A/V drift {drift:+0;-0;0}ms ({driftLabel}){offsetNote}");
 
             if (mediaSession.ViewerBehindLiveMs is { } behind)
             {
-                bool runaway = behind > playbackLatencyMs + 400;
+                bool runaway = behind > ServiceCollector.Config.PlaybackLatencyMs + 400;
                 string behindText = $"Behind live {behind}ms" + (runaway ? " - climbing, not just buffered" : string.Empty);
                 if (runaway)
                     ImGui.TextColored(WarnColor, behindText);
@@ -157,9 +145,6 @@ public sealed class StreamViewWindow : Window
 
         if (mediaSession.ViewerVideoError is { } viewerVideoError)
             ImGui.TextColored(ErrorColor, $"Video decoder died mid-stream: {viewerVideoError.Message}");
-
-        DrawPlaybackControls();
-        DrawWorldScreenSection();
     }
 
     private void UpdateAudioHealthRates(long underrunMs, long droppedMs)
@@ -184,55 +169,5 @@ public sealed class StreamViewWindow : Window
         rateSampledAt = now;
         rateUnderrunBaseMs = underrunMs;
         rateDroppedBaseMs = droppedMs;
-    }
-
-    private void DrawPlaybackControls()
-    {
-        Configuration config = ServiceCollector.Config;
-        float labelWidth = UiTheme.LabelColumn("Volume", "Playback buffer (ms)", "A/V sync (ms)");
-
-        if (!volumeActive)
-            volume = config.ViewerVolume;
-
-        int volumePercent = (int)MathF.Round(volume * 100f);
-        SliderEdit volumeEdit = UiTheme.ValueSlider(
-            "##viewerVolume", "Volume", ref volumePercent, 0, MaxVolumePercent, labelWidth, unit: "%");
-        volumeActive = volumeEdit.Active;
-        if (volumeEdit.Changed)
-        {
-            volume = Math.Clamp(volumePercent / 100f, 0f, Configuration.MaxViewerVolume);
-            config.ViewerVolume = volume;
-        }
-
-        if (volumeEdit.Committed)
-            ServiceCollector.PI.SavePluginConfig(config);
-
-        SliderEdit bufferEdit = UiTheme.ValueSlider(
-            "##playbackBuffer", "Playback buffer (ms)", ref playbackLatencyMs,
-            AudioPlaybackDecoder.MinLatencyBudgetMs, AudioPlaybackDecoder.MaxLatencyBudgetMs, labelWidth,
-            tooltip: "How much audio is held before playing. This sets the delay for BOTH streams." +
-                     "The streams would be audio and video stream.");
-        if (bufferEdit.Changed)
-            config.PlaybackLatencyMs = playbackLatencyMs;
-
-        if (bufferEdit.Committed)
-            ServiceCollector.PI.SavePluginConfig(config);
-
-        SliderEdit syncEdit = UiTheme.ValueSlider(
-            "##avSync", "A/V sync (ms)", ref avSyncOffsetMs, -300, 300, labelWidth,
-            tooltip: "Holds video back to line it up with audio.");
-        if (syncEdit.Changed)
-            config.AvSyncOffsetMs = avSyncOffsetMs;
-
-        if (syncEdit.Committed)
-            ServiceCollector.PI.SavePluginConfig(config);
-    }
-
-    private void DrawWorldScreenSection()
-    {
-        if (!ServiceCollector.Config.ShowWorldScreen || !ImGui.CollapsingHeader("In-world screen"))
-            return;
-
-        worldScreenPanel.Draw();
     }
 }

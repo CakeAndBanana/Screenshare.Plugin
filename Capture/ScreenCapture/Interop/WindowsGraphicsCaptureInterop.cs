@@ -84,6 +84,19 @@ internal static class WindowsGraphicsCaptureInterop
     }
 
     [ComImport]
+    [Guid("2C39AE40-7D2E-5044-804E-8B6799D4CF9E")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IGraphicsCaptureSession2
+    {
+        [PreserveSig] int GetIids(out uint iidCount, out nint iids);
+        [PreserveSig] int GetRuntimeClassName(out nint className);
+        [PreserveSig] int GetTrustLevel(out int trustLevel);
+
+        [PreserveSig] int GetIsCursorCaptureEnabled([MarshalAs(UnmanagedType.U1)] out bool value);
+        [PreserveSig] int SetIsCursorCaptureEnabled([MarshalAs(UnmanagedType.U1)] bool value);
+    }
+
+    [ComImport]
     [Guid("FA50C623-38DA-4B32-ACF3-FA9734AD800E")]
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     public interface IDirect3D11CaptureFrame
@@ -130,4 +143,24 @@ internal static class WindowsGraphicsCaptureInterop
 
     [DllImport("combase.dll", EntryPoint = "WindowsDeleteString", ExactSpelling = true)]
     public static extern int WindowsDeleteString(nint hstring);
+
+    public const uint GaRoot = 2;
+    public const uint GaRootOwner = 3;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Point
+    {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("user32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetCursorPos(out Point point);
+
+    [DllImport("user32.dll", ExactSpelling = true)]
+    public static extern nint WindowFromPoint(Point point);
+
+    [DllImport("user32.dll", ExactSpelling = true)]
+    public static extern nint GetAncestor(nint hwnd, uint flags);
 }
