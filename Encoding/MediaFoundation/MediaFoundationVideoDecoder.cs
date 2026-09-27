@@ -39,6 +39,7 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
     private readonly ShaderResourceView[] slotLuma;
     private readonly ShaderResourceView[] slotChroma;
     private readonly ConcurrentBag<int> freeSlots = new();
+    private int allocatedSlots;
 
     private volatile bool running;
     private int errorRecorded;
@@ -104,14 +105,17 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
         int bufferedMs = Math.Max(H264Decoder.PresentationBufferMilliseconds, audioLatencyBudgetMs)
                          + Math.Max(0, getSyncOffsetMs?.Invoke() ?? 0);
 
-        int capacity = Math.Clamp(fps * bufferedMs / 1000, 2, 30);
+        int prefillFrames = Math.Clamp(fps * bufferedMs / 1000, 2, 45);
+        int maxFrames = PresentationScheduler<int>.MaxFramesFor(fps, prefillFrames);
 
         decodedTexture = SharedTextureFactory.CreateEmpty(device, width, height, renderTarget: true);
         SharedHandle = SharedTextureFactory.GetSharedHandle(decodedTexture);
         decodedView = new RenderTargetView(device, decodedTexture);
         converter = new Nv12ToBgraConverter(device);
 
-        int slotCount = capacity + SpareSlots;
+        // Room for the scheduler's largest queue, but only the prefill is allocated now; the rest
+        // is created on demand when the audio clock trails far enough to need it.
+        int slotCount = maxFrames + SpareSlots;
         slots = new Texture2D[slotCount];
         slotLuma = new ShaderResourceView[slotCount];
         slotChroma = new ShaderResourceView[slotCount];
@@ -125,12 +129,8 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
 
         try
         {
-            for (int i = 0; i < slotCount; i++)
-            {
-                slots[i] = CreateNv12Texture(device, width, height);
-                (slotLuma[i], slotChroma[i]) = Nv12ToBgraConverter.CreateViews(device, slots[i]);
-                freeSlots.Add(i);
-            }
+            for (int i = 0; i < prefillFrames + SpareSlots; i++)
+                freeSlots.Add(AllocateSlot());
 
             transform = ActivateDecoder(codec, out string name);
             DecoderName = name;
@@ -157,7 +157,7 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
 
         scheduler = new PresentationScheduler<int>(
             fps,
-            capacity,
+            prefillFrames,
             getAudioPtsMs,
             getSyncOffsetMs ?? (static () => 0),
             PresentSlot,
@@ -409,7 +409,7 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
     /// <param name="sample">The decoded sample.</param>
     private void CaptureFrame(Sample sample)
     {
-        if (!freeSlots.TryTake(out int slot))
+        if (!freeSlots.TryTake(out int slot) && !TryAllocateSlot(out slot))
         {
             Interlocked.Increment(ref droppedChunks);
             return;
@@ -490,6 +490,31 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
 
             context.Flush();
         }
+    }
+
+    /// <summary>
+    /// Creates the next slot texture and returns its index. Only the constructor and the decode
+    /// thread call this, never concurrently.
+    /// </summary>
+    private int AllocateSlot()
+    {
+        int slot = allocatedSlots++;
+        slots[slot] = CreateNv12Texture(gameAdapterDevice.Device, Width, Height);
+        (slotLuma[slot], slotChroma[slot]) = Nv12ToBgraConverter.CreateViews(gameAdapterDevice.Device, slots[slot]);
+        return slot;
+    }
+
+    /// <summary>
+    /// Grows the slot pool by one when every slot is queued, up to the scheduler's maximum.
+    /// </summary>
+    private bool TryAllocateSlot(out int slot)
+    {
+        slot = -1;
+        if (allocatedSlots >= slots.Length)
+            return false;
+
+        slot = AllocateSlot();
+        return true;
     }
 
     /// <summary>

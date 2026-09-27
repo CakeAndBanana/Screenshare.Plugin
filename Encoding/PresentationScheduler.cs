@@ -8,8 +8,17 @@ internal sealed class PresentationScheduler<TFrame> : IDisposable
     private const long SyncToleranceMs = 40;
     private const long MaxFrameHoldMs = 100;
 
+    // Upper bound on how far the audio clock can trail live: its buffer widens on underruns up to
+    // 3x a 500ms maximum, plus burst headroom and the output device. Video must be able to wait
+    // that long, or frames due soon get evicted.
+    private const int MaxBufferedMs = 2000;
+
     private readonly Channel<(long PtsMs, TFrame Frame)> queue;
-    private readonly int capacity;
+    private readonly int baseCapacity;
+    private readonly int maxCapacity;
+    private readonly int burstFrames;
+    private readonly int prefillFrames;
+    private volatile int capacity;
     private readonly int frameIntervalMs;
     private readonly Func<long?> getAudioPtsMs;
     private readonly Func<int> getSyncOffsetMs;
@@ -31,7 +40,7 @@ internal sealed class PresentationScheduler<TFrame> : IDisposable
 
     public PresentationScheduler(
         int fps,
-        int capacity,
+        int prefillFrames,
         Func<long?> getAudioPtsMs,
         Func<int> getSyncOffsetMs,
         Action<TFrame> present,
@@ -39,7 +48,13 @@ internal sealed class PresentationScheduler<TFrame> : IDisposable
         Action<string, Exception> onError,
         string threadName)
     {
-        this.capacity = capacity;
+        // Prefill to the target depth only; the headroom above it absorbs arrival bursts
+        // (relay fan-out, TCP catch-up) instead of evicting frames that were due soon.
+        this.prefillFrames = prefillFrames;
+        burstFrames = BurstFramesFor(prefillFrames);
+        baseCapacity = prefillFrames + burstFrames;
+        maxCapacity = MaxFramesFor(fps, prefillFrames);
+        capacity = baseCapacity;
         this.getAudioPtsMs = getAudioPtsMs;
         this.getSyncOffsetMs = getSyncOffsetMs;
         this.present = present;
@@ -48,10 +63,11 @@ internal sealed class PresentationScheduler<TFrame> : IDisposable
 
         frameIntervalMs = Math.Max(1, 1000 / Math.Max(1, fps));
 
-        queue = Channel.CreateBounded<(long, TFrame)>(new BoundedChannelOptions(capacity)
+        // Unbounded because the limit moves with the audio clock; Enqueue enforces it. Enqueue
+        // also reads (to evict), so this is not single-reader.
+        queue = Channel.CreateUnbounded<(long, TFrame)>(new UnboundedChannelOptions
         {
-            FullMode = BoundedChannelFullMode.DropOldest,
-            SingleReader = true,
+            SingleReader = false,
             SingleWriter = true,
         });
 
@@ -60,18 +76,40 @@ internal sealed class PresentationScheduler<TFrame> : IDisposable
         displayThread.Start();
     }
 
+    private static int BurstFramesFor(int prefillFrames) => Math.Max(4, prefillFrames / 2);
+
+    /// <summary>The most frames the queue can ever hold, for callers that pre-size frame storage.</summary>
+    public static int MaxFramesFor(int fps, int prefillFrames) =>
+        Math.Max(prefillFrames + BurstFramesFor(prefillFrames), Math.Max(1, fps) * MaxBufferedMs / 1000);
+
     public void StartDisplay() => displayStarted = true;
 
     public void Enqueue(long ptsMs, TFrame frame)
     {
+        capacity = CapacityFor(ptsMs);
+
         while (queue.Reader.Count >= capacity && queue.Reader.TryRead(out (long PtsMs, TFrame Frame) evicted))
         {
-            Interlocked.Increment(ref queueDrops);
+            // Before display starts, keeping only the freshest frames is intended, not a drop.
+            if (displayStarted)
+                Interlocked.Increment(ref queueDrops);
             discard?.Invoke(evicted.Frame);
         }
 
         if (!queue.Writer.TryWrite((ptsMs, frame)))
             discard?.Invoke(frame);
+    }
+
+    // Enough frames to span from the frame now due (at the audio clock) to this new one, plus
+    // burst headroom. The audio buffer widens after underruns, so this grows with it.
+    private int CapacityFor(long newestPtsMs)
+    {
+        if (!displayStarted || getAudioPtsMs() is not { } audioPtsMs)
+            return baseCapacity;
+
+        long dueSpanMs = newestPtsMs - (audioPtsMs - getSyncOffsetMs());
+        long needed = (dueSpanMs / frameIntervalMs) + burstFrames;
+        return (int)Math.Clamp(needed, baseCapacity, maxCapacity);
     }
 
     private void DisplayLoop()
@@ -80,7 +118,7 @@ internal sealed class PresentationScheduler<TFrame> : IDisposable
 
         try
         {
-            while (running && queue.Reader.Count < capacity)
+            while (running && queue.Reader.Count < prefillFrames)
                 Thread.Sleep(5);
 
             if (!running)
