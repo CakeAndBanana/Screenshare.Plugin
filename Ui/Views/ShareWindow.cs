@@ -10,7 +10,7 @@ using ScreenShare.Plugin.Capture.AudioCapture;
 using ScreenShare.Plugin.Capture.AudioCapture.Interfaces;
 using ScreenShare.Plugin.Capture.ScreenCapture;
 using ScreenShare.Plugin.Capture.ScreenCapture.Interfaces;
-using ScreenShare.Plugin.Networking;
+using ScreenShare.Plugin.Networking.Models;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 using ScreenShare.Plugin.Ui.Helpers;

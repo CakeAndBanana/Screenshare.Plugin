@@ -2,6 +2,10 @@
 
 namespace ScreenShare.Plugin.Capture.AudioCapture.Interop;
 
+/// <summary>
+/// Internal static class that provides interop definitions for process loopback audio capture using the Windows Core Audio APIs.
+/// Microsoft's documentation on process loopback capture can be found at: https://learn.microsoft.com/en-us/windows/win32/coreaudio/process-loopback-capture
+/// </summary>
 internal static class ProcessLoopbackInterop
 {
     public const string VirtualAudioDeviceProcessLoopback = "VAD\\Process_Loopback";

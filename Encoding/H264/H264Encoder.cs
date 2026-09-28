@@ -21,7 +21,7 @@ public sealed class H264Encoder : IVideoEncoder
     private readonly FfmpegProcessRunner encoderProcess;
     private readonly Thread writerThread;
     private readonly Thread readerThread;
-    private readonly int frameIntervalMs;
+    private readonly int fps;
 
     private readonly ConcurrentQueue<long> captureTimestamps = new();
     private readonly int maxPendingTimestamps;
@@ -77,7 +77,7 @@ public sealed class H264Encoder : IVideoEncoder
         this.gameAdapterDevice = gameAdapterDevice;
         this.source = source;
         this.sessionClock = sessionClock;
-        frameIntervalMs = 1000 / fps;
+        this.fps = Math.Max(1, fps);
         maxPendingTimestamps = Math.Max(8, fps * 2);
         Codec = codec;
 
@@ -91,7 +91,7 @@ public sealed class H264Encoder : IVideoEncoder
         readback = new AsyncTextureReadback(device, Width, Height, Format.NV12);
 
         string encoderArgs = VideoEncoderSelector.BuildEncoderArgs(
-            Vendor, codec, bitrateKbps, bitrateKbps * 4 / 3, bitrateKbps * 2, fps * 2);
+            Vendor, codec, bitrateKbps, bitrateKbps * 4 / 3, bitrateKbps * 2, fps);
         string rawFormat = VideoEncoderSelector.RawFormatName(codec);
 
         string encodeArgs =
@@ -152,7 +152,7 @@ public sealed class H264Encoder : IVideoEncoder
 
                 frameIndex++;
 
-                pacer.Wait(frameIndex * frameIntervalMs - clock.ElapsedMilliseconds);
+                pacer.Wait(frameIndex * 1000 / fps - clock.ElapsedMilliseconds);
             }
         }
         catch (Exception ex) when (running)

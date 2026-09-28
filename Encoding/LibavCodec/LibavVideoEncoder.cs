@@ -18,7 +18,7 @@ public sealed class LibavVideoEncoder : IVideoEncoder
     private readonly GameAdapterDevice gameAdapterDevice;
     private readonly ICaptureSource source;
     private readonly Stopwatch sessionClock;
-    private readonly int frameIntervalMs;
+    private readonly int fps;
 
     private readonly Nv12Converter converter;
     private readonly ShaderResourceView sourceSrv;
@@ -80,8 +80,7 @@ public sealed class LibavVideoEncoder : IVideoEncoder
         this.source = source;
         this.sessionClock = sessionClock;
 
-        // Calculate frame interval in milliseconds, ensuring it's at least 1 ms
-        frameIntervalMs = Math.Max(1, 1000 / Math.Max(1, fps));
+        this.fps = Math.Max(1, fps);
         Codec = codec;
 
         LibavEncoderSession.EnsureLoaded(ffmpegDirectory);
@@ -225,7 +224,7 @@ public sealed class LibavVideoEncoder : IVideoEncoder
 
                 frameIndex++;
 
-                pacer.Wait(frameIndex * frameIntervalMs - clock.ElapsedMilliseconds);
+                pacer.Wait(frameIndex * 1000 / fps - clock.ElapsedMilliseconds);
             }
         }
         catch (Exception ex) when (running)

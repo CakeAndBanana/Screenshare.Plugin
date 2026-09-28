@@ -12,6 +12,9 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Rendering;
 
+/// <summary>
+/// Screne panel hook that intercepts the game's render pipeline to draw the in-world screen
+/// </summary>
 public sealed unsafe class ScenePanelHook : IDisposable
 {
     private const int MissedFramesBeforeEscalating = 30;
@@ -43,9 +46,6 @@ public sealed unsafe class ScenePanelHook : IDisposable
     private readonly (bool Depth, int Width, int Height, int DepthWidth)[] recorded = new (bool, int, int, int)[MaxRecordedPasses];
     private int recordedCount;
     private int drawnAtBind = -1;
-
-    // Flicker reports come from machines we can't test on, so the log has to show what a bad frame
-    // looked like: every change in the frame's back-buffer binds, and every frame the screen missed.
     private const int MaxLayoutLogs = 100;
     private const long LayoutLogIntervalMs = 1000;
     private int lastLayoutHash;
@@ -64,11 +64,17 @@ public sealed unsafe class ScenePanelHook : IDisposable
     public int LastFrameSceneSwitches { get; private set; }
     public string? FallbackReason { get; private set; }
 
+    /// <summary>
+    /// Scene panel hook constructor that sets up the render hook and initializes the renderer
+    /// </summary>
+    /// <param name="gameDevice"></param>
     public ScenePanelHook(Device gameDevice)
     {
+        // Initialize the renderer and context for drawing the in-world screen
         renderer = new WorldPanelRenderer(gameDevice);
         context = gameDevice.ImmediateContext;
 
+        // Attempt to hook the game's render pipeline to intercept the DoSetTargetCommand function
         try
         {
             hook = ServiceCollector.GameInterop.HookFromAddress<DoSetTargetCommandDelegate>(
@@ -86,6 +92,11 @@ public sealed unsafe class ScenePanelHook : IDisposable
         }
     }
 
+    /// <summary>
+    /// Submit a new draw request for the in-world screen. 
+    /// This will be drawn on the next frame when the back buffer is bound.
+    /// </summary>
+    /// <param name="draw">The draw request to submit.</param>
     public void Submit(in WorldPanelDraw draw)
     {
         pending = draw;
@@ -96,8 +107,13 @@ public sealed unsafe class ScenePanelHook : IDisposable
 
     private bool PendingIsStale => Environment.TickCount64 - pendingAtMs > StaleAfterMs;
 
+    /// <summary>
+    /// End the current frame, resetting state and logging layout changes if necessary. 
+    /// This should be called once per frame after rendering is complete.
+    /// </summary>
     public void EndFrame()
     {
+        // If the pending draw request is stale, reset all state and return early.
         if (PendingIsStale)
         {
             backBufferSwitches = 0;
@@ -110,6 +126,7 @@ public sealed unsafe class ScenePanelHook : IDisposable
             return;
         }
 
+        // Check if the in-world screen was missed this frame (i.e., there was a pending draw request but it was not drawn).
         bool missed = hasPending && !drewThisFrame;
         LogLayoutIfChanged(missed);
 
@@ -140,6 +157,11 @@ public sealed unsafe class ScenePanelHook : IDisposable
         drawnAtBind = -1;
     }
 
+    /// <summary>
+    /// DoSetTargetCommand detour that intercepts the game's render pipeline to draw the in-world screen when the back buffer is bound.
+    /// </summary>
+    /// <param name="immediateContext">The immediate context.</param>
+    /// <param name="command">The render command.</param>
     private void DoSetTargetCommandDetour(ImmediateContext* immediateContext, RenderCommandSetTarget* command)
     {
         hook!.Original(immediateContext, command);
@@ -199,6 +221,9 @@ public sealed unsafe class ScenePanelHook : IDisposable
         }
     }
 
+    /// <summary>
+    /// Log the thread IDs for the submit and render threads once, to help diagnose potential threading issues with the in-world screen drawing.
+    /// </summary>
     private void LogThreadsOnce()
     {
         if (loggedThreads)
@@ -211,6 +236,10 @@ public sealed unsafe class ScenePanelHook : IDisposable
             (submitThreadId == renderThreadId ? " (same thread)." : " (different threads - frames can race)."));
     }
 
+    /// <summary>
+    /// Logs the layout information if it has changed since the last log entry.
+    /// </summary>
+    /// <param name="missed">Indicates whether the in-world screen was missed this frame.</param>
     private void LogLayoutIfChanged(bool missed)
     {
         if (!hasPending)
@@ -250,6 +279,10 @@ public sealed unsafe class ScenePanelHook : IDisposable
             ServiceCollector.PluginLog.Information("ScreenShare frame layout logging stopped after " + MaxLayoutLogs + " entries.");
     }
 
+    /// <summary>
+    /// Logs the recorded frame layout, including the number of back-buffer binds, whether the in-world screen was missed, and the details of each recorded render target and depth buffer.
+    /// </summary>
+    /// <param name="missed">Indicates whether the in-world screen was missed this frame.</param>
     private void LogRecordedFrame(bool missed)
     {
         var text = new System.Text.StringBuilder();
@@ -274,6 +307,12 @@ public sealed unsafe class ScenePanelHook : IDisposable
         ServiceCollector.PluginLog.Information(text.ToString());
     }
 
+    /// <summary>
+    /// Is target the swap chain's back buffer? 
+    /// This is used to determine if the in-world screen should be drawn on this render target.
+    /// </summary>
+    /// <param name="command">The render command.</param>
+    /// <returns>True if the target is the swap chain's back buffer; otherwise, false.</returns>
     private bool IsBackBufferTarget(RenderCommandSetTarget* command)
     {
         if (command->RenderTargetCount == 0)
@@ -297,6 +336,9 @@ public sealed unsafe class ScenePanelHook : IDisposable
             && target->ActualHeight == backBuffer->ActualHeight;
     }
 
+    /// <summary>
+    /// Draws the in-world screen with the current render state restored after drawing, to avoid interfering with the game's rendering pipeline.
+    /// </summary>
     private void DrawWithStateRestored()
     {
         RawViewportF[] viewports = context.Rasterizer.GetViewports<RawViewportF>();
@@ -349,6 +391,11 @@ public sealed unsafe class ScenePanelHook : IDisposable
         }
     }
 
+    /// <summary>
+    /// Disposes all IDisposable resources in the given array, ignoring null entries. This is used to clean up Direct3D resources after drawing the in-world screen.
+    /// </summary>
+    /// <typeparam name="T">The type of the resources to dispose.</typeparam>
+    /// <param name="resources">The array of resources to dispose.</param>
     private static void DisposeAll<T>(T[] resources)
         where T : IDisposable?
     {
@@ -356,6 +403,9 @@ public sealed unsafe class ScenePanelHook : IDisposable
             resource?.Dispose();
     }
 
+    /// <summary>
+    /// Diposes of the ScenePanelHook, disabling the render hook and disposing of the renderer.
+    /// </summary>
     public void Dispose()
     {
         hook?.Disable();

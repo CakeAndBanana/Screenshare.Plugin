@@ -8,6 +8,7 @@ namespace ScreenShare.Plugin.Rendering;
 
 public sealed class Nv12Converter : IDisposable
 {
+    // Shader source code for converting RGB to NV12 format
     private const string ShaderSource = """
         struct VSOutput
         {

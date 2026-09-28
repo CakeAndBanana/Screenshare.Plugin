@@ -42,6 +42,8 @@ public sealed class MediaSessionService : IDisposable
     private int currentBitrateKbps;
     private long lastSeenQueueDrops;
     private int cleanAdaptWindows;
+    private int bitrateCeilingKbps;
+    private int bitrateCeilingWindowsLeft;
 
     public int HostCurrentBitrateKbps => currentBitrateKbps;
 
@@ -209,6 +211,7 @@ public sealed class MediaSessionService : IDisposable
                         currentBitrateKbps = bitrateKbps;
                         lastSeenQueueDrops = 0;
                         cleanAdaptWindows = 0;
+                        bitrateCeilingWindowsLeft = 0;
                         videoEncoder = encoder;
 
                         adaptCts = new CancellationTokenSource();
@@ -283,9 +286,12 @@ public sealed class MediaSessionService : IDisposable
 
                 bool live = videoEncoder is { SupportsLiveBitrate: true };
                 BitrateDecision decision = BitrateAdaptation.Next(
-                    currentBitrateKbps, settings.ConfiguredBitrateKbps, newDrops, cleanAdaptWindows, live);
+                    currentBitrateKbps, settings.ConfiguredBitrateKbps, newDrops, cleanAdaptWindows, live,
+                    bitrateCeilingKbps, bitrateCeilingWindowsLeft);
 
                 cleanAdaptWindows = decision.CleanWindows;
+                bitrateCeilingKbps = decision.CeilingKbps;
+                bitrateCeilingWindowsLeft = decision.CeilingWindowsLeft;
                 if (!decision.ShouldApply)
                     continue;
 

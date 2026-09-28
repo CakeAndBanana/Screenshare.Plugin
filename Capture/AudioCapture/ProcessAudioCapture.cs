@@ -8,6 +8,9 @@ using ScreenShare.Plugin.Capture.AudioCapture.Interop;
 
 namespace ScreenShare.Plugin.Capture.AudioCapture;
 
+/// <summary>
+/// Processes audio capture from a specific process using loopback audio capture. It captures audio samples, computes the peak level, and provides the samples to subscribers via an event
+/// </summary>
 public sealed class ProcessAudioCapture : IAudioSource
 {
     private const int SampleRate = 48000;
@@ -31,17 +34,26 @@ public sealed class ProcessAudioCapture : IAudioSource
     public Exception? LastError { get; private set; }
     public event Action<float[]>? SamplesAvailable;
 
+    /// <summary>
+    /// Constructs a new ProcessAudioCapture instance with the specified audio client, capture client, wave format, and frame event. It initializes the audio capture and processing threads.
+    /// </summary>
+    /// <param name="audioClient">The audio client for capturing audio.</param>
+    /// <param name="captureClient">The capture client for retrieving audio frames.</param>
+    /// <param name="waveFormat">The wave format for the audio.</param>
+    /// <param name="frameEvent">The event for signaling new audio frames.</param>
     private ProcessAudioCapture(
         IAudioClient audioClient,
         ProcessLoopbackInterop.IAudioCaptureClient captureClient,
         WaveFormat waveFormat,
         AutoResetEvent frameEvent)
     {
+        // Initialize the audio client, capture client, wave format, and frame event.
         this.audioClient = audioClient;
         this.captureClient = captureClient;
         this.waveFormat = waveFormat;
         this.frameEvent = frameEvent;
 
+        // Creating a bounded channel for audio samples with a capacity of 64. If the channel is full, the oldest samples will be dropped.
         sampleQueue = Channel.CreateBounded<float[]>(new BoundedChannelOptions(64)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
@@ -49,21 +61,31 @@ public sealed class ProcessAudioCapture : IAudioSource
             SingleWriter = true,
         });
 
+        // Starting the processing thread that will read samples from the channel and invoke the SamplesAvailable event.
         processingThread = new Thread(ProcessingLoop) { IsBackground = true, Name = "ScreenShare-ProcessAudioProcessing" };
         processingThread.Start();
 
         captureThread = new Thread(CaptureLoop) { IsBackground = true, Name = "ScreenShare-ProcessAudioCapture" };
 
+        // Starting the audio client to begin capturing audio and starting the capture thread that will read audio frames from the capture client.
         audioClient.Start();
         captureThread.Start();
     }
 
+    /// <summary>
+    /// Creates a new instance of ProcessAudioCapture for the specified target process ID. It initializes the audio client and capture client, sets up the wave format, and starts capturing audio from the target process.
+    /// </summary>
+    /// <param name="targetProcessId">The ID of the target process to capture audio from.</param>
+    /// <param name="cancellationToken">The cancellation token for the operation.</param>
+    /// <returns>The created ProcessAudioCapture instance.</returns>
     public static async Task<ProcessAudioCapture> CreateAsync(uint targetProcessId, CancellationToken cancellationToken = default)
     {
+        // Create a wave format for capturing audio in IEEE float format with the specified sample rate and number of channels.
         WaveFormat format = WaveFormat.CreateIeeeFloatWaveFormat(SampleRate, Channels);
 
         var frameEvent = new AutoResetEvent(false);
         IAudioClient client;
+        // Activate the audio client for the target process ID and initialize it with the specified wave format and frame event.
         try
         {
             client = await ActivateAsync(targetProcessId, format, frameEvent, cancellationToken).ConfigureAwait(false);
@@ -89,6 +111,16 @@ public sealed class ProcessAudioCapture : IAudioSource
         }
     }
 
+    /// <summary>
+    /// Activates the audio client for the specified target process ID, initializes it with the specified wave format and frame event, and returns the activated audio client.
+    /// This method uses the ProcessLoopbackInterop to activate the audio interface asynchronously.
+    /// </summary>
+    /// <param name="targetProcessId">The ID of the target process to activate the audio client for.</param>
+    /// <param name="format">The wave format to initialize the audio client with.</param>
+    /// <param name="frameEvent">The event to signal when audio frames are available.</param>
+    /// <param name="cancellationToken">The cancellation token for the operation.</param>
+    /// <returns>The activated audio client.</returns>
+    /// <returns></returns>
     private static async Task<IAudioClient> ActivateAsync(uint targetProcessId, WaveFormat format, AutoResetEvent frameEvent, CancellationToken cancellationToken)
     {
         var tcs = new TaskCompletionSource<IAudioClient>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -149,6 +181,10 @@ public sealed class ProcessAudioCapture : IAudioSource
         }
     }
 
+    /// <summary>
+    /// Capturing loop that continuously reads available audio packets from the capture client and processes them. 
+    /// It waits for new audio frames to be available or for a cancellation request to stop the loop.
+    /// </summary>
     private void CaptureLoop()
     {
         WaitHandle[] waits = [frameEvent, stopCts.Token.WaitHandle];
@@ -170,10 +206,14 @@ public sealed class ProcessAudioCapture : IAudioSource
     }
 
 
+    /// <summary>
+    /// Reading available audio packets from the capture client, computing the peak level, and writing the samples to the sample queue for processing.
+    /// </summary>
     private void ReadAvailablePackets()
     {
         List<float> pending = [];
 
+        // Get the size of the next available audio packet from the capture client. If there are no packets available, return early.
         Marshal.ThrowExceptionForHR(captureClient.GetNextPacketSize(out int packetFrames));
         while (packetFrames != 0)
         {
@@ -199,6 +239,12 @@ public sealed class ProcessAudioCapture : IAudioSource
         sampleQueue.Writer.TryWrite(combined);
     }
 
+    /// <summary>
+    /// Computes peak value from the given audio samples. 
+    /// It iterates through the samples, calculates the absolute value of each sample, and keeps track of the maximum absolute value found, which represents the peak level of the audio signal.
+    /// </summary>
+    /// <param name="samples">The audio samples to process.</param>
+    /// <returns>The peak value.</returns>
     private static float ComputePeak(float[] samples)
     {
         float peak = 0f;
@@ -212,10 +258,16 @@ public sealed class ProcessAudioCapture : IAudioSource
         return peak;
     }
 
+    /// <summary>
+    /// Loops the processing of audio samples from the sample queue. 
+    /// It waits for samples to be available in the queue and invokes the SamplesAvailable event with the read samples. 
+    /// The loop continues until a cancellation request is received.
+    /// </summary>
     private void ProcessingLoop()
     {
         try
         {
+            // Wait for samples to be available in the sample queue and process them until a cancellation request is received.
             while (sampleQueue.Reader.WaitToReadAsync(stopCts.Token).AsTask().GetAwaiter().GetResult())
             {
                 while (sampleQueue.Reader.TryRead(out float[]? samples))
@@ -227,6 +279,9 @@ public sealed class ProcessAudioCapture : IAudioSource
         }
     }
 
+    /// <summary>
+    /// Diposes the ProcessAudioCapture instance, stopping the audio capture and processing threads, releasing COM objects, and disposing of resources.
+    /// </summary>
     public void Dispose()
     {
         stopCts.Cancel();
@@ -240,6 +295,7 @@ public sealed class ProcessAudioCapture : IAudioSource
         }
         catch
         {
+            // Ignore exceptions during stop, as the audio client may already be stopped or disposed.
         }
 
         Marshal.ReleaseComObject(captureClient);
@@ -248,6 +304,12 @@ public sealed class ProcessAudioCapture : IAudioSource
         frameEvent.Dispose();
     }
 
+    /// <summary>
+    /// Activation completion handler that is called when the audio interface activation is completed. 
+    /// It retrieves the activated audio client, initializes it, and sets the result or exception on the provided TaskCompletionSource.
+    /// </summary>
+    /// <param name="tcs">The task completion source.</param>
+    /// <param name="initializeAction">The action to initialize the audio client.</param>
     private sealed class ActivationCompletionHandler(TaskCompletionSource<IAudioClient> tcs, Action<IAudioClient> initializeAction)
         : ProcessLoopbackInterop.IActivateAudioInterfaceCompletionHandler
     {

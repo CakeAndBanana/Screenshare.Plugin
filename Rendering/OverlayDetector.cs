@@ -3,6 +3,10 @@ using ScreenShare.Plugin.Services;
 
 namespace ScreenShare.Plugin.Rendering;
 
+/// <summary>
+/// OverlayDetector scans the current process for known graphics modules that may indicate the presence of overlays, upscalers, or capture hooks. 
+/// It provides a way to detect and describe these modules, which can be useful for debugging or ensuring compatibility with certain rendering scenarios.
+/// </summary>
 internal static class OverlayDetector
 {
     private static string? detected;
@@ -22,16 +26,26 @@ internal static class OverlayDetector
         }
     }
 
-    // Anything that hooks Present or reorders the frame's passes: upscalers, overlays, capture hooks.
+    /// <summary>
+    /// Graphics module hints that are commonly associated with overlays, upscalers, or capture hooks. 
+    /// These hints are used to identify potentially intrusive graphics modules loaded in the current process.
+    /// </summary>
     private static readonly string[] GraphicsModuleHints =
     [
         "nvngx", "dlss", "ffx", "fidelityfx", "xess", "optiscaler", "reshade", "gshade",
         "rtsshooks", "discordhook", "gameoverlayrenderer", "graphics-hook", "nvspcap", "overlay",
     ];
 
-    // System dlls that injectors ship as proxies next to the game executable.
+    /// <summary>
+    /// Proxy DLL names that are commonly used to intercept graphics API calls.
+    /// If these DLLs are loaded from a non-system directory, they may indicate the presence of a proxy or hook that could affect rendering behavior.
+    /// </summary>
     private static readonly string[] ProxyDllNames = ["dxgi.dll", "d3d11.dll", "dinput8.dll", "winmm.dll", "version.dll"];
 
+    /// <summary>
+    /// Describes the graphics modules currently loaded in the process that match known hints or proxy DLL names.
+    /// </summary>
+    /// <returns></returns>
     public static string DescribeGraphicsModules()
     {
         try
@@ -62,6 +76,10 @@ internal static class OverlayDetector
         }
     }
 
+    /// <summary>
+    /// Scans the current process for known graphics modules that may indicate the presence of overlays, upscalers, or capture hooks.
+    /// </summary>
+    /// <returns></returns>
     private static string? Scan()
     {
         try

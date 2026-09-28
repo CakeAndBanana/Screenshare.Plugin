@@ -3,6 +3,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Components;
 using ScreenShare.Plugin.Networking;
+using ScreenShare.Plugin.Networking.Models;
 using ScreenShare.Plugin.Services;
 using ScreenShare.Plugin.Ui.Helpers;
 
@@ -577,7 +578,7 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         var buttonSize = new Vector2((width - spacing) / 2, ImGui.GetFrameHeight() * 1.2f);
         if (UiTheme.ColoredButton("Create", UiTheme.ColorOf(kind), buttonSize))
         {
-            roomSession.CreateRoom(createName.Trim(), isPublic, createPassword, Math.Clamp(createMaxViewers, 1, 16), createRegion, createRegion is null ? PlayerRegion.Current() : null);
+            roomSession.CreateRoom(createName.Trim(), isPublic, createPassword, Math.Clamp(createMaxViewers, 1, 16), createRegion, createRegion is null ? roomSession.NearestRegion : null);
             ImGui.CloseCurrentPopup();
         }
 
@@ -618,9 +619,11 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         }
 
         ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + width);
-        ImGui.TextDisabled(createRegion is null
-            ? "Uses a server in your region, or another region only when yours is full."
-            : "Pick the region closest to you and your viewers.");
+        ImGui.TextDisabled(createRegion is not null
+            ? "Pick the region closest to you and your viewers."
+            : roomSession.NearestRegion is { } nearest
+                ? $"Uses {RegionName(nearest)}, the region nearest to you, or another region only when it's full."
+                : "Uses the region nearest to you, or another region only when it's full.");
         ImGui.PopTextWrapPos();
     }
 

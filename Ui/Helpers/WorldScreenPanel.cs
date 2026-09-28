@@ -1,6 +1,6 @@
 ﻿using System.Numerics;
 using Dalamud.Bindings.ImGui;
-using ScreenShare.Plugin.Networking;
+using ScreenShare.Plugin.Networking.Models;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 

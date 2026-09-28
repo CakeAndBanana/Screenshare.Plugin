@@ -1,5 +1,5 @@
 ﻿using System.Numerics;
-using ScreenShare.Plugin.Networking;
+using ScreenShare.Plugin.Networking.Models;
 using ScreenShare.Plugin.Services;
 
 namespace ScreenShare.Plugin.Tests.Services;

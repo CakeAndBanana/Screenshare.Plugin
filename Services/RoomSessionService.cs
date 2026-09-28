@@ -1,6 +1,7 @@
 ﻿using System.Collections.Concurrent;
 using Microsoft.AspNetCore.SignalR.Client;
 using ScreenShare.Plugin.Networking;
+using ScreenShare.Plugin.Networking.Models;
 
 namespace ScreenShare.Plugin.Services;
 
@@ -16,6 +17,11 @@ public sealed class RoomSessionService : IDisposable
     private RoomDirectory? directory;
     private DateTime lastDirectoryRefreshUtc;
     private int directoryRefreshInFlight;
+    private static readonly TimeSpan NearestRegionRefreshInterval = TimeSpan.FromMinutes(10);
+    private readonly RegionLatency regionLatency = new();
+    private string? nearestRegionProbeKey;
+    private DateTime nearestRegionMeasuredUtc;
+    private int nearestRegionProbeInFlight;
     private readonly Lock membersLock = new();
     private readonly List<RoomMemberInfo> members = [];
     private readonly Lock activeStreamersLock = new();
@@ -96,6 +102,9 @@ public sealed class RoomSessionService : IDisposable
             : [];
 
     public IReadOnlyList<string> Regions => directory?.Regions ?? [];
+
+    /// <summary>The region whose server answers this player fastest, or null until measured.</summary>
+    public string? NearestRegion { get; private set; }
 
     public RoomListing? FindListing(string roomId)
     {
@@ -571,6 +580,7 @@ public sealed class RoomSessionService : IDisposable
 
             directory = result;
             DirectoryError = null;
+            MaybeFindNearestRegion(result.RegionProbes);
         }
         catch (Exception ex)
         {
@@ -579,6 +589,42 @@ public sealed class RoomSessionService : IDisposable
         finally
         {
             Volatile.Write(ref directoryRefreshInFlight, 0);
+        }
+    }
+
+    /// <summary>Re-measures when the servers on offer change, and otherwise now and then, since the
+    /// directory refreshes every few seconds and the answer rarely moves.</summary>
+    private void MaybeFindNearestRegion(IReadOnlyList<RegionProbe>? probes)
+    {
+        if (probes is not { Count: > 1 })
+            return;
+
+        string key = string.Join('|', probes.Select(p => $"{p.Region}={p.Url}"));
+        if (key == nearestRegionProbeKey && DateTime.UtcNow - nearestRegionMeasuredUtc < NearestRegionRefreshInterval)
+            return;
+
+        if (Interlocked.Exchange(ref nearestRegionProbeInFlight, 1) == 1)
+            return;
+
+        nearestRegionProbeKey = key;
+        nearestRegionMeasuredUtc = DateTime.UtcNow;
+        _ = FindNearestRegionCoreAsync(probes);
+    }
+
+    private async Task FindNearestRegionCoreAsync(IReadOnlyList<RegionProbe> probes)
+    {
+        try
+        {
+            if (await regionLatency.FindNearestAsync(probes).ConfigureAwait(false) is { } nearest)
+                NearestRegion = nearest;
+        }
+        catch (ObjectDisposedException)
+        {
+            // The plugin unloaded mid-measurement.
+        }
+        finally
+        {
+            Volatile.Write(ref nearestRegionProbeInFlight, 0);
         }
     }
 
@@ -821,6 +867,7 @@ public sealed class RoomSessionService : IDisposable
 
     public void Dispose()
     {
+        regionLatency.Dispose();
         _ = client.DisposeAsync().AsTask();
     }
 }

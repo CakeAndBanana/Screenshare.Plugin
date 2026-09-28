@@ -23,7 +23,7 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
     private readonly GameAdapterDevice gameAdapterDevice;
     private readonly ICaptureSource capture;
     private readonly Stopwatch sessionClock;
-    private readonly int frameIntervalMs;
+    private readonly int fps;
 
     private readonly Transform transform;
     private readonly DXGIDeviceManager deviceManager;
@@ -89,7 +89,7 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
         this.capture = capture;
         this.sessionClock = sessionClock;
         Codec = codec;
-        frameIntervalMs = Math.Max(1, 1000 / Math.Max(1, fps));
+        this.fps = Math.Max(1, fps);
 
         (int width, int height) = ComputeScaledSize(capture.Width, capture.Height, targetHeight);
 
@@ -290,7 +290,9 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
             Apply($"{bitrateKbps}kbps", AvEncCommonMeanBitRate, (uint)(bitrateKbps * 1000));
             Apply("low-latency", AvLowLatencyMode, true);
 
-            Apply($"GOP {fps * 2}", AvEncMpvGopSize, (uint)(fps * 2));
+            // One keyframe a second: what the hardware encoders were producing anyway when asked for
+            // two, and it bounds how long a viewer who lost frames waits to recover.
+            Apply($"GOP {fps}", AvEncMpvGopSize, (uint)fps);
 
             ServiceCollector.PluginLog.Information(
                 $"ScreenShare encoder settings on {EncoderName}: applied [{string.Join(", ", accepted)}]" +
@@ -393,12 +395,15 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
     /// <param name="pacer">The precision sleep instance used for timing.</param>
     private void FeedFrame(Stopwatch clock, PrecisionSleep pacer)
     {
-        long dueMs = nextFrameIndex * frameIntervalMs;
+        // Due times come from the frame index rather than a rounded per-frame interval, so 60fps
+        // averages 60 rather than the 62.5 a 16ms step gives.
+        long dueMs = nextFrameIndex * 1000 / fps;
         long nowMs = clock.ElapsedMilliseconds;
+        long latestDueIndex = nowMs * fps / 1000;
 
-        if (nowMs > dueMs + frameIntervalMs)
+        if (latestDueIndex > nextFrameIndex)
         {
-            long missed = (nowMs - dueMs) / frameIntervalMs;
+            long missed = latestDueIndex - nextFrameIndex;
             nextFrameIndex += missed;
             Interlocked.Add(ref framesSkipped, missed);
         }
@@ -432,7 +437,7 @@ public sealed class MediaFoundationVideoEncoder : IVideoEncoder
             using Sample sample = MediaFactory.CreateSample();
             sample.AddBuffer(buffer);
             sample.SampleTime = ptsMs * 10_000;
-            sample.SampleDuration = frameIntervalMs * 10_000L;
+            sample.SampleDuration = 10_000_000L / fps;
 
             transform.ProcessInput(0, sample, 0);
         }

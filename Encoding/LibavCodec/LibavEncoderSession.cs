@@ -126,7 +126,7 @@ public sealed unsafe class LibavEncoderSession : IDisposable
             {
                 context->pix_fmt = PickPixelFormat(context, encoder);
             }
-            context->gop_size = fps * 2;
+            context->gop_size = fps;
             context->max_b_frames = 0;
             ApplyBitrate(bitrateKbps);
 

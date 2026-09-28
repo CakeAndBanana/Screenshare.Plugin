@@ -11,6 +11,10 @@ using SizeInt32 = ScreenShare.Plugin.Capture.ScreenCapture.Interop.WindowsGraphi
 
 namespace ScreenShare.Plugin.Capture.ScreenCapture;
 
+/// <summary>
+/// Windows Graphics Capture implementation for capturing a specific window's content. 
+/// This class uses the Windows.Graphics.Capture API to capture frames from a specified window and provides them as a Direct3D texture for further processing or streaming.
+/// </summary>
 public sealed class WindowCapture : ICaptureSource
 {
     private readonly Device device;
@@ -43,8 +47,14 @@ public sealed class WindowCapture : ICaptureSource
 
     public long FramesCaptured => Interlocked.Read(ref framesCaptured);
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="WindowCapture"/> class.
+    /// </summary>
+    /// <param name="gameAdapterDevice">The game adapter device.</param>
+    /// <param name="hwnd">The handle of the window to capture.</param>
     public WindowCapture(GameAdapterDevice gameAdapterDevice, nint hwnd)
     {
+        // Initialize the Direct3D device and context lock from the provided game adapter device.
         device = gameAdapterDevice.Device;
         contextLock = gameAdapterDevice.ImmediateContextLock;
         targetWindow = hwnd;
@@ -52,6 +62,7 @@ public sealed class WindowCapture : ICaptureSource
         nint itemPtr = CreateItemForWindow(hwnd);
         try
         {
+            // Get the size of the capture item to determine the initial width and height of the capture.
             var item = (WindowsGraphicsCaptureInterop.IGraphicsCaptureItem)Marshal.GetObjectForIUnknown(itemPtr);
             try
             {
@@ -88,6 +99,7 @@ public sealed class WindowCapture : ICaptureSource
         poolWidth = Width;
         poolHeight = Height;
 
+        // Create a shared texture for the captured frames, which can be used for rendering or further processing.
         targetTexture = SharedTextureFactory.CreateEmpty(device, Width, Height, renderTarget: true);
         SharedHandle = SharedTextureFactory.GetSharedHandle(targetTexture);
         targetView = new RenderTargetView(device, targetTexture);
@@ -104,6 +116,11 @@ public sealed class WindowCapture : ICaptureSource
 
     private const string GraphicsCaptureItemClassName = "Windows.Graphics.Capture.GraphicsCaptureItem";
 
+    /// <summary>
+    /// Creates a GraphicsCaptureItem for the specified window handle (HWND) using the Windows.Graphics.Capture API.
+    /// </summary>
+    /// <param name="hwnd">The handle of the window for which to create a capture item.</param>
+    /// <returns>The pointer to the created GraphicsCaptureItem.</returns>
     private static nint CreateItemForWindow(nint hwnd)
     {
         nint factoryPtr = GetActivationFactory(
@@ -128,6 +145,11 @@ public sealed class WindowCapture : ICaptureSource
         }
     }
 
+    /// <summary>
+    /// Creates a Direct3D device pointer from a SharpDX Direct3D11 device, which is required for the Windows.Graphics.Capture API to work with the capture session.
+    /// </summary>
+    /// <param name="d3dDevice">The SharpDX Direct3D11 device.</param>
+    /// <returns>The pointer to the created Direct3D device.</returns>
     private static nint CreateDirect3DDeviceFromSharpDXDevice(Device d3dDevice)
     {
         using DxgiDevice dxgiDevice = d3dDevice.QueryInterface<DxgiDevice>();
@@ -136,6 +158,14 @@ public sealed class WindowCapture : ICaptureSource
         return graphicsDevicePtr;
     }
 
+    /// <summary>
+    /// Creates a free-threaded frame pool for capturing frames from the specified Direct3D device. 
+    /// The frame pool is used to manage the captured frames and provide them to the capture session.
+    /// </summary>
+    /// <param name="direct3DDevicePtr">The pointer to the Direct3D device.</param>
+    /// <param name="width">The width of the frame pool.</param>
+    /// <param name="height">The height of the frame pool.</param>
+    /// <returns>The pointer to the created frame pool. </returns>
     private static nint CreateFreeThreadedFramePool(nint direct3DDevicePtr, int width, int height)
     {
         nint factoryPtr = GetActivationFactory(
@@ -162,20 +192,30 @@ public sealed class WindowCapture : ICaptureSource
         }
     }
 
-    private static nint GetActivationFactory(string runtimeClassName, Guid iid)
+    /// <summary>
+    /// Gets the activation factory for a specified runtime class name and interface ID (IID) using the Windows Runtime (WinRT) API.
+    /// </summary>
+    /// <param name="runtimeClassName">The name of the runtime class.</param>
+    /// <param name="guid">The interface ID (IID).</param>
+    /// <returns>The pointer to the activation factory.</returns>
+    private static nint GetActivationFactory(string runtimeClassName, Guid guid)
     {
         Marshal.ThrowExceptionForHR(WindowsGraphicsCaptureInterop.WindowsCreateString(runtimeClassName, runtimeClassName.Length, out nint hstring));
         try
         {
-            Marshal.ThrowExceptionForHR(WindowsGraphicsCaptureInterop.RoGetActivationFactory(hstring, ref iid, out nint factory));
+            Marshal.ThrowExceptionForHR(WindowsGraphicsCaptureInterop.RoGetActivationFactory(hstring, ref guid, out nint factory));
             return factory;
         }
         finally
         {
-            WindowsGraphicsCaptureInterop.WindowsDeleteString(hstring);
+            _ = WindowsGraphicsCaptureInterop.WindowsDeleteString(hstring);
         }
     }
 
+    /// <summary>
+    /// Captures frames in a loop until the capture is stopped.
+    /// This method runs on a separate thread and continuously retrieves frames from the frame pool, processes them, and handles any errors that may occur during the capture process.
+    /// </summary>
     private void CaptureLoop()
     {
         while (running)
@@ -207,8 +247,9 @@ public sealed class WindowCapture : ICaptureSource
         }
     }
 
-    // Windows draws the cursor whenever it's inside the window's rectangle, even while another
-    // window covering it is the one actually under the cursor - so only capture it when it's ours.
+    /// <summary>
+    /// Updates the cursor capture state based on whether the cursor is currently over the target window.
+    /// </summary>
     private void UpdateCursorCapture()
     {
         if (cursorSession is null)
@@ -230,6 +271,11 @@ public sealed class WindowCapture : ICaptureSource
         cursorCaptured = overTarget;
     }
 
+    /// <summary>
+    /// Is the cursor currently over the target window? 
+    /// This method checks the current cursor position and determines if it is within the bounds of the target window or its root owner, allowing for proper cursor capture behavior during screen sharing.
+    /// </summary>
+    /// <returns>True if the cursor is over the target window; otherwise, false.</returns>
     private bool IsCursorOverTargetWindow()
     {
         if (!WindowsGraphicsCaptureInterop.GetCursorPos(out WindowsGraphicsCaptureInterop.Point point))
@@ -244,6 +290,10 @@ public sealed class WindowCapture : ICaptureSource
             || WindowsGraphicsCaptureInterop.GetAncestor(hit, WindowsGraphicsCaptureInterop.GaRootOwner) == targetWindow;
     }
 
+    /// <summary>
+    /// Processes a captured frame by retrieving its content size, checking if the frame pool needs to be recreated, and copying or scaling the frame's texture into the target texture for further processing or streaming.
+    /// </summary>
+    /// <param name="framePtr"></param>
     private void ProcessFrame(nint framePtr)
     {
         var frame = (WindowsGraphicsCaptureInterop.IDirect3D11CaptureFrame)Marshal.GetObjectForIUnknown(framePtr);
@@ -300,6 +350,12 @@ public sealed class WindowCapture : ICaptureSource
         }
     }
 
+    /// <summary>
+    /// Recreates the frame pool with the specified width and height. 
+    /// This is necessary when the captured window is resized, ensuring that the frame pool matches the new dimensions of the content being captured.
+    /// </summary>
+    /// <param name="width">The width of the new frame pool.</param>
+    /// <param name="height">The height of the new frame pool.</param>
     private void RecreateFramePool(int width, int height)
     {
         var size = new SizeInt32 { Width = width, Height = height };
@@ -314,6 +370,12 @@ public sealed class WindowCapture : ICaptureSource
             $"ScreenShare's captured window resized to {width}x{height}; scaling it into the {Width}x{Height} stream.");
     }
 
+    /// <summary>
+    /// Blits the captured frame to the target view, scaling it to fit within the specified dimensions.
+    /// </summary>
+    /// <param name="frameTexture">The texture of the captured frame.</param>
+    /// <param name="sourceWidth">The width of the source frame.</param>
+    /// <param name="sourceHeight">The height of the source frame.</param>  
     private void BlitFitted(Texture2D frameTexture, int sourceWidth, int sourceHeight)
     {
         using var sourceView = new ShaderResourceView(device, frameTexture);
@@ -333,6 +395,9 @@ public sealed class WindowCapture : ICaptureSource
         }
     }
 
+    /// <summary>
+    /// Disposes of the resources used by the WindowCapture instance, including stopping the capture thread, closing the capture session and frame pool, releasing COM objects, and disposing of Direct3D resources.
+    /// </summary>
     public void Dispose()
     {
         running = false;
@@ -360,6 +425,7 @@ public sealed class WindowCapture : ICaptureSource
         if (direct3DDevicePtr != nint.Zero)
             Marshal.Release(direct3DDevicePtr);
 
+        // Dispose of the downscaler, target view, and target texture to free up GPU resources.
         downscaler.Dispose();
         targetView.Dispose();
         targetTexture.Dispose();

@@ -8,6 +8,9 @@ namespace ScreenShare.Plugin.Rendering;
 
 public sealed class Nv12ToBgraConverter : IDisposable
 {
+    // The shader source code is embedded as a string literal.
+    // It defines a vertex shader and two pixel shaders: one for converting RGB to luma (Y) and another for converting RGB to chroma (UV).
+    // The shaders sample the source texture and perform the necessary color space conversions to produce NV12 output.
     private const string ShaderSource = """
         struct VSOutput
         {
@@ -75,7 +78,7 @@ public sealed class Nv12ToBgraConverter : IDisposable
         var luma = new ShaderResourceView(device, nv12, new ShaderResourceViewDescription
         {
             Format = Format.R8_UNorm,
-            Dimension = SharpDX.Direct3D.ShaderResourceViewDimension.Texture2D,
+            Dimension = ShaderResourceViewDimension.Texture2D,
             Texture2D = { MipLevels = 1, MostDetailedMip = 0 },
         });
 
@@ -84,7 +87,7 @@ public sealed class Nv12ToBgraConverter : IDisposable
             var chroma = new ShaderResourceView(device, nv12, new ShaderResourceViewDescription
             {
                 Format = Format.R8G8_UNorm,
-                Dimension = SharpDX.Direct3D.ShaderResourceViewDimension.Texture2D,
+                Dimension = ShaderResourceViewDimension.Texture2D,
                 Texture2D = { MipLevels = 1, MostDetailedMip = 0 },
             });
 
@@ -105,6 +108,7 @@ public sealed class Nv12ToBgraConverter : IDisposable
         int width,
         int height)
     {
+        // Set up the pipeline and draw a full-screen triangle to perform the conversion.
         context.OutputMerger.SetRenderTargets(destination);
         context.Rasterizer.SetViewport(0, 0, width, height);
         context.InputAssembler.InputLayout = null;

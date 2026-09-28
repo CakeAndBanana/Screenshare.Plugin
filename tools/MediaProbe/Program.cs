@@ -21,6 +21,15 @@ if (command is "help" or "-h" or "--help")
           encode [frames] [WxH]            Which in-process libavcodec encoders (the fallback when
                                            Media Foundation has none) work here, how fast, and
                                            whether live bitrate changes take. Default 300, 1280x720.
+          watch <room> --relay <url>       Join a live room as a headless viewer and report dropped
+                [--password <pw>]          or late video frames and missing, late or undecodable audio
+                [--streamer <name>]        every 5s; Ctrl+C for a summary. Follows whoever streams
+                [--minutes <n>]            (or the one whose name matches --streamer). --buffer is the
+                [--buffer <ms>]            playout buffer to judge lateness against, default 500.
+                [--name <shown as>]        Shows up in the room as "Frame probe" unless --name.
+                [--limit <kbps>]           --limit reads no faster than that, to see what a viewer
+                [--no-ack]                 on a slow line gets (the relay's flush-to-keyframe);
+                [--log <file>]             add --no-ack to behave like a plugin without flow control.
 
         Examples:
           dotnet run --project ScreenShare.Plugin/tools/MediaProbe -- mft
@@ -32,6 +41,22 @@ if (command is "help" or "-h" or "--help")
         Exits non-zero when a soak finds something, so it can gate a release.
         """);
     return 0;
+}
+
+if (command == "watch")
+{
+    if (args.Length < 2 || args[1].StartsWith("--", StringComparison.Ordinal) || Option("--relay") is not { } relay)
+    {
+        Console.Error.WriteLine("Usage: watch <room> --relay <url> [--password <pw>] [--streamer <name>] [--minutes <n>] [--buffer <ms>] [--name <shown as>] [--limit <kbps> [--no-ack]] [--log <file>]");
+        return 2;
+    }
+
+    TimeSpan? duration = double.TryParse(Option("--minutes"), out double minutes) ? TimeSpan.FromMinutes(minutes) : null;
+    int bufferMs = int.TryParse(Option("--buffer"), out int parsedBuffer) ? parsedBuffer : 500;
+    int? limitKbps = int.TryParse(Option("--limit"), out int parsedLimit) && parsedLimit > 0 ? parsedLimit : null;
+
+    return await RoomWatch.RunAsync(relay, args[1], Option("--password") ?? string.Empty, Option("--name") ?? "Frame probe",
+        Option("--streamer"), duration, bufferMs, limitKbps, !args.Contains("--no-ack"), Option("--log"));
 }
 
 if (command == "duplication")
@@ -82,6 +107,12 @@ using (var multithread = device.QueryInterface<Multithread>())
     multithread.SetMultithreadProtected(true);
 
 return Soak.Run(device, ffmpegExePath, workDirectory, width, height, frames, slots);
+
+string? Option(string name)
+{
+    int index = Array.IndexOf(args, name);
+    return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+}
 
 static (int Width, int Height) ParseSize(string value)
 {

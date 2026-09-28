@@ -2,6 +2,11 @@
 
 namespace ScreenShare.Plugin.Capture.ScreenCapture.Interop;
 
+/// <summary>
+/// Windows Graphics Capture interop definitions for interacting with Windows Runtime APIs related to screen capture and graphics capture.
+/// Microsoft's Windows.Graphics.Capture namespace provides APIs for capturing the contents of a window or monitor, and this interop class defines the necessary COM interfaces, structures, and constants to facilitate that interaction from .NET code.
+/// Documentation: https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture?view=winrt-22621
+/// </summary>
 internal static class WindowsGraphicsCaptureInterop
 {
     public const string Direct3D11CaptureFramePoolClassName = "Windows.Graphics.Capture.Direct3D11CaptureFramePool";

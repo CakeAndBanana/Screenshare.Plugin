@@ -1,5 +1,5 @@
 using Dalamud.Configuration;
-using ScreenShare.Plugin.Networking;
+using ScreenShare.Plugin.Networking.Models;
 
 namespace ScreenShare.Plugin;
 

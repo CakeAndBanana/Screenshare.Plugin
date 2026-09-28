@@ -8,6 +8,9 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Rendering;
 
+/// <summary>
+/// 
+/// </summary>
 public sealed class WorldPanelDispatch : IDisposable
 {
     private readonly WorldPanelRenderer renderer;

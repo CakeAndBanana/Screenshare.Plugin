@@ -6,10 +6,15 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace ScreenShare.Plugin.Rendering;
 
+/// <summary>
+/// SolidColorTexture is a utility class that creates a 1x1 texture filled with a specified solid color. 
+/// This texture can be used in rendering scenarios where a uniform color is needed, such as for background fills or simple color overlays.
+/// </summary>
 public static class SolidColorTexture
 {
     public static RawTextureWrap Create(Device device, uint bgra, int reportedWidth, int reportedHeight)
     {
+        // Generates an 1x1 black texture to show on the preview of the in-game screen
         var desc = new Texture2DDescription
         {
             Width = 1,

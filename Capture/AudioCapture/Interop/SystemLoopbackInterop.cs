@@ -3,6 +3,11 @@ using NAudio.CoreAudioApi;
 
 namespace ScreenShare.Plugin.Capture.AudioCapture.Interop;
 
+/// <summary>
+/// Interop definitions for the Windows Core Audio API, specifically for loopback audio capture. 
+/// This class provides the necessary COM interfaces and GUIDs to interact with the system's audio devices and capture audio streams from the loopback interface.
+/// Microsoft documentation: https://learn.microsoft.com/en-us/windows/win32/coreaudio/core-audio-apis-in-windows-vista
+/// </summary>
 internal static class SystemLoopbackInterop
 {
     public static readonly Guid MMDeviceEnumeratorClsid = new("BCDE0395-E52F-467C-8E3D-C4579291692E");
