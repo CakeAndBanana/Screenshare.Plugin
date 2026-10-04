@@ -27,6 +27,7 @@ public sealed class H264Encoder : IVideoEncoder
     private readonly int maxPendingTimestamps;
 
     private volatile bool running;
+    private volatile bool disposed;
     private int errorRecorded;
 
     private readonly Stopwatch sessionClock;
@@ -155,9 +156,10 @@ public sealed class H264Encoder : IVideoEncoder
                 pacer.Wait(frameIndex * 1000 / fps - clock.ElapsedMilliseconds);
             }
         }
-        catch (Exception ex) when (running)
+        catch (Exception ex)
         {
-            RecordError("WriteLoop (capture -> encoder stdin)", ex);
+            if (!disposed)
+                RecordError("WriteLoop (capture -> encoder stdin)", ex);
         }
         finally
         {
@@ -187,9 +189,10 @@ public sealed class H264Encoder : IVideoEncoder
                 encoderProcess.ThrowIfFailed();
             }
         }
-        catch (Exception ex) when (running)
+        catch (Exception ex)
         {
-            RecordError("ReaderLoop (encoder stdout -> callback)", ex);
+            if (!disposed)
+                RecordError("ReaderLoop (encoder stdout -> callback)", ex);
         }
     }
 
@@ -232,6 +235,7 @@ public sealed class H264Encoder : IVideoEncoder
 
     public void Dispose()
     {
+        disposed = true;
         running = false;
         bool writerExited = writerThread.Join(1000);
         readerThread.Join(1000);

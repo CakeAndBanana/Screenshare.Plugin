@@ -67,6 +67,15 @@ public sealed class WindowCapture : ICaptureSource
             try
             {
                 Marshal.ThrowExceptionForHR(item.GetSize(out SizeInt32 size));
+
+                // A minimized window reports its iconic size (~160x28), which would lock the whole stream to that size.
+                if (WindowsGraphicsCaptureInterop.IsIconic(hwnd) && TryGetRestoredSize(hwnd, out SizeInt32 restored))
+                {
+                    size = restored;
+                    ServiceCollector.PluginLog.Information(
+                        $"ScreenShare's shared window is minimized; sizing the stream to its restored {size.Width}x{size.Height}.");
+                }
+
                 Width = Math.Max(2, size.Width);
                 Height = Math.Max(2, size.Height);
             }
@@ -143,6 +152,44 @@ public sealed class WindowCapture : ICaptureSource
         {
             Marshal.Release(factoryPtr);
         }
+    }
+
+    /// <summary>
+    /// Gets the size a minimized window will have once restored: its normal placement rect, or the size of its monitor
+    /// when that rect is unusable (full-screen games often leave it empty or tiny).
+    /// </summary>
+    /// <param name="hwnd">The handle of the minimized window.</param>
+    /// <param name="size">The restored size, when one could be determined.</param>
+    /// <returns>True if a usable size was found; otherwise, false.</returns>
+    private static bool TryGetRestoredSize(nint hwnd, out SizeInt32 size)
+    {
+        const int MinimumUsableSide = 64;
+
+        var placement = new WindowsGraphicsCaptureInterop.WindowPlacement
+        {
+            Length = Marshal.SizeOf<WindowsGraphicsCaptureInterop.WindowPlacement>(),
+        };
+        if (WindowsGraphicsCaptureInterop.GetWindowPlacement(hwnd, ref placement))
+        {
+            WindowsGraphicsCaptureInterop.Rect normal = placement.NormalPosition;
+            size = new SizeInt32 { Width = normal.Right - normal.Left, Height = normal.Bottom - normal.Top };
+            if (size.Width >= MinimumUsableSide && size.Height >= MinimumUsableSide)
+                return true;
+        }
+
+        nint monitor = WindowsGraphicsCaptureInterop.MonitorFromWindow(hwnd, WindowsGraphicsCaptureInterop.MonitorDefaultToNearest);
+        var info = new WindowsGraphicsCaptureInterop.MonitorInfo
+        {
+            Size = Marshal.SizeOf<WindowsGraphicsCaptureInterop.MonitorInfo>(),
+        };
+        if (monitor != 0 && WindowsGraphicsCaptureInterop.GetMonitorInfo(monitor, ref info))
+        {
+            size = new SizeInt32 { Width = info.Monitor.Right - info.Monitor.Left, Height = info.Monitor.Bottom - info.Monitor.Top };
+            return size.Width > 0 && size.Height > 0;
+        }
+
+        size = default;
+        return false;
     }
 
     /// <summary>

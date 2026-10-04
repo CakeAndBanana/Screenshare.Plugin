@@ -231,8 +231,11 @@ internal sealed class PresentationScheduler<TFrame> : IDisposable
                 }
             }
         }
-        catch (Exception ex) when (running)
+        catch (Exception ex)
         {
+            if (!running)
+                return;
+
             onError("DisplayLoop (presentation buffer -> shared texture)", ex);
         }
     }

@@ -26,6 +26,7 @@ public sealed class H264Decoder : IVideoDecoder
     private readonly Thread feedWriterThread;
     private readonly Thread readerThread;
     private volatile bool running;
+    private volatile bool disposed;
     private int errorRecorded;
 
     private readonly Stopwatch sessionStopwatch = Stopwatch.StartNew();
@@ -134,9 +135,10 @@ public sealed class H264Decoder : IVideoDecoder
                 decoderProcess.StandardInput.Flush();
             }
         }
-        catch (Exception ex) when (running)
-        {
-            RecordError("FeedWriterLoop (network -> decoder stdin)", ex);
+        catch (Exception ex)
+        
+            if (!disposed)
+                RecordError("FeedWriterLoop (network -> decoder stdin)", ex);
         }
         finally
         {
@@ -169,9 +171,10 @@ public sealed class H264Decoder : IVideoDecoder
                 scheduler.Enqueue(Interlocked.Read(ref lastFedPtsMs), (byte[])frame.Clone());
             }
         }
-        catch (Exception ex) when (running)
+        catch (Exception ex)
         {
-            RecordError("ReadLoop (decoder stdout -> presentation buffer)", ex);
+            if (!disposed)
+                RecordError("ReadLoop (decoder stdout -> presentation buffer)", ex);
         }
     }
 
@@ -215,6 +218,7 @@ public sealed class H264Decoder : IVideoDecoder
 
     public void Dispose()
     {
+        disposed = true;
         running = false;
         feedChannel.Writer.TryComplete();
         scheduler.Stop();

@@ -23,7 +23,7 @@ public sealed class MediaSessionService : IDisposable
 
     private readonly Lock audioWiringLock = new();
     private IAudioSource? pendingAudioCapture;
-    private int pendingAudioBitrateBps = 32000;
+    private int pendingAudioBitrateBps = 128000;
     private int hostGeneration;
 
     private Stopwatch? hostSessionClock;
@@ -152,7 +152,7 @@ public sealed class MediaSessionService : IDisposable
         int bitrateKbps,
         int fps = 15,
         SupportedVideoCodec codec = SupportedVideoCodec.H264,
-        int audioBitrateBps = 32000)
+        int audioBitrateBps = 128000)
     {
         StopHosting();
         HostLastError = null;
@@ -401,7 +401,7 @@ public sealed class MediaSessionService : IDisposable
         audioEncoder = null;
     }
 
-    public void UpdateAudioSource(IAudioSource? audioCapture, int audioBitrateBps = 32000)
+    public void UpdateAudioSource(IAudioSource? audioCapture, int audioBitrateBps = 128000)
     {
         lock (audioWiringLock)
         {

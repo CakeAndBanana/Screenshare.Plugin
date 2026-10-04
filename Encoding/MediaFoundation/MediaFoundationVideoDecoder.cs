@@ -343,8 +343,11 @@ public sealed class MediaFoundationVideoDecoder : IVideoDecoder
                 }
             }
         }
-        catch (Exception ex) when (running)
+        catch (Exception ex)
         {
+            if (!running)
+                return;
+
             RecordError("DecodeLoop (network -> Media Foundation decoder)", ex);
         }
     }

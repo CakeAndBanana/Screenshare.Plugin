@@ -227,8 +227,11 @@ public sealed class LibavVideoEncoder : IVideoEncoder
                 pacer.Wait(frameIndex * 1000 / fps - clock.ElapsedMilliseconds);
             }
         }
-        catch (Exception ex) when (running)
+        catch (Exception ex)
         {
+            if (!running)
+                return;
+
             ServiceCollector.PluginLog.Error(ex, "ScreenShare libavcodec encoder stopped");
             LastError = ex;
             running = false;

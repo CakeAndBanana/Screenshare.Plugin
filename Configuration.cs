@@ -23,7 +23,7 @@ public sealed class Configuration : IPluginConfiguration
 
     public int VideoCodecIndex { get; set; }
 
-    public int AudioBitrateKbps { get; set; } = 32;
+    public int AudioBitrateKbps { get; set; } = 128;
 
     public bool AutoStartAudioWithStream { get; set; } = true;
 

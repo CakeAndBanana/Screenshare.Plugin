@@ -17,7 +17,7 @@ public sealed class SettingsWindow : Window, IDisposable
     private const int MinVideoFps = 5;
     private const int MaxVideoFps = 60;
     private const int MinAudioBitrateKbps = 8;
-    private const int MaxAudioBitrateKbps = 64;
+    private const int MaxAudioBitrateKbps = 256;
     private const int MaxVolumePercent = (int)(Configuration.MaxViewerVolume * 100f);
 
     private readonly Func<bool> isStreaming;
