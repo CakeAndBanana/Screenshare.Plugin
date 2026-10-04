@@ -106,6 +106,7 @@ public sealed class SpeakerMixWaveProvider : IWaveProvider
             float left = samples[frame * 2];
             float right = samples[(frame * 2) + 1];
 
+            // Smoothly interpolate the gains and volume towards their target values using a ramping factor.
             leftToLeft += (targetLeftToLeft - leftToLeft) * rampAlpha;
             leftToRight += (targetLeftToRight - leftToRight) * rampAlpha;
             rightToLeft += (targetRightToLeft - rightToLeft) * rampAlpha;

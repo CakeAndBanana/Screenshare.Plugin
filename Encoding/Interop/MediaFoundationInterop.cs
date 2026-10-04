@@ -2,6 +2,10 @@
 
 namespace ScreenShare.Plugin.Encoding.Interop;
 
+/// <summary>
+/// Media Foundation interop definitions for enumerating and interacting with Media Foundation Transforms (MFTs) for video encoding and decoding.
+/// Microsoft's documentation on Media Foundation can be found at: https://learn.microsoft.com/en-us/windows/win32/medfound/media-foundation-portal
+/// </summary>
 internal static class MediaFoundationInterop
 {
     [StructLayout(LayoutKind.Sequential)]

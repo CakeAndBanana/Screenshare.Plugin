@@ -1,5 +1,8 @@
 ﻿namespace ScreenShare.Plugin.Encoding.Interfaces;
 
+/// <summary>
+/// Interface for a video decoder that decodes video chunks and provides decoded frames for display.
+/// </summary>
 public interface IVideoDecoder : IDisposable
 {
     int Width { get; }

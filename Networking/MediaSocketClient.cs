@@ -13,19 +13,10 @@ public sealed class MediaSocketClient : IAsyncDisposable
 {
     private const int SendQueueCapacity = 512;
     private const int AudioQueueCapacity = 256;
-
-    // Queued video older than this means the upload isn't keeping up; see StaleVideoGate.
-    // Matches the viewers' default playout buffer, so it's the most they can absorb.
     private const long MaxVideoQueueAgeMs = 500;
 
     private readonly StaleVideoGate staleVideoGate = new(MaxVideoQueueAgeMs);
-
-    // A streamer's OS send buffer holds whatever the upload hasn't sent yet, out of sight of the
-    // StaleVideoGate; Windows' auto-tuning let it hide ~1.5s at 3Mbps. Pinned so the backlog stays
-    // in sendQueue where it's measured. 128KB still allows ~7Mbps at a 150ms round trip.
     private const int StreamerSendBufferBytes = 128 * 1024;
-
-    // How often a viewer tells the relay how far it has got; see MediaMessageType.Ack.
     private static readonly TimeSpan AckInterval = TimeSpan.FromMilliseconds(50);
 
     private readonly Channel<QueuedVideo> sendQueue = Channel.CreateBounded<QueuedVideo>(new BoundedChannelOptions(SendQueueCapacity)
@@ -90,6 +81,7 @@ public sealed class MediaSocketClient : IAsyncDisposable
     {
         Uri mediaUri = BuildMediaUri(relayUrl, roomId, connectionId, isStreamer, streamerConnectionId);
 
+        // Create a new ClientWebSocket and connect to the media relay server. If the client is a streamer, use a custom HttpMessageInvoker with a small send buffer size for the connection.
         var newSocket = new ClientWebSocket();
         if (isStreamer)
         {
@@ -101,6 +93,7 @@ public sealed class MediaSocketClient : IAsyncDisposable
             await newSocket.ConnectAsync(mediaUri, cancellationToken).ConfigureAwait(false);
         }
 
+        // Start the send and receive loops for the connected socket, and if the client is not a streamer, start the acknowledgment loop as well.
         socket = newSocket;
         cts = new CancellationTokenSource();
         sendLoopTask = Task.Run(() => SendLoopAsync(newSocket, cts.Token), cancellationToken);
@@ -109,15 +102,23 @@ public sealed class MediaSocketClient : IAsyncDisposable
             ackLoopTask = Task.Run(() => AckLoopAsync(cts.Token), cancellationToken);
     }
 
+    /// <summary>
+    /// Connects to the media relay server with a small send buffer size for the socket. 
+    /// </summary>
+    /// <param name="context">The socket connection context.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     private static async ValueTask<Stream> ConnectWithSmallSendBufferAsync(
         SocketsHttpConnectionContext context, CancellationToken cancellationToken)
     {
+        // Create a new TCP socket with the specified send buffer size and no delay option. This is used to connect to the media relay server.
         var tcp = new System.Net.Sockets.Socket(System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp)
         {
             NoDelay = true,
             SendBufferSize = StreamerSendBufferBytes,
         };
 
+        // Connect to the media relay server using the provided context and return a NetworkStream for the connected socket. If the connection fails, dispose of the socket and rethrow the exception.
         try
         {
             await tcp.ConnectAsync(context.DnsEndPoint, cancellationToken).ConfigureAwait(false);
@@ -136,16 +137,19 @@ public sealed class MediaSocketClient : IAsyncDisposable
     /// </summary>
     private async Task AckLoopAsync(CancellationToken cancellationToken)
     {
+        // Keep track of the last acknowledged PTS to avoid sending duplicate acknowledgments.
         long ackedPtsMs = long.MinValue;
         using var timer = new PeriodicTimer(AckInterval);
         try
         {
+            // Loop that periodically checks for new received PTS values and sends acknowledgments to the media relay server if there are any new PTS values since the last acknowledgment.
             while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
                 long receivedPtsMs = Interlocked.Read(ref lastReceivedPtsMs);
                 if (receivedPtsMs <= ackedPtsMs)
                     continue;
 
+                // Create an acknowledgment message with the new received PTS and send it to the media relay server using the reliable queue.
                 byte[] ack = new byte[1 + sizeof(long)];
                 ack[0] = (byte)MediaMessageType.Ack;
                 BitConverter.GetBytes(receivedPtsMs).CopyTo(ack, 1);
@@ -155,6 +159,7 @@ public sealed class MediaSocketClient : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
+            // The loop was canceled, which is expected when the client is disposed or disconnected. No action is needed.
         }
     }
 

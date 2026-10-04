@@ -11,10 +11,6 @@ internal sealed class PresentationScheduler<TFrame> : IDisposable
 {
     private const long SyncToleranceMs = 40;
     private const long MaxFrameHoldMs = 100;
-
-    // Upper bound on how far the audio clock can trail live: its buffer widens on underruns up to
-    // 3x a 500ms maximum, plus burst headroom and the output device. Video must be able to wait
-    // that long, or frames due soon get evicted.
     private const int MaxBufferedMs = 2000;
 
     private readonly Channel<(long PtsMs, TFrame Frame)> queue;

@@ -3,6 +3,9 @@ using ScreenShare.Plugin.Networking.Models;
 
 namespace ScreenShare.Plugin.Networking;
 
+/// <summary>
+/// SignalR client for connecting to a room hub on the relay server. This class manages the connection, handles events, and provides methods for interacting with rooms and members.
+/// </summary>
 public sealed class RoomHubClient : IAsyncDisposable
 {
     private HubConnection? connection;

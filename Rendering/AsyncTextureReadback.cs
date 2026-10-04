@@ -7,7 +7,7 @@ using Device = SharpDX.Direct3D11.Device;
 namespace ScreenShare.Plugin.Rendering;
 
 /// <summary>
-/// Aasyncronous texture readback utility that allows reading back frames from a GPU texture to CPU memory without blocking the GPU.
+/// Asyncronous texture readback utility that allows reading back frames from a GPU texture to CPU memory without blocking the GPU.
 /// It uses a double-buffering approach to ensure that the GPU can continue rendering while the CPU reads back the previous frame. 
 /// </summary>
 public sealed class AsyncTextureReadback : IDisposable

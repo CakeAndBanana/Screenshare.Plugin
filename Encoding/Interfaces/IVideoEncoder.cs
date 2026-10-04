@@ -2,6 +2,9 @@
 
 namespace ScreenShare.Plugin.Encoding.Interfaces;
 
+/// <summary>
+/// Interface for video encoders, providing methods and properties for encoding video frames into a specific codec format.
+/// </summary>
 public interface IVideoEncoder : IDisposable
 {
     int Width { get; }

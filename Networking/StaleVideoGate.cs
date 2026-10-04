@@ -3,23 +3,23 @@ using ScreenShare.Plugin.Encoding.Enums;
 namespace ScreenShare.Plugin.Networking;
 
 /// <summary>
-/// Decides, as the host's send loop reaches each queued video message, whether it still goes out.
-/// When the upload can't keep up, the send queue fills long before it overflows (512 messages is
-/// ~8s at 60fps), and every viewer ends up that far behind live. Instead, once the oldest message
-/// has waited longer than <c>maxAgeMs</c>, video is discarded up to the next fresh resync point -
-/// the same flush the relay does for a slow viewer - and each discard counts as a drop, which is
-/// what makes the bitrate adaptation back off.
+/// Gates a gate that discards stale video messages and waits for a resync point before resuming transmission.
 /// </summary>
+/// <param name="maxAgeMs"></param>
 internal sealed class StaleVideoGate(long maxAgeMs)
 {
-    // Framed video message: type byte, 8-byte PTS, then the Annex-B access unit.
     private const int PayloadOffset = 1 + sizeof(long);
 
     private bool waitingForResync;
 
     public SupportedVideoCodec Codec { get; set; }
 
-    /// <summary>True when the message should be sent; false when it is discarded as stale.</summary>
+    /// <summary>
+    /// Admits a framed video message if it is not stale, or if it is a resync point after a stale message.
+    /// </summary>
+    /// <param name="ageMs">The age of the message in milliseconds.</param>
+    /// <param name="framedMessage">The framed video message to evaluate.</param>
+    /// <returns></returns>
     public bool Admit(long ageMs, byte[] framedMessage)
     {
         bool stale = ageMs > maxAgeMs;
@@ -29,8 +29,7 @@ internal sealed class StaleVideoGate(long maxAgeMs)
         if (!waitingForResync)
             return true;
 
-        // Resume only on a resync point that is itself fresh: a keyframe that waited behind the
-        // backlog is still late, and sending it would put viewers straight back behind live.
+        // If we are waiting for a resync point, only admit the message if it is a resync point.
         if (stale || !IsResyncPoint(framedMessage, Codec))
             return false;
 
@@ -38,20 +37,26 @@ internal sealed class StaleVideoGate(long maxAgeMs)
         return true;
     }
 
-    // Parameter sets count too, because they may arrive as their own chunk just before the IDR;
-    // this mirrors the relay's RoomMediaChannel.IsResyncPoint.
+    /// <summary>
+    /// Is the framed message a resync point for the given codec?
+    /// </summary>
+    /// <param name="framedMessage">The framed video message to evaluate.</param>
+    /// <param name="codec">The video codec to check against.</param>
+    /// <returns>True if the message is a resync point for the given codec; otherwise, false.</returns>
     internal static bool IsResyncPoint(byte[] framedMessage, SupportedVideoCodec codec)
     {
         if (framedMessage.Length <= PayloadOffset)
             return false;
 
         ReadOnlySpan<byte> data = framedMessage.AsSpan(PayloadOffset);
+        // Look for the start code prefix (0x000001) in the data.
         for (int i = 0; i + 3 < data.Length; i++)
         {
             if (data[i] != 0 || data[i + 1] != 0 || data[i + 2] != 1)
                 continue;
 
             byte header = data[i + 3];
+            // Check the NAL unit type for the given codec.
             if (codec == SupportedVideoCodec.Hevc)
             {
                 int type = (header >> 1) & 0x3F;

@@ -55,12 +55,14 @@ public sealed class OpusFrameEncoder
         int offset = 0;
         while (offset < interleavedSamples.Length)
         {
+            // Copy as many samples as we can into the accumulator.
             int need = accumulator.Length - accumulatedSamples;
             int take = Math.Min(need, interleavedSamples.Length - offset);
             interleavedSamples.Slice(offset, take).CopyTo(accumulator.AsSpan(accumulatedSamples));
             accumulatedSamples += take;
             offset += take;
 
+            // If we have enough samples to encode a frame, encode it and raise the PacketEncoded event.
             if (accumulatedSamples == accumulator.Length)
             {
                 byte[] packet = new byte[MaxPacketBytes];
