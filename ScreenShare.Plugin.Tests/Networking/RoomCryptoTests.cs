@@ -45,7 +45,7 @@ public class RoomCryptoTests
     {
         byte[] message = RoomCrypto.Create("taartje", Salt).Seal(Header, Body);
 
-        Assert.False(RoomCrypto.Create("taartje", Salt).TryOpen(message, Header.Length, out _));
+        Assert.False(RoomCrypto.Create("taartje2", Salt).TryOpen(message, Header.Length, out _));
     }
 
     [Fact]
