@@ -7,7 +7,7 @@ using ScreenShare.Plugin.Networking.Models;
 using ScreenShare.Plugin.Services;
 using ScreenShare.Plugin.Ui.Helpers;
 
-namespace ScreenShare.Plugin.Ui;
+namespace ScreenShare.Plugin.Ui.Views;
 
 internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip identity, Action disconnect)
 {

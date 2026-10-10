@@ -1,11 +1,10 @@
 ﻿using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
-using ScreenShare.Plugin.Networking;
 using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 
-namespace ScreenShare.Plugin.Ui;
+namespace ScreenShare.Plugin.Ui.Views;
 
 public sealed class StreamViewWindow : Window
 {

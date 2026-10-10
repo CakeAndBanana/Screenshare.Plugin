@@ -1,8 +1,8 @@
 ﻿using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using ScreenShare.Plugin.Services;
-using ScreenShare.Plugin.Ui;
 using ScreenShare.Plugin.Ui.Helpers;
+using ScreenShare.Plugin.Ui.Views;
 
 namespace ScreenShare.Plugin;
 

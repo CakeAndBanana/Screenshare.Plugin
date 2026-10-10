@@ -5,7 +5,7 @@ using ScreenShare.Plugin.Rendering;
 using ScreenShare.Plugin.Services;
 using ScreenShare.Plugin.Ui.Helpers;
 
-namespace ScreenShare.Plugin.Ui;
+namespace ScreenShare.Plugin.Ui.Views;
 
 public sealed class WorldScreenWindow : Window
 {
