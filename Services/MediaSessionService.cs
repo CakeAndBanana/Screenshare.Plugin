@@ -210,7 +210,8 @@ public sealed class MediaSessionService : IDisposable
                 var sessionClock = Stopwatch.StartNew();
 
                 encoder = VideoEncoderFactory.Create(
-                    gameAdapterDevice, screenCapture, ffmpegExePath, sessionClock, targetHeight, bitrateKbps, fps, codec);
+                    gameAdapterDevice, screenCapture, ffmpegExePath, sessionClock, targetHeight, bitrateKbps, fps, codec,
+                    ServiceCollector.Config.UseMediaFoundation);
                 WireVideoChunks(encoder);
                 newSocket.SendVideoMetadata(encoder.Width, encoder.Height, codec, fps);
 
@@ -487,7 +488,8 @@ public sealed class MediaSessionService : IDisposable
                 viewerDevice, viewerFfmpegExePath, width, height, fps, codec,
                 () => audioDecoder?.EstimatedCurrentPtsMs,
                 () => ServiceCollector.Config.AvSyncOffsetMs,
-                ServiceCollector.Config.PlaybackLatencyMs);
+                ServiceCollector.Config.PlaybackLatencyMs,
+                ServiceCollector.Config.UseMediaFoundation);
             decoder.ReadyToDisplay += OnVideoReadyToDisplay;
             videoDecoder = decoder;
         }

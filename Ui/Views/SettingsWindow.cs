@@ -190,6 +190,20 @@ public sealed class SettingsWindow : Window, IDisposable
             ImGui.SetTooltip("When off, the screen placed in the world never appears for you - streams play in the popout window only.");
 
         DrawWorldScreenDisplaySettings(config, labelWidth);
+
+        UiTheme.SectionLabel("Compatibility");
+
+        bool useMediaFoundation = config.UseMediaFoundation;
+        if (ImGui.Checkbox("Use Windows hardware video encoding/decoding", ref useMediaFoundation))
+        {
+            config.UseMediaFoundation = useMediaFoundation;
+            ServiceCollector.PI.SavePluginConfig(config);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Uses Media Foundation for streaming and watching. Turn this off if the game crashes when you start.");
+        }
     }
 
     private void DrawListeningSettings(Configuration config)

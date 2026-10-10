@@ -61,6 +61,8 @@ public sealed class Configuration : IPluginConfiguration
 
     public bool ShowWorldScreen { get; set; } = true;
 
+    public bool UseMediaFoundation { get; set; } = true;
+
     public List<ScreenPreset> ScreenPresets { get; set; } = [];
 
     public bool Migrate()
