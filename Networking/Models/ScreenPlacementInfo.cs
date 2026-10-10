@@ -11,4 +11,5 @@ public sealed record ScreenPlacementInfo(
     float SpeakerSpread,
     float FalloffStart,
     float FalloffEnd,
-    long Version);
+    long Version,
+    uint WorldId = 0);

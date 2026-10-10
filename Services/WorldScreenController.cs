@@ -168,10 +168,22 @@ public sealed class WorldScreenController : IDisposable
     {
         placement = roomSession.InRoom ? roomSession.ScreenPlacement : null;
 
-        if (placement is null)
+        return placement is not null && IsPlacedHere(placement);
+    }
+
+    /// <summary>The world the local player is standing on, or 0 while that isn't known (loading screens, title).</summary>
+    public static uint CurrentWorldId => ServiceCollector.Objects.LocalPlayer?.CurrentWorld.RowId ?? 0;
+
+    /// <summary>
+    /// Whether the placement is in this zone on this world. A placement without a world (from an older
+    /// client or relay) shows on every world.
+    /// </summary>
+    public static bool IsPlacedHere(ScreenPlacementInfo placement)
+    {
+        if (placement.TerritoryType != ServiceCollector.ClientState.TerritoryType)
             return false;
 
-        return placement.TerritoryType == ServiceCollector.ClientState.TerritoryType;
+        return placement.WorldId == 0 || placement.WorldId == CurrentWorldId;
     }
 
     public static PanelFrame BuildFrame(ScreenPlacementInfo placement, int textureWidth, int textureHeight)
@@ -373,7 +385,8 @@ public sealed class WorldScreenController : IDisposable
             SpeakerSpread: existing?.SpeakerSpread ?? 1f,
             FalloffStart: existing?.FalloffStart ?? 8f,
             FalloffEnd: existing?.FalloffEnd ?? 25f,
-            Version: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            Version: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            WorldId: player.CurrentWorld.RowId);
     }
 
     public static ScreenPlacementInfo Nudge(ScreenPlacementInfo placement, float sidewaysMeters, float forwardMeters)

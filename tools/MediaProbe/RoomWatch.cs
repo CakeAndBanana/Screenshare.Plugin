@@ -38,6 +38,7 @@ internal static class RoomWatch
         await using var hub = new RoomHubClient();
         var gate = new SemaphoreSlim(1, 1);
         StreamMonitor? monitor = null;
+        RoomCrypto? crypto = null;
         var totals = new StreamTotals();
         string? endReason = null;
 
@@ -67,7 +68,7 @@ internal static class RoomWatch
                 }
 
                 var next = new StreamMonitor(log, target.ConnectionId, target.DisplayName, bufferMs, limitKbps, sendAcks);
-                await next.StartAsync(hub.RelayUrl!, roomId, hub.ConnectionId!).ConfigureAwait(false);
+                await next.StartAsync(hub.RelayUrl!, roomId, hub.ConnectionId!, crypto).ConfigureAwait(false);
                 monitor = next;
                 log.Event($"watching {target.DisplayName}");
             }
@@ -91,12 +92,36 @@ internal static class RoomWatch
         log.Event($"connecting to {hubUrl}");
         await hub.ConnectAsync(hubUrl).ConfigureAwait(false);
 
-        JoinRoomResult joined = await hub.JoinRoomAsync(roomId, password, $"probe-{Guid.NewGuid():N}", displayName)
-            .ConfigureAwait(false);
-        if (!joined.Success)
+        // Hold the monitor gate until the media key is in place, so a streamer announced right after the join
+        // isn't watched without it.
+        await gate.WaitAsync().ConfigureAwait(false);
+        JoinRoomResult joined;
+        try
         {
-            Console.Error.WriteLine($"Could not join room {roomId}: {joined.Error}");
-            return 2;
+            // Same as the plugin: the relay checks a value derived from the password, never the password itself.
+            string auth = password.Length == 0 ? string.Empty : RoomCrypto.DeriveAuth(password);
+            joined = await hub.JoinRoomAsync(roomId, auth, $"probe-{Guid.NewGuid():N}", displayName).ConfigureAwait(false);
+            if (!joined.Success)
+            {
+                Console.Error.WriteLine($"Could not join room {roomId}: {joined.Error}");
+                return 2;
+            }
+
+            if (joined.KeySalt is { } keySalt)
+            {
+                if (!RoomCrypto.IsSupported)
+                {
+                    Console.Error.WriteLine($"Room {roomId} is end-to-end encrypted, but AES-GCM isn't available here.");
+                    return 2;
+                }
+
+                crypto = RoomCrypto.Create(password, keySalt);
+                log.Event("room is end-to-end encrypted; decrypting with the key from --password");
+            }
+        }
+        finally
+        {
+            gate.Release();
         }
 
         log.Event($"joined \"{joined.RoomName}\" on {joined.InstanceId} ({hub.RelayUrl}) as \"{displayName}\"");
@@ -173,13 +198,13 @@ internal sealed class StreamMonitor(WatchLog log, string streamerConnectionId, s
 
     public string StreamerName => streamerName;
 
-    public async Task StartAsync(string relayUrl, string roomId, string selfConnectionId)
+    public async Task StartAsync(string relayUrl, string roomId, string selfConnectionId, RoomCrypto? crypto)
     {
         socket.VideoMetadataReceived += OnVideoMetadata;
         socket.AudioMetadataReceived += OnAudioMetadata;
         socket.VideoChunkReceived += OnVideo;
         socket.AudioPacketReceived += OnAudio;
-        await socket.ConnectAsync(relayUrl, roomId, selfConnectionId, streamerConnectionId).ConfigureAwait(false);
+        await socket.ConnectAsync(relayUrl, roomId, selfConnectionId, streamerConnectionId, crypto).ConfigureAwait(false);
     }
 
     public async Task<StreamTotals> StopAsync()

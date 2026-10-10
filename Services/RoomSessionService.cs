@@ -32,7 +32,8 @@ public sealed class RoomSessionService : IDisposable
     private const int MaxLoggedEvents = 200;
     private readonly Lock eventsLock = new();
     private readonly List<RoomEvent> events = [];
-    private string? lastRoomPassword;
+    // What the relay checks a (re)join against: RoomCrypto.DeriveAuth of the password, never the password.
+    private string? lastRoomAuth;
 
     private bool hasStreamerBaseline;
 
@@ -57,6 +58,11 @@ public sealed class RoomSessionService : IDisposable
     public bool RoomIsPublic { get; private set; }
 
     public bool RoomHasPassword { get; private set; }
+
+    /// <summary>The media key for an end-to-end encrypted room, or null when the room's media is in the clear.</summary>
+    public RoomCrypto? MediaCrypto { get; private set; }
+
+    public bool RoomIsEncrypted => MediaCrypto is not null;
 
     public bool IsHost { get; private set; }
 
@@ -488,7 +494,7 @@ public sealed class RoomSessionService : IDisposable
         try
         {
             JoinRoomResult result = await client.JoinRoomAsync(
-                roomId, lastRoomPassword ?? string.Empty, ServiceCollector.Config.ClientId, ServiceCollector.Config.DisplayName).ConfigureAwait(false);
+                roomId, lastRoomAuth ?? string.Empty, ServiceCollector.Config.ClientId, ServiceCollector.Config.DisplayName).ConfigureAwait(false);
 
             if (result.Success)
             {
@@ -666,18 +672,38 @@ public sealed class RoomSessionService : IDisposable
     public void CreateRoom(string name, bool isPublic, string password, int maxViewers, string? region = null, string? preferredRegion = null)
     {
         LastError = null;
-        lastRoomPassword = password;
-        _ = CreateRoomCoreAsync(new CreateRoomRequest(name, isPublic, string.IsNullOrEmpty(password) ? null : password, maxViewers, region, preferredRegion));
+        _ = CreateRoomCoreAsync(name, isPublic, password, maxViewers, region, preferredRegion);
     }
 
-    private async Task CreateRoomCoreAsync(CreateRoomRequest request)
+    private async Task CreateRoomCoreAsync(string name, bool isPublic, string password, int maxViewers, string? region, string? preferredRegion)
     {
         try
         {
+            // A password room is end-to-end encrypted: the relay gets a value derived from the password to check
+            // joins against, plus a public salt, and never anything it could recover the media key from.
+            string? auth = null;
+            string? keySalt = null;
+            RoomCrypto? crypto = null;
+            if (!string.IsNullOrEmpty(password))
+            {
+                if (RoomCrypto.IsSupported)
+                {
+                    string salt = keySalt = RoomCrypto.NewKeySalt();
+                    (auth, crypto) = await Task.Run(() => (RoomCrypto.DeriveAuth(password), RoomCrypto.Create(password, salt))).ConfigureAwait(false);
+                }
+                else
+                {
+                    auth = await Task.Run(() => RoomCrypto.DeriveAuth(password)).ConfigureAwait(false);
+                }
+            }
+
+            var request = new CreateRoomRequest(name, isPublic, auth, maxViewers, region, preferredRegion, keySalt);
             Configuration config = ServiceCollector.Config;
             CreateRoomResult result = await client.CreateRoomAsync(request, config.ClientId, config.DisplayName).ConfigureAwait(false);
             if (result.Success)
             {
+                lastRoomAuth = auth;
+                MediaCrypto = result.IsEncrypted ? crypto : null;
                 RoomName = result.RoomName ?? request.Name;
                 RoomIsPublic = request.IsPublic;
                 RoomHasPassword = request.Password is not null;
@@ -693,7 +719,11 @@ public sealed class RoomSessionService : IDisposable
                     members.Add(new RoomMemberInfo(ConnectionId!, config.DisplayName, IsHost: true, CanStream: true, ClientIdentity.ToPublicId(config.ClientId)));
                 }
                 RecordEvent($"Room created: {RoomName} ({result.RoomId})");
-                RememberRoom(result.RoomId!, request.Password ?? string.Empty, wasHost: true);
+                if (RoomHasPassword && !RoomIsEncrypted)
+                    RecordEvent(RoomCrypto.IsSupported
+                        ? "This relay doesn't support end-to-end encryption; the room is password protected but its stream isn't encrypted."
+                        : "End-to-end encryption isn't available on this system; the room is password protected but its stream isn't encrypted.");
+                RememberRoom(result.RoomId!, password, wasHost: true);
             }
             else
             {
@@ -709,7 +739,6 @@ public sealed class RoomSessionService : IDisposable
     public void JoinRoom(string roomId, string password)
     {
         LastError = null;
-        lastRoomPassword = password;
         _ = JoinRoomCoreAsync(roomId, password);
     }
 
@@ -717,10 +746,41 @@ public sealed class RoomSessionService : IDisposable
     {
         try
         {
+            string auth = string.IsNullOrEmpty(password)
+                ? string.Empty
+                : await Task.Run(() => RoomCrypto.DeriveAuth(password)).ConfigureAwait(false);
+
             JoinRoomResult result = await client.JoinRoomAsync(
-                roomId, password, ServiceCollector.Config.ClientId, ServiceCollector.Config.DisplayName).ConfigureAwait(false);
+                roomId, auth, ServiceCollector.Config.ClientId, ServiceCollector.Config.DisplayName).ConfigureAwait(false);
             if (result.Success)
             {
+                // The key is in place before the room is, so nothing can start streaming or viewing without it.
+                RoomCrypto? crypto = null;
+                if (result.KeySalt is { } keySalt)
+                {
+                    string? error = !RoomCrypto.IsSupported
+                        ? "This room is end-to-end encrypted, which isn't supported on this system."
+                        : string.IsNullOrEmpty(password) ? "This room is end-to-end encrypted and needs its password." : null;
+                    try
+                    {
+                        if (error is null)
+                            crypto = await Task.Run(() => RoomCrypto.Create(password, keySalt)).ConfigureAwait(false);
+                    }
+                    catch (FormatException)
+                    {
+                        error = "The relay sent an invalid encryption salt for this room.";
+                    }
+
+                    if (crypto is null)
+                    {
+                        LastError = error;
+                        await client.LeaveRoomAsync(roomId).ConfigureAwait(false);
+                        return;
+                    }
+                }
+
+                lastRoomAuth = auth;
+                MediaCrypto = crypto;
                 RoomName = result.RoomName ?? $"Room {roomId}";
                 RoomIsPublic = result.IsPublic;
                 RoomHasPassword = result.HasPassword;
@@ -850,9 +910,10 @@ public sealed class RoomSessionService : IDisposable
         RoomName = null;
         RoomIsPublic = false;
         RoomHasPassword = false;
+        MediaCrypto = null;
         IsHost = false;
         CanStream = false;
-        lastRoomPassword = null;
+        lastRoomAuth = null;
         ScreenPlacement = null;
         hasStreamerBaseline = false;
         hasWatcherBaseline = false;

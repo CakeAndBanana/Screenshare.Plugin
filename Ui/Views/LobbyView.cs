@@ -564,7 +564,11 @@ internal sealed class LobbyView(RoomSessionService roomSession, IdentityChip ide
         ImGui.TextUnformatted("Password");
         ImGui.SetNextItemWidth(width);
         ImGui.InputTextWithHint("##createPassword", "Optional", ref createPassword, 128, ImGuiInputTextFlags.Password);
-        ImGui.TextDisabled(hasPassword ? "Locked: people need the password to join." : "Open: anyone who finds the room can join.");
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + width);
+        ImGui.TextDisabled(hasPassword
+            ? "Locked and end-to-end encrypted: only people with the password can join or see streams. A longer password is harder to crack."
+            : "Open: anyone who finds the room can join.");
+        ImGui.PopTextWrapPos();
 
         ImGui.Spacing();
         ImGui.TextUnformatted("Max viewers");

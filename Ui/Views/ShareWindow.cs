@@ -302,10 +302,19 @@ public sealed class ShareWindow : Window, IDisposable
 
         ImGui.SameLine();
         UiTheme.Pill(roomSession.RoomIsPublic ? "Public" : "Private", roomSession.RoomIsPublic ? UiTheme.PublicGreen : UiTheme.PrivatePurple);
-        if (roomSession.RoomHasPassword)
+        if (roomSession.RoomIsEncrypted)
+        {
+            ImGui.SameLine();
+            UiTheme.Pill("Encrypted", UiTheme.LockedBlue);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("End-to-end encrypted: only people with the room password can see or hear streams.\nThe relay just forwards data it can't read.");
+        }
+        else if (roomSession.RoomHasPassword)
         {
             ImGui.SameLine();
             UiTheme.Pill("Password", UiTheme.LockedBlue);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Password protected, but streams aren't end-to-end encrypted (unsupported by the relay or this system).");
         }
 
         if (mediaSession.IsHosting)
@@ -718,8 +727,8 @@ public sealed class ShareWindow : Window, IDisposable
             ImGui.TextColored(UiTheme.WarnColor, "You've turned the in-world screen off in settings, so you won't see it yourself.");
         ImGui.TextDisabled(placement is null
             ? "Everyone watching sees it once it's placed."
-            : placement.TerritoryType != ServiceCollector.ClientState.TerritoryType
-                ? "Placed in another zone."
+            : !WorldScreenController.IsPlacedHere(placement)
+                ? "Placed in another zone or on another world."
                 : "Shown to everyone watching. Adjust fine-tunes its position and size.");
         ImGui.PopTextWrapPos();
     }
@@ -772,7 +781,7 @@ public sealed class ShareWindow : Window, IDisposable
     private void EnsureDeviceForPlacedScreen()
     {
         if (device is not null || !roomSession.InRoom || roomSession.ScreenPlacement is not { } placement
-            || placement.TerritoryType != ServiceCollector.ClientState.TerritoryType)
+            || !WorldScreenController.IsPlacedHere(placement))
         {
             return;
         }
@@ -799,7 +808,7 @@ public sealed class ShareWindow : Window, IDisposable
         {
             device ??= new GameAdapterDevice(ServiceCollector.PI.UiBuilder);
             string ffmpegPath = Path.Combine(ServiceCollector.PI.AssemblyLocation.DirectoryName!, "ffmpeg", "ffmpeg.exe");
-            mediaSession.StartViewing(roomSession.RelayUrl ?? ServiceCollector.Config.RelayUrl, roomSession.RoomId!, roomSession.ConnectionId!, streamerConnectionId, device, ffmpegPath);
+            mediaSession.StartViewing(roomSession.RelayUrl ?? ServiceCollector.Config.RelayUrl, roomSession.RoomId!, roomSession.ConnectionId!, streamerConnectionId, device, ffmpegPath, roomSession.MediaCrypto);
             previewTexture?.Dispose();
             previewTexture = null;
             lastOpenedViewerVideoHandle = null;
@@ -1027,7 +1036,7 @@ public sealed class ShareWindow : Window, IDisposable
         string ffmpegPath = Path.Combine(ServiceCollector.PI.AssemblyLocation.DirectoryName!, "ffmpeg", "ffmpeg.exe");
         mediaSession.StartHosting(
             roomSession.RelayUrl ?? ServiceCollector.Config.RelayUrl, roomId, connectionId, device, screenCapture, audioCapture, ffmpegPath,
-            Settings.TargetHeight, Settings.VideoBitrateKbps, Settings.VideoFpsTarget, Settings.Codec, Settings.AudioBitrateKbps * 1000);
+            Settings.TargetHeight, Settings.VideoBitrateKbps, Settings.VideoFpsTarget, Settings.Codec, Settings.AudioBitrateKbps * 1000, roomSession.MediaCrypto);
 
         if (Settings.AutoStartAudioWithStream && audioCapture is null)
             StartAudioCapture();

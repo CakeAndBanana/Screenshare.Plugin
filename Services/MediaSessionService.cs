@@ -69,6 +69,18 @@ public sealed class MediaSessionService : IDisposable
 
     public string? ViewerLastError { get; private set; }
 
+    // A few failures are enough to tell; one stray message mid-stream isn't.
+    private const long DecryptFailuresBeforeWarning = 10;
+
+    /// <summary>
+    /// Set when an encrypted stream keeps failing to decrypt and nothing has decrypted yet: the key doesn't match
+    /// the streamer's, which only happens if the relay handed out a wrong salt or altered the media.
+    /// </summary>
+    public string? ViewerDecryptError => viewerSocket is { IsEncrypted: true, DecryptedMessages: 0 } socket
+        && socket.DecryptFailures >= DecryptFailuresBeforeWarning
+            ? "Can't decrypt this stream. The relay may have tampered with it."
+            : null;
+
     public Exception? ViewerLastException { get; private set; }
 
     private readonly record struct LocalPreviewSource(nint SharedHandle, int Width, int Height);
@@ -152,7 +164,8 @@ public sealed class MediaSessionService : IDisposable
         int bitrateKbps,
         int fps = 15,
         SupportedVideoCodec codec = SupportedVideoCodec.H264,
-        int audioBitrateBps = 128000)
+        int audioBitrateBps = 128000,
+        RoomCrypto? crypto = null)
     {
         StopHosting();
         HostLastError = null;
@@ -166,7 +179,7 @@ public sealed class MediaSessionService : IDisposable
             generation = hostGeneration;
         }
 
-        _ = StartHostingCoreAsync(generation, relayUrl, roomId, connectionId, gameAdapterDevice, screenCapture, ffmpegExePath, targetHeight, bitrateKbps, fps, codec);
+        _ = StartHostingCoreAsync(generation, relayUrl, roomId, connectionId, gameAdapterDevice, screenCapture, ffmpegExePath, targetHeight, bitrateKbps, fps, codec, crypto);
     }
 
     private async Task StartHostingCoreAsync(
@@ -180,7 +193,8 @@ public sealed class MediaSessionService : IDisposable
         int targetHeight,
         int bitrateKbps,
         int fps,
-        SupportedVideoCodec codec)
+        SupportedVideoCodec codec,
+        RoomCrypto? crypto)
     {
         // Everything is built into locals and only published under the lock if no StopHosting ran while connecting;
         // otherwise a stop issued mid-connect would be overwritten and the stream would go live anyway.
@@ -189,7 +203,7 @@ public sealed class MediaSessionService : IDisposable
 
         try
         {
-            await newSocket.ConnectAsync(relayUrl, roomId, connectionId, isStreamer: true).ConfigureAwait(false);
+            await newSocket.ConnectAsync(relayUrl, roomId, connectionId, isStreamer: true, roomCrypto: crypto).ConfigureAwait(false);
 
             if (Volatile.Read(ref hostGeneration) == generation)
             {
@@ -417,7 +431,7 @@ public sealed class MediaSessionService : IDisposable
         }
     }
 
-    public void StartViewing(string relayUrl, string roomId, string connectionId, string streamerConnectionId, GameAdapterDevice gameAdapterDevice, string ffmpegExePath)
+    public void StartViewing(string relayUrl, string roomId, string connectionId, string streamerConnectionId, GameAdapterDevice gameAdapterDevice, string ffmpegExePath, RoomCrypto? crypto = null)
     {
         StopViewing();
         ViewerLastError = null;
@@ -425,7 +439,7 @@ public sealed class MediaSessionService : IDisposable
         viewerDevice = gameAdapterDevice;
         viewerFfmpegExePath = ffmpegExePath;
         ViewingStreamerConnectionId = streamerConnectionId;
-        _ = StartViewingCoreAsync(relayUrl, roomId, connectionId, streamerConnectionId);
+        _ = StartViewingCoreAsync(relayUrl, roomId, connectionId, streamerConnectionId, crypto);
     }
 
     public void StartLocalPreview(string selfConnectionId, ICaptureSource capture)
@@ -438,7 +452,7 @@ public sealed class MediaSessionService : IDisposable
         IsViewing = true;
     }
 
-    private async Task StartViewingCoreAsync(string relayUrl, string roomId, string connectionId, string streamerConnectionId)
+    private async Task StartViewingCoreAsync(string relayUrl, string roomId, string connectionId, string streamerConnectionId, RoomCrypto? crypto)
     {
         try
         {
@@ -448,7 +462,7 @@ public sealed class MediaSessionService : IDisposable
             newSocket.AudioMetadataReceived += OnAudioMetadataReceived;
             newSocket.AudioPacketReceived += (ptsMs, packet) => audioDecoder?.Feed(ptsMs, packet);
 
-            await newSocket.ConnectAsync(relayUrl, roomId, connectionId, isStreamer: false, streamerConnectionId).ConfigureAwait(false);
+            await newSocket.ConnectAsync(relayUrl, roomId, connectionId, isStreamer: false, streamerConnectionId, crypto).ConfigureAwait(false);
             viewerSocket = newSocket;
 
             IsViewing = true;

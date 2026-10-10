@@ -21,9 +21,9 @@ public class ScreenPresetStoreTests
     [Fact]
     public void ToPlacement_KeepsEveryFieldAndStampsAFreshVersion()
     {
-        ScreenPlacementInfo original = Placement();
+        ScreenPlacementInfo original = Placement() with { WorldId = 73 };
 
-        ScreenPlacementInfo restored = ScreenPreset.From("Stage", original).ToPlacement();
+        ScreenPlacementInfo restored = ScreenPreset.From("Stage", original).ToPlacement(73);
 
         Assert.Equal(original with { Version = restored.Version }, restored);
         Assert.True(restored.Version > original.Version);

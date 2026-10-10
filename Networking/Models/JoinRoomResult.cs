@@ -7,4 +7,5 @@ public sealed record JoinRoomResult(
     string? Error,
     string? RoomName = null,
     bool IsPublic = false,
-    bool HasPassword = false);
+    bool HasPassword = false,
+    string? KeySalt = null);

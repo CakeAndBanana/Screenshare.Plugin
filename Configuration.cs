@@ -137,7 +137,8 @@ public sealed class ScreenPreset
         SavedUtc = DateTime.UtcNow,
     };
 
-    public ScreenPlacementInfo ToPlacement() => new(
+    /// <summary>Presets are kept per zone, so applying one places it on whichever world you're on.</summary>
+    public ScreenPlacementInfo ToPlacement(uint worldId) => new(
         TerritoryType,
         X,
         Y,
@@ -148,5 +149,6 @@ public sealed class ScreenPreset
         SpeakerSpread,
         FalloffStart,
         FalloffEnd,
-        Version: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        Version: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        WorldId: worldId);
 }

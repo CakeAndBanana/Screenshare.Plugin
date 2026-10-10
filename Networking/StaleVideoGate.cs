@@ -21,6 +21,16 @@ internal sealed class StaleVideoGate(long maxAgeMs)
     /// <param name="framedMessage">The framed video message to evaluate.</param>
     /// <returns></returns>
     public bool Admit(long ageMs, byte[] framedMessage)
+        => Admit(ageMs, framedMessage, isResyncPoint: false);
+
+    /// <summary>
+    /// Admits a video message whose resync status was worked out before it was framed - for an encrypted
+    /// room, where the queued bytes are ciphertext.
+    /// </summary>
+    public bool Admit(long ageMs, bool isResyncPoint) => Admit(ageMs, null, isResyncPoint);
+
+    // The resync scan only runs while waiting for one, and only for a cleartext message.
+    private bool Admit(long ageMs, byte[]? framedMessage, bool isResyncPoint)
     {
         bool stale = ageMs > maxAgeMs;
         if (stale)
@@ -30,7 +40,7 @@ internal sealed class StaleVideoGate(long maxAgeMs)
             return true;
 
         // If we are waiting for a resync point, only admit the message if it is a resync point.
-        if (stale || !IsResyncPoint(framedMessage, Codec))
+        if (stale || !(framedMessage is null ? isResyncPoint : IsResyncPoint(framedMessage, Codec)))
             return false;
 
         waitingForResync = false;
@@ -48,7 +58,14 @@ internal sealed class StaleVideoGate(long maxAgeMs)
         if (framedMessage.Length <= PayloadOffset)
             return false;
 
-        ReadOnlySpan<byte> data = framedMessage.AsSpan(PayloadOffset);
+        return IsResyncChunk(framedMessage.AsSpan(PayloadOffset), codec);
+    }
+
+    /// <summary>
+    /// Is the raw Annex-B chunk (no framing) a resync point for the given codec?
+    /// </summary>
+    internal static bool IsResyncChunk(ReadOnlySpan<byte> data, SupportedVideoCodec codec)
+    {
         // Look for the start code prefix (0x000001) in the data.
         for (int i = 0; i + 3 < data.Length; i++)
         {

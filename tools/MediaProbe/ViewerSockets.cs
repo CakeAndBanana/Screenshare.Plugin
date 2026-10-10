@@ -22,7 +22,7 @@ internal interface IViewerSocket : IAsyncDisposable
 
     Exception? LastError { get; }
 
-    Task ConnectAsync(string relayUrl, string roomId, string connectionId, string streamerConnectionId);
+    Task ConnectAsync(string relayUrl, string roomId, string connectionId, string streamerConnectionId, RoomCrypto? crypto);
 }
 
 /// <summary>The plugin's own client, so a normal watch exercises exactly what a viewer runs.</summary>
@@ -58,8 +58,8 @@ internal sealed class PluginViewerSocket : IViewerSocket
 
     public Exception? LastError => client.LastError;
 
-    public Task ConnectAsync(string relayUrl, string roomId, string connectionId, string streamerConnectionId) =>
-        client.ConnectAsync(relayUrl, roomId, connectionId, isStreamer: false, streamerConnectionId);
+    public Task ConnectAsync(string relayUrl, string roomId, string connectionId, string streamerConnectionId, RoomCrypto? crypto) =>
+        client.ConnectAsync(relayUrl, roomId, connectionId, isStreamer: false, streamerConnectionId, crypto);
 
     public ValueTask DisposeAsync() => client.DisposeAsync();
 }
@@ -82,6 +82,7 @@ internal sealed class ThrottledViewerSocket(int limitKbps, bool sendAcks) : IVie
     private Task? receiveLoop;
     private Task? ackLoop;
     private long lastReceivedPtsMs = long.MinValue;
+    private RoomCrypto? crypto;
 
     public event Action<long, byte[]>? VideoChunkReceived;
 
@@ -95,8 +96,9 @@ internal sealed class ThrottledViewerSocket(int limitKbps, bool sendAcks) : IVie
 
     public Exception? LastError { get; private set; }
 
-    public async Task ConnectAsync(string relayUrl, string roomId, string connectionId, string streamerConnectionId)
+    public async Task ConnectAsync(string relayUrl, string roomId, string connectionId, string streamerConnectionId, RoomCrypto? crypto)
     {
+        this.crypto = crypto;
         var handler = new SocketsHttpHandler
         {
             ConnectCallback = async (context, cancellationToken) =>
@@ -218,6 +220,8 @@ internal sealed class ThrottledViewerSocket(int limitKbps, bool sendAcks) : IVie
             return;
 
         byte[] payload = message[1..];
+        if (crypto is not null && !MediaSocketClient.TryOpenPayload(crypto, message, out payload))
+            return;
         switch ((MediaMessageType)message[0])
         {
             case MediaMessageType.Video when payload.Length >= 8:

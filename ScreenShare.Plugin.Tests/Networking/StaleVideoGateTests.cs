@@ -74,4 +74,15 @@ public class StaleVideoGateTests
         Assert.False(gate.Admit(10, H264Idr)); // 0x65 isn't an IRAP under HEVC's header layout
         Assert.True(gate.Admit(10, Frame(19 << 1)));
     }
+
+    [Fact]
+    public void Admit_PrecomputedResyncFlag_ResumesOnlyOnAFlaggedMessage()
+    {
+        var gate = new StaleVideoGate(MaxAgeMs);
+
+        Assert.False(gate.Admit(MaxAgeMs + 1, isResyncPoint: false));
+        Assert.False(gate.Admit(10, isResyncPoint: false));
+        Assert.True(gate.Admit(10, isResyncPoint: true));
+        Assert.True(gate.Admit(10, isResyncPoint: false));
+    }
 }

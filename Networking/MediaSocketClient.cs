@@ -48,10 +48,25 @@ public sealed class MediaSocketClient : IAsyncDisposable
     private CancellationTokenSource? cts;
     private long droppedMessages;
     private long droppedAudioMessages;
+    private long decryptFailures;
+    private long decryptedMessages;
+
+    // Set for an end-to-end encrypted room: media is sealed before it is queued and opened as it arrives.
+    private RoomCrypto? crypto;
+
+    // In an encrypted room, the byte after the PTS (or after the type, for metadata) carries flags in the clear.
+    private const byte KeyframeFlag = 0x01;
 
     public long DroppedMessages => Interlocked.Read(ref droppedMessages);
 
     public long DroppedAudioMessages => Interlocked.Read(ref droppedAudioMessages);
+
+    /// <summary>Messages that failed to decrypt: a wrong key, or something altered them on the way.</summary>
+    public long DecryptFailures => Interlocked.Read(ref decryptFailures);
+
+    public long DecryptedMessages => Interlocked.Read(ref decryptedMessages);
+
+    public bool IsEncrypted => crypto is not null;
 
     public event Action<long, byte[]>? VideoChunkReceived;
 
@@ -73,12 +88,14 @@ public sealed class MediaSocketClient : IAsyncDisposable
     /// <param name="connectionId">The ID of the connection.</param>
     /// <param name="isStreamer">A value indicating whether the client is a streamer.</param>
     /// <param name="streamerConnectionId">The ID of the streamer connection (if applicable).</param>
+    /// <param name="roomCrypto">The room's media key for an end-to-end encrypted room, or null for an unencrypted one.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
     public async Task ConnectAsync(
         string relayUrl, string roomId, string connectionId, bool isStreamer,
-        string? streamerConnectionId = null, CancellationToken cancellationToken = default)
+        string? streamerConnectionId = null, RoomCrypto? roomCrypto = null, CancellationToken cancellationToken = default)
     {
+        crypto = roomCrypto;
         Uri mediaUri = BuildMediaUri(relayUrl, roomId, connectionId, isStreamer, streamerConnectionId);
 
         // Create a new ClientWebSocket and connect to the media relay server. If the client is a streamer, use a custom HttpMessageInvoker with a small send buffer size for the connection.
@@ -198,16 +215,43 @@ public sealed class MediaSocketClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Sends a media message of the specified type with the given payload to the media relay server.
+    /// Frames a media message: <c>type || pts? || body</c>, or for an encrypted room
+    /// <c>type || pts? || flags || nonce || ciphertext || tag</c> with the cleartext prefix authenticated.
     /// </summary>
     /// <param name="type">The type of the media message.</param>
-    /// <param name="payload">The payload of the media message.</param>
-    public void Send(MediaMessageType type, byte[] payload)
+    /// <param name="ptsMs">The presentation timestamp, for video and audio; null for metadata.</param>
+    /// <param name="flags">Cleartext flags for the relay (encrypted rooms only).</param>
+    /// <param name="body">The message body.</param>
+    /// <returns>The framed message.</returns>
+    private byte[] Frame(MediaMessageType type, long? ptsMs, byte flags, byte[] body)
     {
-        byte[] framed = new byte[payload.Length + 1];
-        framed[0] = (byte)type;
-        Buffer.BlockCopy(payload, 0, framed, 1, payload.Length);
+        int ptsLength = ptsMs is null ? 0 : sizeof(long);
+        int headerLength = 1 + ptsLength + (crypto is null ? 0 : 1);
+        Span<byte> header = stackalloc byte[headerLength];
+        header[0] = (byte)type;
+        if (ptsMs is { } pts)
+            BitConverter.TryWriteBytes(header[1..], pts);
 
+        if (crypto is not null)
+        {
+            header[^1] = flags;
+            return crypto.Seal(header, body);
+        }
+
+        byte[] framed = new byte[headerLength + body.Length];
+        header.CopyTo(framed);
+        Buffer.BlockCopy(body, 0, framed, headerLength, body.Length);
+        return framed;
+    }
+
+    /// <summary>
+    /// Queues a framed media message for sending to the media relay server.
+    /// </summary>
+    /// <param name="type">The type of the media message.</param>
+    /// <param name="framed">The framed message.</param>
+    /// <param name="isResyncPoint">For encrypted video, whether it is a keyframe; cleartext video is inspected when needed.</param>
+    private void Enqueue(MediaMessageType type, byte[] framed, bool isResyncPoint = false)
+    {
         // For video and audio metadata, we use the reliable queue to ensure they are sent reliably.
         if (type is MediaMessageType.VideoMetadata or MediaMessageType.AudioMetadata)
         {
@@ -229,39 +273,30 @@ public sealed class MediaSocketClient : IAsyncDisposable
         if (sendQueue.Reader.Count >= SendQueueCapacity)
             Interlocked.Increment(ref droppedMessages);
 
-        sendQueue.Writer.TryWrite(new QueuedVideo(Stopwatch.GetTimestamp(), framed));
+        sendQueue.Writer.TryWrite(new QueuedVideo(Stopwatch.GetTimestamp(), framed, isResyncPoint));
     }
 
-    private readonly record struct QueuedVideo(long EnqueuedAt, byte[] Message);
+    private readonly record struct QueuedVideo(long EnqueuedAt, byte[] Message, bool IsResyncPoint);
 
     /// <summary>
     /// Sends a video chunk with the specified presentation timestamp (PTS) in milliseconds and the given chunk data to the media relay server.
     /// </summary>
     /// <param name="ptsMs">The presentation timestamp (PTS) in milliseconds.</param>
     /// <param name="chunk">The video chunk data.</param>
-    public void SendVideoChunk(long ptsMs, byte[] chunk) => Send(MediaMessageType.Video, WithPts(ptsMs, chunk));
+    public void SendVideoChunk(long ptsMs, byte[] chunk)
+    {
+        // Once encrypted the chunk can't be inspected, so the keyframe check happens here, on the plaintext.
+        bool isResyncPoint = crypto is not null && StaleVideoGate.IsResyncChunk(chunk, staleVideoGate.Codec);
+        Enqueue(MediaMessageType.Video, Frame(MediaMessageType.Video, ptsMs, isResyncPoint ? KeyframeFlag : (byte)0, chunk), isResyncPoint);
+    }
 
     /// <summary>
     /// Sends an audio packet with the specified presentation timestamp (PTS) in milliseconds and the given packet data to the media relay server.
     /// </summary>
     /// <param name="ptsMs">The presentation timestamp (PTS) in milliseconds.</param>
     /// <param name="packet">The audio packet data.</param>
-    public void SendAudioPacket(long ptsMs, byte[] packet) => Send(MediaMessageType.Audio, WithPts(ptsMs, packet));
-
-    /// <summary>
-    /// Adds the presentation timestamp (PTS) in milliseconds to the beginning of the given data and returns a new byte array containing the PTS followed by the original data.
-    /// </summary>
-    /// <param name="ptsMs">The presentation timestamp (PTS) in milliseconds.</param>
-    /// <param name="data">The original data.</param>
-    /// <returns>A new byte array containing the PTS followed by the original data.</returns>
-    private static byte[] WithPts(long ptsMs, byte[] data)
-    {
-        // Create a new byte array with enough space for the PTS (8 bytes) and the original data
-        byte[] payload = new byte[8 + data.Length];
-        BitConverter.GetBytes(ptsMs).CopyTo(payload, 0);
-        Buffer.BlockCopy(data, 0, payload, 8, data.Length);
-        return payload;
-    }
+    public void SendAudioPacket(long ptsMs, byte[] packet)
+        => Enqueue(MediaMessageType.Audio, Frame(MediaMessageType.Audio, ptsMs, 0, packet));
 
     /// <summary>
     /// Sends video metadata with the specified width, height, codec, and frames per second (FPS) to the media relay server.
@@ -281,7 +316,7 @@ public sealed class MediaSocketClient : IAsyncDisposable
         payload[8] = (byte)codec;
         staleVideoGate.Codec = codec;
         BitConverter.GetBytes((ushort)Math.Clamp(fps, 1, ushort.MaxValue)).CopyTo(payload, 9);
-        Send(MediaMessageType.VideoMetadata, payload);
+        Enqueue(MediaMessageType.VideoMetadata, Frame(MediaMessageType.VideoMetadata, null, 0, payload));
     }
 
     /// <summary>
@@ -295,7 +330,7 @@ public sealed class MediaSocketClient : IAsyncDisposable
         byte[] payload = new byte[8];
         BitConverter.GetBytes(sampleRate).CopyTo(payload, 0);
         BitConverter.GetBytes(channels).CopyTo(payload, 4);
-        Send(MediaMessageType.AudioMetadata, payload);
+        Enqueue(MediaMessageType.AudioMetadata, Frame(MediaMessageType.AudioMetadata, null, 0, payload));
     }
 
     /// <summary>
@@ -335,7 +370,10 @@ public sealed class MediaSocketClient : IAsyncDisposable
                         return;
 
                     long ageMs = (long)Stopwatch.GetElapsedTime(video.EnqueuedAt).TotalMilliseconds;
-                    if (!staleVideoGate.Admit(ageMs, video.Message))
+                    bool admitted = crypto is null
+                        ? staleVideoGate.Admit(ageMs, video.Message)
+                        : staleVideoGate.Admit(ageMs, video.IsResyncPoint);
+                    if (!admitted)
                     {
                         // Counted as a drop so the bitrate adaptation backs off.
                         Interlocked.Increment(ref droppedMessages);
@@ -393,7 +431,10 @@ public sealed class MediaSocketClient : IAsyncDisposable
                     continue;
 
                 // The first byte of the message indicates the type of media message, and the rest is the payload.
-                byte[] payload = message[1..];
+                // In an encrypted room the payload is opened first and comes back in the cleartext layout.
+                if (!TryGetPayload(message, out byte[] payload))
+                    continue;
+
                 switch ((MediaMessageType)message[0])
                 {
                     case MediaMessageType.Video when payload.Length >= 8:
@@ -420,6 +461,48 @@ public sealed class MediaSocketClient : IAsyncDisposable
         {
             LastError = ex;
         }
+    }
+
+    /// <summary>
+    /// Extracts the payload (everything after the type byte) of a received message, decrypting it for an
+    /// encrypted room. The decrypted payload is rebuilt as <c>pts? || body</c>, the same as a cleartext one.
+    /// </summary>
+    /// <param name="message">The received message.</param>
+    /// <param name="payload">The payload, if it could be extracted.</param>
+    /// <returns>False for a message that failed to decrypt, which is dropped.</returns>
+    private bool TryGetPayload(byte[] message, out byte[] payload)
+    {
+        if (crypto is null)
+        {
+            payload = message[1..];
+            return true;
+        }
+
+        bool opened = TryOpenPayload(crypto, message, out payload);
+        Interlocked.Increment(ref opened ? ref decryptedMessages : ref decryptFailures);
+        return opened;
+    }
+
+    /// <summary>
+    /// Decrypts a received message from an encrypted room into the cleartext payload layout (<c>pts? || body</c>).
+    /// </summary>
+    /// <param name="roomCrypto">The room's media key.</param>
+    /// <param name="message">The received message, type byte included.</param>
+    /// <param name="payload">The decrypted payload.</param>
+    /// <returns>False for a message that is malformed, altered, or sealed with a different key.</returns>
+    internal static bool TryOpenPayload(RoomCrypto roomCrypto, byte[] message, out byte[] payload)
+    {
+        payload = [];
+        var type = (MediaMessageType)message[0];
+        int ptsLength = type is MediaMessageType.Video or MediaMessageType.Audio ? sizeof(long) : 0;
+        int headerLength = 1 + ptsLength + 1;
+        if (!roomCrypto.TryOpen(message, headerLength, out byte[] body))
+            return false;
+
+        payload = new byte[ptsLength + body.Length];
+        Buffer.BlockCopy(message, 1, payload, 0, ptsLength);
+        Buffer.BlockCopy(body, 0, payload, ptsLength, body.Length);
+        return true;
     }
 
     /// <summary>

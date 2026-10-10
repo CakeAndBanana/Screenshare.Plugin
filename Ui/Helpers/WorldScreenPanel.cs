@@ -63,9 +63,9 @@ internal sealed class WorldScreenPanel
                 ? "No screen placed yet. Everyone watching sees it as soon as you place one."
                 : "No screen placed yet. It appears here by itself once the host places one.");
         }
-        else if (placement.TerritoryType != ServiceCollector.ClientState.TerritoryType)
+        else if (!WorldScreenController.IsPlacedHere(placement))
         {
-            ImGui.TextColored(UiTheme.WarnColor, "The screen is placed in another zone, so it isn't being drawn here.");
+            ImGui.TextColored(UiTheme.WarnColor, "The screen is placed in another zone or on another world, so it isn't being drawn here.");
         }
         else if (canPlace)
         {
@@ -145,7 +145,7 @@ internal sealed class WorldScreenPanel
             ImGui.SameLine();
             if (ImGui.Button($"Apply{Id("presetApply")}"))
             {
-                ScreenPlacementInfo applied = selected.ToPlacement();
+                ScreenPlacementInfo applied = selected.ToPlacement(WorldScreenController.CurrentWorldId);
                 SeedSliders(applied);
                 ApplyPlacement(applied);
             }
@@ -161,7 +161,7 @@ internal sealed class WorldScreenPanel
                 ImGui.SetTooltip("Hold Ctrl to delete this preset.");
         }
 
-        bool placedHere = placement is not null && placement.TerritoryType == territory;
+        bool placedHere = placement is not null && WorldScreenController.IsPlacedHere(placement);
         bool overwrites = ScreenPresetStore.Find(config.ScreenPresets, territory, presetName) is not null;
 
         ImGui.SetNextItemWidth(220f);

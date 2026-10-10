@@ -60,6 +60,8 @@ public sealed class StreamViewWindow : Window
     {
         if (mediaSession.ViewerLastError is not null)
             ImGui.TextColored(ErrorColor, $"Media stream error: {mediaSession.ViewerLastError}");
+        if (mediaSession.ViewerDecryptError is { } decryptError)
+            ImGui.TextColored(ErrorColor, decryptError);
 
         RawTextureWrap? texture = getPreviewTexture();
         if (texture is null)
