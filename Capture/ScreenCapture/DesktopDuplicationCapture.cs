@@ -24,6 +24,11 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
     private readonly Thread captureThread;
     private readonly int outputIndex;
 
+    private const int AccessDenied = unchecked((int)0x80070005);
+    private const int AccessDeniedRetries = 2;
+    private const int AccessDeniedRetryDelayMs = 150;
+    private const int RecreateRetryDelayMs = 500;
+
     private readonly Lock duplicationLock = new();
 
     private OutputDuplication duplication;
@@ -223,8 +228,18 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
     {
         try
         {
-            // Attempt to duplicate the output for the specified device
-            return output1.DuplicateOutput(device);
+            // E_ACCESSDENIED means Windows is showing a desktop we may not read
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    return output1.DuplicateOutput(device);
+                }
+                catch (SharpDXException ex) when (ex.ResultCode.Code == AccessDenied && attempt < AccessDeniedRetries)
+                {
+                    Thread.Sleep(AccessDeniedRetryDelayMs);
+                }
+            }
         }
         catch (SharpDXException ex) when (ex.ResultCode == SharpDX.Result.InvalidArg)
         {
@@ -254,7 +269,9 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
             "the driver reported the capture unsupported in this process",
         unchecked((int)0x887A0022) =>
             "another application already holds this monitor's duplication",
-        unchecked((int)0x80070005) => "access was denied, which usually means protected content is on screen",
+        AccessDenied =>
+            "access to the desktop was denied, Windows was showing a secure screen." +
+            " Try dismissing it and restarting the application.",
         unchecked((int)0x887A0026) => "the desktop changed underneath the call",
         unchecked((int)0x887A0028) => "there is no interactive session to capture",
         _ => "the call failed",
@@ -552,7 +569,7 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
                 if (result.Failure)
                 {
                     LastError = new SharpDXException(result);
-                    if (result == SharpDX.DXGI.ResultCode.AccessLost && !TryRecreateDuplication())
+                    if (result == SharpDX.DXGI.ResultCode.AccessLost && !RecreateDuplicationUntilStopped())
                         break;
 
                     continue;
@@ -596,6 +613,26 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
     }
 
     /// <summary>
+    /// Keeps trying to get the duplication back after Windows took it away.
+    /// </summary>
+    /// <returns>True once the duplication is back; false if the capture was stopped while waiting.</returns>
+    private bool RecreateDuplicationUntilStopped()
+    {
+        while (running && !stopRequested.Value)
+        {
+            if (TryRecreateDuplication())
+            {
+                LastError = null;
+                return true;
+            }
+
+            Thread.Sleep(RecreateRetryDelayMs);
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Tries to recreate the desktop duplication object if it has been lost, returning true if successful and false otherwise.
     /// </summary>
     /// <returns></returns>
@@ -610,12 +647,10 @@ public sealed class DesktopDuplicationCapture : ICaptureSource
 
                 duplication.Dispose();
 
-                using DxgiDevice dxgiDevice = device.QueryInterface<DxgiDevice>();
-                using Adapter adapter = dxgiDevice.Adapter;
-                using Output output = GetOutputOrThrow(adapter, outputIndex);
+                using Output output = ResolveOutput(device, outputIndex);
                 using Output1 output1 = output.QueryInterface<Output1>();
 
-                duplication = DuplicateOrThrow(output1, device, output.Description.DeviceName);
+                duplication = DuplicateOrThrow(output1, captureDevice, output.Description.DeviceName);
                 return true;
             }
         }

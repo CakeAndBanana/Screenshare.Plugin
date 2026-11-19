@@ -990,6 +990,12 @@ public sealed class ShareWindow : Window, IDisposable
                    $"Try fully restarting the game. ({ex.Message})";
         }
 
+        if (ex is UnauthorizedAccessException || ex.HResult == unchecked((int)0x80070005))
+        {
+            return "Windows denied access to that application's audio. This usually means the application runs " +
+                   "as administrator (or as another user) while the game does not.";
+        }
+
         return ex.Message;
     }
 

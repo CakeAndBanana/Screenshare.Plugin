@@ -59,7 +59,16 @@ public sealed class WindowCapture : ICaptureSource
         contextLock = gameAdapterDevice.ImmediateContextLock;
         targetWindow = hwnd;
 
-        nint itemPtr = CreateItemForWindow(hwnd);
+        nint itemPtr;
+        try
+        {
+            itemPtr = CreateItemForWindow(hwnd);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw DescribeAccessDenied("opening the window for capture", ex);
+        }
+
         try
         {
             // Get the size of the capture item to determine the initial width and height of the capture.
@@ -100,6 +109,10 @@ public sealed class WindowCapture : ICaptureSource
 
             Marshal.ThrowExceptionForHR(session.StartCapture());
         }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw DescribeAccessDenied("starting the capture session", ex);
+        }
         finally
         {
             Marshal.Release(itemPtr);
@@ -123,7 +136,14 @@ public sealed class WindowCapture : ICaptureSource
         captureThread.Start();
     }
 
-    private const string GraphicsCaptureItemClassName = "Windows.Graphics.Capture.GraphicsCaptureItem";
+    /// <summary>
+    /// Turns a bare "Access is denied." from Windows.Graphics.Capture into an error that names the failing step.
+    /// </summary>
+    private static InvalidOperationException DescribeAccessDenied(string step, Exception ex) =>
+        new($"Windows denied access while {step} (0x{ex.HResult:X8}). Screen capture may be blocked for desktop " +
+            "apps in Windows Settings > Privacy & security, or by an organisation policy.", ex);
+
+    private const string GraphicsCaptureItemClassName ="Windows.Graphics.Capture.GraphicsCaptureItem";
 
     /// <summary>
     /// Creates a GraphicsCaptureItem for the specified window handle (HWND) using the Windows.Graphics.Capture API.
